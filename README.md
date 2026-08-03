@@ -1,263 +1,242 @@
 # Codex Forge
 
-Codex Forge is a Windows-first autonomous engineering controller for an isolated VPS. It runs Codex non-interactively with zero command approvals, isolates every task in a Git worktree, validates changes, repairs failures, requests an independent review, commits successful work, stores evidence, and moves to the next task.
+Codex Forge is a Windows-first controller for long-running, non-interactive Codex engineering work on an isolated development VPS. It stores a durable task queue in SQLite, gives each task its own Git branch and worktree, runs implementation and independent review as separate Codex phases, validates results outside the model, bounds retries and usage, commits successful work locally, and retains raw evidence outside the source repository.
 
-It is intentionally a control plane rather than a giant prompt file.
+Release: **v0.2.0**. License: [MIT](LICENSE).
 
-## What it does
+> [!WARNING]
+> Forge's default `danger-full-access` sandbox and `approval_policy = "never"` are intended only for a dedicated, isolated development or simulation VPS. Do not use this configuration on a personal workstation, a host containing unrelated credentials, or a machine connected to production deployment, live brokerage, live order-routing, or financial-account systems.
 
-- Uses `codex exec --json` with structured JSON Schema outputs.
-- Runs with `approval_policy = "never"` and `danger-full-access` on the isolated VPS.
-- Keeps a durable SQLite task queue.
-- Creates one Git branch and worktree per task.
-- Runs deterministic repository validation outside the model.
-- Feeds exact failures back into bounded repair loops.
-- Runs a separate read-only reviewer before completion.
-- Commits successful tasks and writes a binary-capable patch artifact.
-- Saves raw Codex JSONL, stderr, test logs, summaries, usage, decisions, and reusable patterns.
-- Imports YAML tasks dropped into an inbox.
-- Starts at Windows startup and logon through a non-interactive S4U scheduled task with bounded restart settings.
-- Installs and initializes RTK for command-output reduction.
-- Attempts to add/install Token Optimizer without making it a hard dependency.
+## What Forge proves instead of trusting
 
-## VPS assumptions
+- Every task runs on a task-specific branch in an isolated Git worktree.
+- The controller, not the coding worker, executes configured validation commands and preserves exact exit codes and raw output.
+- Independent review runs separately after implementation and validation.
+- Validation repair and review repair are bounded by attempts, identical-failure detection, timeouts, repair limits, and a token budget.
+- Successful tasks receive a local commit plus a durable evidence package.
+- Interrupted active tasks are recovered from SQLite after controller restart.
+- A blocked or decision-bound task does not prevent an unrelated READY task from running.
+- Codex runs without an interactive terminal and with approval policy `never`.
 
-- Windows 11 or Windows Server. WinGet is optional; the bootstrap falls back to signed installers and portable tools when WinGet is unavailable.
-- The VPS is an isolated development machine where unrestricted Codex access is acceptable.
-- Trading projects are limited to tool-building, simulation, Market Replay/Playback, historical or recorded data, offline analysis, and local test environments. No live broker connection, live trading credential, or order-routing service is installed.
-- Two disks are preferred:
-  - On a C:/D: machine, Forge automatically places active work under `C:\CodexForgeWork` and durable data under `D:\CodexData`.
-  - On a D:/E: machine, it uses `D:\CodexForge` and `E:\CodexData`.
+See [Architecture](docs/ARCHITECTURE.md) for the complete control flow and trust boundaries.
 
-Paths remain configurable, and the detected choices are printed before installation.
+## Requirements
 
-## Publish once to your private GitHub repository
+- Windows 11 or Windows Server 2022 or later
+- Windows PowerShell 5.1 or PowerShell 7
+- An isolated development VPS and an account allowed to create a scheduled task
+- Network access during bootstrap for missing tools
+- An OpenAI account authorized for Codex CLI
+- Git; Node.js LTS and Codex CLI are installed by bootstrap when absent
 
-This package cannot create a remote repository without your GitHub authorization. From the extracted folder on any trusted machine, run:
+WinGet is optional. Bootstrap can use signed vendor installers and portable tooling when WinGet is unavailable. Forge creates a private Python environment in `.venv`; production commands and tests do not rely on a global `python` executable after bootstrap.
 
-```powershell
-.\publish-to-github.ps1 -Repository codex-forge
-```
+## One-command bootstrap
 
-The script installs GitHub CLI when needed, uses your authenticated GitHub account, creates a private repository, and pushes the initial commit. Your VPS can then use normal `git clone` and `git pull`.
-
-## First installation
-
-Run PowerShell as the VPS user that will own the Codex authentication:
+From an elevated PowerShell session in the cloned repository:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass
+Set-ExecutionPolicy -Scope Process Bypass -Force
 .\bootstrap.ps1
 ```
 
-`bootstrap.ps1` installs or configures:
+Bootstrap detects storage drives, creates `.venv`, installs Forge and development checks, writes the machine-local `forge.toml`, initializes durable storage, configures non-interactive Codex defaults, runs tests and lint, and registers the `CodexForge` S4U scheduled task. If Codex is not authenticated, the official one-time login flow is the only interactive setup step.
 
-- Git
-- a private Python 3.12 runtime through uv when system Python is absent
-- Node.js LTS
-- OpenAI Codex CLI
-- ripgrep
-- fd
-- jq
-- ast-grep
-- RTK
-- the Codex Forge virtual environment
-- zero-prompt Codex configuration
-- the SQLite database and storage directories
-- a Windows scheduled task named `CodexForge`
-
-Bootstrap opens the official Codex authentication flow only when the VPS is not already signed in. It works without WinGet and uses `npm.cmd` explicitly to avoid PowerShell execution-policy conflicts. That one-time sign-in is the only interactive setup step; bootstrap then completes the token tooling, registers the daemon, and starts it.
-
-### Different disk paths
-
-The bootstrap detects fixed drives automatically. Override them only when needed:
+Explicit storage roots are supported:
 
 ```powershell
-.\bootstrap.ps1 -ForgeRoot "C:\CodexForgeWork" -DataRoot "D:\CodexData"
+.\bootstrap.ps1 -ForgeRoot "D:\CodexForge" -DataRoot "E:\CodexData"
 ```
 
-### Install without Task Scheduler
+For a validation-only installation without Task Scheduler:
 
 ```powershell
-.\bootstrap.ps1 -SkipScheduledTask
+.\bootstrap.ps1 -SkipScheduledTask -SkipCodexLogin
 ```
+
+After installation:
+
+```powershell
+.\forge.ps1 doctor
+.\forge.ps1 status --json
+```
+
+## Repository and persistent-state boundaries
+
+The Git repository contains controller source, tests, schemas, scripts, templates, and documentation only. Persistent or machine-specific state must live outside it:
+
+```text
+<ForgeRoot>\repositories\       managed project clones
+<ForgeRoot>\worktrees\         isolated task worktrees
+<DataRoot>\forge.db             durable queue and run state
+<DataRoot>\evidence\            prompts, JSONL, raw logs, patches, results
+<DataRoot>\inbox\               YAML task intake
+<DataRoot>\knowledge\           reusable task patterns
+<DataRoot>\logs\                controller and service logs
+<DataRoot>\codex-logs\          Codex logs
+```
+
+`forge.toml`, `.venv`, databases, logs, evidence, worktrees, sessions, `.codex`, authentication files, and machine-local overrides are excluded by `.gitignore`. Never copy a user Codex home or a data root into this repository. Back up the data root separately; do not commit it.
+
+`forge.example.toml` contains configurable Windows examples. Bootstrap writes the active values to the ignored `forge.toml`.
+
+## Configuration
+
+The recommended v0.2.0 policy is:
+
+```toml
+[codex]
+executable = "codex"
+sandbox = "danger-full-access"
+approval_policy = "never"
+extra_args = []
+disabled_features = ["apps", "browser_use", "browser_use_external", "goals", "image_generation", "memories", "multi_agent", "plugins", "skill_search"]
+
+[models]
+implementation = "gpt-5.6-terra"
+review = "gpt-5.6-terra"
+escalation = "gpt-5.6-sol"
+
+[reasoning]
+implementation = "medium"
+review = "medium"
+escalation = "high"
+
+[workers]
+max_parallel = 2
+poll_seconds = 15
+
+[limits]
+task_timeout_minutes = 180
+max_repair_cycles = 2
+max_identical_failures = 2
+max_task_tokens = 2000000
+max_output_chars = 12000
+```
+
+Model identifiers must remain valid for the installed Codex CLI and authenticated account. Routine inventory, queue work, validation, and summaries are local and model-free. Terra/medium handles normal implementation and review; Sol/high is reserved for explicit high/critical risk or escalation.
 
 ## Register a project
 
 Clone through Forge:
 
 ```powershell
-.\forge.ps1 project add market-analyzer `
-  --url https://github.com/YOUR_ACCOUNT/market-analyzer.git `
+.\forge.ps1 project add sample-service `
+  --url https://github.com/OWNER/sample-service.git `
   --default-branch main `
-  --validation "dotnet test --nologo"
+  --validation "python -m pytest"
 ```
 
-Or register an existing local repository:
+Or register an existing local Git repository:
 
 ```powershell
-.\forge.ps1 project add market-analyzer `
-  --repo "D:\Projects\market-analyzer" `
+.\forge.ps1 project add sample-service `
+  --repo "D:\Projects\sample-service" `
   --default-branch main `
-  --validation "dotnet test --nologo"
+  --validation "python -m pytest"
 ```
 
-Add the provided `templates/project-AGENTS.md` as `AGENTS.md` in the project and tailor only the project-specific rules.
+Add a project-specific `AGENTS.md`; `templates/project-AGENTS.md` is a starting point. Keep project rules in that repository rather than expanding Forge's global instructions. Remote pushing is off unless a project is explicitly registered with `--push`.
 
-## Add work
+## Submit work
 
-### CLI
+Add a task through the CLI:
 
 ```powershell
 .\forge.ps1 task add `
-  --project market-analyzer `
-  --title "Create the Add-On shell" `
-  --objective "Create the initial NinjaTrader Add-On shell and analyzer window. Do not add execution." `
-  --acceptance "The project compiles using the documented workflow." `
-  --acceptance "No live orders can be placed." `
-  --validation "dotnet test --nologo" `
-  --tag csharp `
-  --tag ninjatrader
+  --project sample-service `
+  --id TASK-001 `
+  --title "Add deterministic report export" `
+  --objective "Implement CSV export for the existing report model." `
+  --acceptance "Existing and new tests pass." `
+  --acceptance "Malformed output paths return a clear error." `
+  --validation "python -m pytest" `
+  --risk medium `
+  --max-attempts 3
 ```
 
-### Inbox
+Alternatively, copy `templates/task.yaml`, edit it, and place it under `<DataRoot>\inbox`. The daemon moves processed and rejected files into dedicated subdirectories.
 
-Copy `templates/task.yaml`, edit it, and place it in:
-
-```text
-E:\CodexData\inbox\
-```
-
-The daemon imports it automatically. Processed and failed files move into their own subdirectories.
-
-## Autonomous task lifecycle
-
-```text
-READY
-  -> isolated branch/worktree
-  -> Codex implementation
-  -> controller validation
-  -> bounded repair loop
-  -> independent read-only Codex review
-  -> review repair loop
-  -> final validation
-  -> commit + patch + evidence
-  -> COMPLETED
-```
-
-A task that needs a real product decision becomes `NEEDS_DECISION`; the daemon continues with other eligible work.
-
-## Commands
+Useful commands:
 
 ```powershell
-.\forge.ps1 doctor
-.\forge.ps1 status
-.\forge.ps1 status --json
 .\forge.ps1 project list
 .\forge.ps1 task list
 .\forge.ps1 task list --state FAILED
 .\forge.ps1 task retry TASK-001
 .\forge.ps1 decision list
 .\forge.ps1 run --once
-.\forge.ps1 run --daemon
+.\forge.ps1 status --json
 ```
 
-## Evidence layout
+## Task lifecycle and evidence
 
 ```text
-E:\CodexData\evidence\<project>\<task>\attempt-01\
-  implementation\
-    implementation.events.jsonl
-    implementation.final.json
-    implementation.stderr.log
-  validation-initial\
-    validation-01.stdout.log
-    validation-01.stderr.log
-  review\
-    review.events.jsonl
-    review.final.json
-  changes.patch
-  task-result.json
+READY
+  -> task branch + isolated worktree
+  -> implementation
+  -> controller validation
+  -> bounded validation repair
+  -> independent read-only review
+  -> bounded review repair
+  -> final controller validation
+  -> local commit + patch + task-result.json
+  -> COMPLETED
 ```
 
-Full logs remain on disk. Only bounded failure excerpts are returned to the next Codex repair run.
+A genuine product ambiguity becomes `NEEDS_DECISION`; exhausted or deterministic failure becomes `FAILED`. Raw phase events, stderr, validation stdout/stderr, prompts, review output, token usage, patches, and the final result remain under `<DataRoot>\evidence\<project>\<task>`.
 
-## Model routing
+## Updating and recovery
 
-Defaults:
-
-- High/critical implementation: `gpt-5.6-sol`
-- Ordinary implementation: `gpt-5.6-terra`
-- Ordinary review: `gpt-5.6-terra`
-- High/critical review: `gpt-5.6-sol`
-
-Routine controller inventory and validation are local, model-free operations. Follow-up reviews are scoped to prior findings, and the strongest model is reserved for high/critical risk escalation.
-
-## Token controls
-
-1. RTK is initialized globally for supported noisy output; known-unsafe filters use `rtk proxy` so exact results win over compression.
-2. Raw controller logs are archived on disk instead of being pasted repeatedly into model context.
-3. Validation summaries are capped while exact stdout/stderr remains recoverable.
-4. Only task-relevant stored patterns are injected.
-5. Each phase starts with a bounded contract rather than an accumulating conversational thread.
-6. Independent review runs in a separate thread, protecting the implementation context.
-7. Parallelism starts at two workers; raise it only after observing task quality and rate limits.
-
-Token Optimizer is attempted during bootstrap. If the installed Codex version requires TUI installation, the marketplace is added and bootstrap prints the single remaining installation step. Codex Forge does not depend on the plugin to function.
-
-## Safety boundary
-
-The VPS is the isolation boundary. Within it, Codex receives unrestricted access and no approval prompts. Forge still instructs and structures tasks to prevent:
-
-- introducing live broker connectivity, live credentials, order routing, withdrawals, or financial-account actions into simulation-only trading projects,
-- production deployment,
-- force-pushing or rewriting shared Git history,
-- unrelated repository modification,
-- infinite retries.
-
-These are workflow policies, not interactive permission prompts.
-
-## Updating
-
-After this repository is hosted remotely, VPS updates are:
+For a repository with a configured remote:
 
 ```powershell
 .\update.ps1
 ```
 
-That script performs a fast-forward-only `git pull` and reruns the idempotent bootstrap without replacing the scheduled task.
+The update is fast-forward-only and reruns idempotent bootstrap without replacing the scheduled task or deleting durable state. Review release notes and back up the data root before updating.
 
-The bootstrap is idempotent: it refreshes the Python package and configuration without deleting the task database, evidence, repositories, or worktrees.
-
-For a controlled service restart that also terminates a verified orphaned Forge daemon process tree, run:
+For a controlled controller restart:
 
 ```powershell
 .\restart-service.ps1
 ```
 
-## Current scope
+The script stops only a verified Forge daemon process tree, starts the scheduled task, and requires it to reach `Running`. On startup, the controller recovers interrupted task state from SQLite and retains the associated branch/worktree. See [Operations](docs/OPERATIONS.md) for service inspection, backup, recovery, and troubleshooting.
 
-This is a functional first release of the autonomous control plane. It is ready to onboard the NinjaTrader market-analyzer repository. Later improvements should be driven by measured runs: dashboard UI, richer dependency scheduling, task leases, notification delivery, and App Server/SDK integration.
+## Troubleshooting
 
-## Repairing an interrupted bootstrap
+- `forge doctor` reports `codex_auth` missing: run `codex login` as the same Windows account used by the scheduled task, then rerun doctor.
+- The scheduled task is not running: inspect Task Scheduler history and `<DataRoot>\logs`, then run `.\restart-service.ps1`.
+- A task is stuck in an active state after a crash: restart the service once and inspect `recovery.jsonl` plus the task's branch/worktree before retrying.
+- Validation differs from an interactive shell: use the exact raw validation logs; Forge prepends its private Python `Scripts` directory to child `PATH`.
+- RTK reports no passing pytest tests: do not trust RTK 0.44.2's pytest summary. Pytest compression is disabled pending an RTK upgrade; use `rtk proxy pytest ...` or the Forge private Python directly and retain raw output.
+- A task exhausts attempts or needs a decision: inspect the durable task error, evidence directory, and `decision list`; do not raise limits merely to hide a deterministic failure.
 
-Bootstrap is idempotent. If an earlier release stopped while creating the Python environment, replace the repository with the latest release and rerun:
+## Security and operational scope
+
+Forge is for source-code engineering, tests, local simulation/replay, historical-data tooling, and other development-only work. It must not be extended with live brokerage connectivity, live credentials, order routing, withdrawals, production deployment, or unrelated host access. Read [SECURITY.md](SECURITY.md) before operating or contributing.
+
+## Validated release status
+
+The final production-readiness audit on 2026-08-02 passed:
+
+- 35/35 unit tests and all static checks passed.
+- A real queued smoke task proved isolated implementation, independent validation, review, repair, local commit, and evidence generation.
+- Interactive approval count was zero.
+- Controlled service restart recovery and blocked-task queue isolation passed.
+- 22 demonstrated controller/service/configuration defects were fixed and regression-covered.
+
+The sanitized result is in [Audit Summary](docs/AUDIT-SUMMARY.md). Two limitations remain explicit: RTK 0.44.2 pytest compression is disabled until upgraded and rebenchmarked, and full Windows OS reboot recovery has not yet been exercised (controlled scheduled-task restart recovery has).
+
+## Development
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass -Force
-.\bootstrap.ps1 -SkipCodexLogin
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m compileall -q src tests
 ```
 
-The bootstrap now installs `setuptools` and `wheel` explicitly before installing Forge, checks every native command exit code, and only registers the startup task after initialization, tests, and lint validation succeed.
+See [CONTRIBUTING.md](CONTRIBUTING.md), [CHANGELOG.md](CHANGELOG.md), and [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
-### Windows runtime compatibility in v0.1.3
-
-Version 0.1.3 fixes two Windows-only bootstrap failures found on a clean VPS:
-
-- Codex command shims and test Python scripts are launched through the correct Windows host instead of being passed directly to `CreateProcess` as Unix-style executables.
-- Child validation shells automatically receive the Forge virtual environment's `Scripts` directory on `PATH`, so `python` resolves to the private Forge interpreter without requiring global Python or manual activation.
-- `forge doctor` validates the interpreter actually running Forge rather than incorrectly requiring a separate global `python` command.
-
-### Native exit-code compatibility in v0.1.4
-
-Version 0.1.4 preserves the exact exit code returned by native validation commands executed through PowerShell. Windows PowerShell otherwise normalizes some nonzero native-process exits to `1`, which made a command returning `3` appear as `1` to Forge. The validation wrapper now captures `$LASTEXITCODE` immediately and exits PowerShell with that same value.
+`publish-to-github.ps1` is an explicit operator action that creates and pushes a repository; bootstrap and normal Forge operation never invoke it.

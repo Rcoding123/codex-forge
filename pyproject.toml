@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-forge"
-version = "0.1.4"
+version = "0.2.0"
 description = "Autonomous, zero-prompt Codex engineering controller for isolated Windows VPS environments."
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = "MIT"
 authors = [{name = "Codex Forge"}]
 dependencies = ["PyYAML>=6.0.2,<7"]
 

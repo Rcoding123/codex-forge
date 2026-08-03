@@ -1,25 +1,95 @@
-# Architecture
+# Codex Forge architecture
 
-## Control plane
+## Design objective
 
-The Python controller owns durable state and decides when work is allowed to advance. Codex is a worker, not the source of truth.
+Codex Forge turns bounded engineering tasks into durable, independently verified Git commits. The Python controller owns truth and progression; Codex workers supply implementation and review. A model's assertion that work passed is never accepted as validation evidence.
 
-## Trust boundaries
+## Components
 
-- VPS: isolated host with unrestricted local Codex access.
-- Project worktree: file ownership boundary for a single task.
-- Controller: owns state changes, validation, Git commit, retry limits, and evidence.
-- Codex worker: proposes and implements changes inside a worktree.
-- Reviewer: separate read-only Codex run.
+| Component | Responsibility |
+|---|---|
+| CLI and inbox | Register projects, create tasks, expose status/decisions, and import YAML work items. |
+| SQLite store | Persist projects, tasks, attempts, states, decisions, runs, usage, branch/worktree paths, and failure fingerprints. |
+| Orchestrator | Claim READY work, enforce dependencies and limits, select routes, run phases, and recover interrupted tasks. |
+| Git operations | Create one task branch and isolated worktree, verify repository state, commit completed work, and generate patches. |
+| Codex runner | Invoke `codex exec` without a TTY, approvals, or ambient conversational state; retain JSONL, prompts, stderr, structured output, and usage. |
+| Validation runner | Execute configured commands directly in the worktree with timeouts, UTF-8, exact exit-code handling, bounded summaries, and raw logs. |
+| Independent reviewer | Inspect the bounded change separately from implementation and return a schema-validated verdict/findings. |
+| Scheduled service | Run a singleton daemon under a non-interactive Windows S4U task and restart it after controlled failure. |
 
-## Why controller-side validation
+## Trust and storage boundaries
 
-A model's statement that tests passed is not accepted as evidence. The controller reruns configured commands directly and stores their complete stdout/stderr.
+```text
+isolated Windows development VPS
+|
++-- source repository (controller code only)
+|
++-- ForgeRoot
+|   +-- repositories/<project>       stable main clone
+|   +-- worktrees/<project>/<task>   one isolated task checkout
+|
++-- DataRoot
+    +-- forge.db                     authoritative queue/run state
+    +-- evidence/<project>/<task>    immutable diagnostic artifacts
+    +-- inbox                        task ingestion
+    +-- knowledge                    scoped reusable patterns
+    +-- logs                         service/controller logs
+```
 
-## Why new Codex runs instead of one endless thread
+The source repository is not the persistence boundary. Machine configuration, authentication, databases, worktrees, sessions, and evidence belong outside Git.
 
-Fresh bounded phases reduce context pollution and make token usage attributable. Relevant failures, review findings, and learned patterns are injected explicitly.
+## Task state flow
 
-## Persistence
+```text
+BACKLOG --dependencies satisfied--> READY
+READY --claim/attempt++--> IMPLEMENTING
+IMPLEMENTING --> VALIDATING
+VALIDATING --failure, bounded--> REPAIRING --> VALIDATING
+VALIDATING --pass--> REVIEWING
+REVIEWING --blocking finding, bounded--> REPAIRING --> REVIEWING
+REVIEWING --pass--> final validation --> commit/evidence --> COMPLETED
 
-SQLite uses WAL mode. Every task, run, decision, attempt, branch, and result survives process restarts. Raw logs and patches are stored outside the repository on the durable data disk.
+any active state --product ambiguity--> NEEDS_DECISION
+any active state --limit/loop/terminal failure--> FAILED
+```
+
+Dependency-blocked tasks remain out of the claim query, so they cannot freeze unrelated READY work. Claims and state transitions are persisted before expensive work begins.
+
+## Worktree isolation
+
+For each claimed task, Forge derives a task branch and creates/reuses a project-specific worktree below `workspace_root`. All worker, validation, review, repair, and commit operations use that worktree as their working directory. The stable project clone supplies the base revision and remains unchanged. Branch and worktree paths are recorded in SQLite and retained for restart recovery and diagnostics.
+
+## Validation and review independence
+
+The implementation worker emits schema-constrained machine-readable output. Forge then ignores any claimed test status and executes each configured validation command itself. A failing command stops a stop-on-failure sequence, while stdout, stderr, duration, exact exit code, and command remain recoverable on disk.
+
+Review is a separate Codex run with a read-only role. Follow-up reviews receive prior findings and are scoped to those findings instead of repeating full implementation exploration. A blocking review finding must be repaired and re-reviewed before final validation and commit.
+
+## Limits and loop resistance
+
+Forge enforces complementary bounds:
+
+- per-command and per-Codex-phase timeout;
+- task attempt limit;
+- validation/review repair-cycle limit;
+- identical-failure fingerprint threshold;
+- cumulative per-task input/output token budget;
+- process-scoped singleton lock for the controller.
+
+An unchanged deterministic failure reaches `FAILED` rather than cycling. A human-dependent ambiguity reaches `NEEDS_DECISION`. Limits are durable configuration and are not weakened automatically.
+
+## Model routing and context control
+
+Local inventory, queue operations, validation, and status reporting use no model. Normal implementation and review use the balanced route at medium effort. High/critical risk or unresolved failure selects the escalation route at high effort. Each phase is a fresh bounded run; relevant failure or review context is injected explicitly, and full raw logs remain on disk instead of being resent.
+
+Worker-only unrelated Codex features are disabled by configuration. Large repository documentation is not injected automatically; project `AGENTS.md` files provide scoped rules.
+
+## Recovery
+
+The scheduled task uses `IgnoreNew`, and the daemon holds a crash-released process lock, preventing duplicate controllers. At startup, Forge finds tasks left in active states. Tasks below their attempt limit return safely to READY while preserving branch/worktree state; exhausted tasks become FAILED. Recovery events are appended outside the repository.
+
+Controlled scheduled-task restart recovery is validated. Full host reboot recovery remains an explicit release limitation until exercised on a maintenance window.
+
+## Safety boundary
+
+The VPS is the sandbox boundary for `danger-full-access`. Git worktrees isolate tasks from each other, but they are not an operating-system security boundary. Forge therefore belongs only on a dedicated development VPS without personal secrets, production deployment authority, or live financial connectivity.

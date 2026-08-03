@@ -53,3 +53,15 @@ def test_codex_configuration_disables_global_multi_agent_by_default():
     script = (REPO_ROOT / "scripts" / "configure-codex.ps1").read_text(encoding="utf-8")
     assert "multi_agent = false" in script
     assert "multi_agent = true" not in script
+
+
+def test_bootstrap_recreates_validated_rtk_policy_after_rtk_init():
+    bootstrap = (REPO_ROOT / "bootstrap.ps1").read_text(encoding="utf-8")
+    policy_call = '& (Join-Path $RepoRoot "scripts\\configure-rtk-policy.ps1")'
+    assert bootstrap.index("rtk init -g --codex", bootstrap.index("configure-codex.ps1")) < bootstrap.index(
+        policy_call
+    )
+    policy = (REPO_ROOT / "scripts" / "configure-rtk-policy.ps1").read_text(encoding="utf-8")
+    assert "rtk proxy pytest ..." in policy
+    assert "direct read-only command" in policy
+    assert "RTK 0.44.2" in policy

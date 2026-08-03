@@ -199,6 +199,7 @@ max_output_chars = 12000
 
 & (Join-Path $RepoRoot "scripts\configure-codex.ps1") -DataRoot $DataRoot
 if (Get-Command rtk -ErrorAction SilentlyContinue) { rtk init -g --codex }
+& (Join-Path $RepoRoot "scripts\configure-rtk-policy.ps1")
 
 if (-not $SkipCodexLogin) {
     codex login status *> $null
