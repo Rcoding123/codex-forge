@@ -1,0 +1,13 @@
+.venv/
+forge.toml
+*.db
+*.db-shm
+*.db-wal
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+build/
+dist/
+*.egg-info/
+.local-data/

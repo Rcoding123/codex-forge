@@ -1,0 +1,19 @@
+project: market-analyzer
+id: TASK-001
+title: Create the Add-On shell
+objective: |
+  Create the initial NinjaTrader Add-On shell and a standalone analyzer window.
+  Do not implement trading or order placement.
+acceptance:
+  - The project compiles with the repository's documented build workflow.
+  - The Add-On opens without placing or modifying orders.
+  - New code is separated from existing protected NinjaScript code.
+validation:
+  - dotnet test --nologo
+risk: medium
+tags:
+  - csharp
+  - ninjatrader
+priority: 100
+max_attempts: 3
+dependencies: []

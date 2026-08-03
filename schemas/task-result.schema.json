@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["completed", "blocked", "needs_decision"]},
+    "summary": {"type": "string"},
+    "changed_files": {"type": "array", "items": {"type": "string"}},
+    "validation_performed": {"type": "array", "items": {"type": "string"}},
+    "assumptions": {"type": "array", "items": {"type": "string"}},
+    "blocking_reason": {"type": ["string", "null"]},
+    "decisions_needed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "question": {"type": "string"},
+          "options": {"type": "array", "items": {"type": "string"}},
+          "recommendation": {"type": ["string", "null"]}
+        },
+        "required": ["question", "options", "recommendation"],
+        "additionalProperties": false
+      }
+    },
+    "reusable_patterns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "trigger": {"type": "string"},
+          "lesson": {"type": "string"},
+          "evidence": {"type": "string"}
+        },
+        "required": ["trigger", "lesson", "evidence"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "status", "summary", "changed_files", "validation_performed", "assumptions",
+    "blocking_reason", "decisions_needed", "reusable_patterns"
+  ],
+  "additionalProperties": false
+}
