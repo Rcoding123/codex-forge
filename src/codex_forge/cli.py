@@ -9,6 +9,7 @@ from .config import ForgeConfig, load_config
 from .control_plane import (
     StructuredError,
     decision_to_public,
+    error_exit_code,
     project_to_public,
     task_to_public,
     write_response,
@@ -18,6 +19,16 @@ from .gitops import clone_repository, verify_repository
 from .models import Project, Task, TaskState
 from .orchestrator import Orchestrator
 from .runner import _build_process_command
+from .task_submission import (
+    DEFAULT_MAX_ATTEMPTS,
+    DEFAULT_PRIORITY,
+    DEFAULT_RISK,
+    RISK_LEVELS,
+    SUBMISSION_COMMAND,
+    TaskSubmissionError,
+    build_task_request,
+    submit_task,
+)
 from .utils import command_exists, ensure_dir, run_process, stable_id
 
 
@@ -71,10 +82,16 @@ def build_parser() -> argparse.ArgumentParser:
     task_add.add_argument("--validation", action="append", default=[])
     task_add.add_argument("--tag", action="append", default=[])
     task_add.add_argument("--depends-on", action="append", default=[])
-    task_add.add_argument("--risk", choices=["low", "medium", "high", "critical"], default="medium")
-    task_add.add_argument("--priority", type=int, default=100)
-    task_add.add_argument("--max-attempts", type=int, default=3)
+    # These three default to None so the contract can report which values it resolved. The
+    # human-readable path applies the same defaults explicitly.
+    task_add.add_argument("--risk", choices=list(RISK_LEVELS), default=None)
+    task_add.add_argument("--priority", type=int, default=None)
+    task_add.add_argument("--max-attempts", type=int, default=None)
     task_add.add_argument("--id")
+    task_add.add_argument(
+        "--dry-run", action="store_true", help="Validate the request without writing to the database"
+    )
+    task_add.add_argument("--json", action="store_true")
     task_list = task_sub.add_parser("list", help="List tasks")
     task_list.add_argument("--state", choices=[state.value for state in TaskState])
     task_list.add_argument("--json", action="store_true")
@@ -210,6 +227,8 @@ def cmd_project_list(config: ForgeConfig, as_json: bool = False) -> int:
 
 
 def cmd_task_add(config: ForgeConfig, args: argparse.Namespace) -> int:
+    if getattr(args, "json", False) or getattr(args, "dry_run", False):
+        return cmd_task_submit(config, args)
     db = ForgeDB(config.database_path)
     project = db.get_project(args.project)
     if not project:
@@ -225,14 +244,43 @@ def cmd_task_add(config: ForgeConfig, args: argparse.Namespace) -> int:
         acceptance=args.acceptance,
         validation_commands=args.validation,
         state=TaskState.BACKLOG if dependencies else TaskState.READY,
-        priority=args.priority,
-        risk=args.risk,
+        priority=DEFAULT_PRIORITY if args.priority is None else args.priority,
+        risk=DEFAULT_RISK if args.risk is None else args.risk,
         tags=args.tag,
         dependencies=dependencies,
-        max_attempts=args.max_attempts,
+        max_attempts=DEFAULT_MAX_ATTEMPTS if args.max_attempts is None else args.max_attempts,
     )
     db.add_task(task)
     print(f"Added {task.id} [{task.state.value}] {task.title}")
+    return 0
+
+
+def cmd_task_submit(config: ForgeConfig, args: argparse.Namespace) -> int:
+    """Handle `task add --json` and `task add --dry-run` through the versioned contract."""
+    as_json = getattr(args, "json", False)
+    dry_run = getattr(args, "dry_run", False)
+    try:
+        request = build_task_request(args)
+        data = submit_task(config, request, dry_run=dry_run)
+    except TaskSubmissionError as exc:
+        if as_json:
+            print(f"ERROR: {exc.code}", file=sys.stderr)
+            write_response(
+                SUBMISSION_COMMAND,
+                error=StructuredError(code=exc.code, message=exc.message, details=exc.details),
+            )
+        else:
+            print(f"{exc.code}: {exc.message}", file=sys.stderr)
+        return error_exit_code(exc.code)
+    if as_json:
+        write_response(SUBMISSION_COMMAND, data=data)
+        return 0
+    task = data["task"]
+    if dry_run:
+        verb = "Would add" if data["would_create"] else "Already present:"
+    else:
+        verb = "Added" if data["created"] else "Already present:"
+    print(f"{verb} {task['task_id']} [{task['state']}] {task['title']}")
     return 0
 
 

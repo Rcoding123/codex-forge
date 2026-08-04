@@ -23,6 +23,30 @@ _SECRET_ARGUMENT_PATTERN = re.compile(
 _URL_CREDENTIAL_PATTERN = re.compile(r"(?P<scheme>://)[^/@\s]+:[^/@\s]+@")
 
 
+# Stable structured error codes and the process exit code each one reports. Exit code 1 marks an
+# operational failure; exit code 2 marks an invocation, configuration, or requested-resource
+# failure. Consumers must branch on the code, not on the message text.
+ERROR_EXIT_CODES: dict[str, int] = {
+    "TASK_NOT_FOUND": 2,
+    "INVALID_ARGUMENT": 2,
+    "CONFIG_ERROR": 2,
+    "COMMAND_FAILED": 1,
+    "INVALID_TASK_REQUEST": 2,
+    "PROJECT_NOT_FOUND": 2,
+    "DUPLICATE_TASK_ID": 2,
+    "TASK_ID_CONFLICT": 2,
+    "INVALID_VALIDATION_COMMAND": 2,
+    "INVALID_LIMIT": 2,
+    "CONFIGURATION_ERROR": 2,
+    "DATABASE_ERROR": 1,
+}
+
+
+def error_exit_code(code: str) -> int:
+    """Return the documented process exit code for a structured error code."""
+    return ERROR_EXIT_CODES.get(code, 1)
+
+
 @dataclass(frozen=True, slots=True)
 class StructuredError:
     code: str
@@ -56,6 +80,24 @@ def response_envelope(
     return payload
 
 
+def _utf8_stream(stream: TextIO) -> TextIO:
+    """Ensure the contract's promised UTF-8 encoding on a legacy console.
+
+    A Windows console defaulting to a legacy code page cannot encode Unicode task titles, project
+    names, or paths. Without this the response would raise instead of being emitted.
+    """
+    encoding = (getattr(stream, "encoding", None) or "").lower().replace("_", "-")
+    if encoding in {"utf-8", "utf8"}:
+        return stream
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(encoding="utf-8")
+        except (OSError, ValueError):
+            pass
+    return stream
+
+
 def write_response(
     command: str,
     *,
@@ -64,7 +106,7 @@ def write_response(
     legacy_fields: Mapping[str, Any] | None = None,
     stream: TextIO | None = None,
 ) -> None:
-    output = stream or sys.stdout
+    output = _utf8_stream(stream or sys.stdout)
     document = response_envelope(
         command,
         data=data,
@@ -80,7 +122,7 @@ def project_to_public(project: Project) -> dict[str, Any]:
         "name": project.name,
         "repository_path": str(project.repo_path),
         "default_branch": project.default_branch,
-        "validation_commands": [_redact_command(command) for command in project.validation_commands],
+        "validation_commands": [redact_command(command) for command in project.validation_commands],
         "fetch_policy": "automatic" if project.auto_fetch else "disabled",
         "commit_policy": "automatic" if project.auto_commit else "disabled",
         "push_policy": "automatic" if project.auto_push else "disabled",
@@ -89,7 +131,8 @@ def project_to_public(project: Project) -> dict[str, Any]:
     }
 
 
-def _redact_command(command: str) -> str:
+def redact_command(command: str) -> str:
+    """Replace credential-shaped values in a command with `[REDACTED]`."""
     redacted = _ASSIGNMENT_PATTERN.sub(lambda match: f"{match.group('prefix')}[REDACTED]", command)
     redacted = _SECRET_ARGUMENT_PATTERN.sub(
         lambda match: f"{match.group('prefix')}[REDACTED]", redacted

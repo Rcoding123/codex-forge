@@ -157,6 +157,19 @@ Add a task through the CLI:
 
 Alternatively, copy `templates/task.yaml`, edit it, and place it under `<DataRoot>\inbox`. The daemon moves processed and rejected files into dedicated subdirectories.
 
+External applications submit the same task through the versioned JSON contract. Validate first, then
+submit; both accept the arguments shown above:
+
+```powershell
+.\forge.ps1 task add --project sample-service --id TASK-001 --title "..." --objective "..." --dry-run --json
+.\forge.ps1 task add --project sample-service --id TASK-001 --title "..." --objective "..." --json
+```
+
+`--dry-run` resolves and validates the request without writing anything. Submission is idempotent by
+`task_id`: retrying an identical request returns the existing task with `"created": false` instead of
+creating a second one, and reusing an identifier for a different request is a structured conflict. See
+[Control-plane JSON contract](docs/CONTROL-PLANE-API.md) for the envelope, field list, and error codes.
+
 Useful commands:
 
 ```powershell
@@ -170,7 +183,8 @@ Useful commands:
 ```
 
 External applications must use the versioned [Control-plane JSON contract](docs/CONTROL-PLANE-API.md)
-instead of parsing terminal tables or reading `forge.db` directly.
+instead of parsing terminal tables or reading `forge.db` directly. The contract covers inspection and
+task submission; it does not start, retry, cancel, merge, or push anything.
 
 ## Task lifecycle and evidence
 
