@@ -29,6 +29,8 @@ class Project:
     auto_fetch: bool = True
     auto_commit: bool = True
     auto_push: bool = False
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 @dataclass(slots=True)
@@ -52,6 +54,8 @@ class Task:
     failure_fingerprint: str | None = None
     identical_failures: int = 0
     result: dict[str, Any] = field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 @dataclass(slots=True)

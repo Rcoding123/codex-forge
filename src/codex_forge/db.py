@@ -347,6 +347,20 @@ class ForgeDB:
         totals["total_tokens"] = totals["input_tokens"] + totals["output_tokens"]
         return totals
 
+    def task_runtime(self, task_id: str) -> dict[str, str | None]:
+        with self.connect() as connection:
+            first = connection.execute(
+                "SELECT started_at FROM runs WHERE task_id=? ORDER BY id ASC LIMIT 1", (task_id,)
+            ).fetchone()
+            latest = connection.execute(
+                "SELECT phase,artifact_dir FROM runs WHERE task_id=? ORDER BY id DESC LIMIT 1", (task_id,)
+            ).fetchone()
+        return {
+            "started_at": first["started_at"] if first else None,
+            "current_phase": latest["phase"] if latest else None,
+            "evidence_path": latest["artifact_dir"] if latest else None,
+        }
+
     def recover_interrupted_tasks(self) -> list[dict[str, str]]:
         active_states = tuple(
             state.value
@@ -392,6 +406,8 @@ class ForgeDB:
             auto_fetch=bool(row["auto_fetch"]),
             auto_commit=bool(row["auto_commit"]),
             auto_push=bool(row["auto_push"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
         )
 
     @staticmethod
@@ -420,4 +436,6 @@ class ForgeDB:
             failure_fingerprint=row.get("failure_fingerprint"),
             identical_failures=int(row.get("identical_failures") or 0),
             result=json_loads(row.get("result_json"), {}),
+            created_at=row.get("created_at"),
+            updated_at=row.get("updated_at"),
         )

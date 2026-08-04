@@ -169,6 +169,9 @@ Useful commands:
 .\forge.ps1 status --json
 ```
 
+External applications must use the versioned [Control-plane JSON contract](docs/CONTROL-PLANE-API.md)
+instead of parsing terminal tables or reading `forge.db` directly.
+
 ## Task lifecycle and evidence
 
 ```text

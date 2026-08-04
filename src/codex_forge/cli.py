@@ -6,6 +6,13 @@ import sys
 from pathlib import Path
 
 from .config import ForgeConfig, load_config
+from .control_plane import (
+    StructuredError,
+    decision_to_public,
+    project_to_public,
+    task_to_public,
+    write_response,
+)
 from .db import ForgeDB
 from .gitops import clone_repository, verify_repository
 from .models import Project, Task, TaskState
@@ -14,12 +21,25 @@ from .runner import _build_process_command
 from .utils import command_exists, ensure_dir, run_process, stable_id
 
 
+class CLIArgumentError(ValueError):
+    pass
+
+
+class ForgeArgumentParser(argparse.ArgumentParser):
+    structured_errors = False
+
+    def error(self, message: str) -> None:
+        if self.structured_errors:
+            raise CLIArgumentError(message)
+        super().error(message)
+
+
 def package_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="forge", description="Autonomous Codex engineering controller")
+    parser = ForgeArgumentParser(prog="forge", description="Autonomous Codex engineering controller")
     parser.add_argument("--config", help="Path to forge.toml")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -38,7 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
     project_add.add_argument("--no-fetch", action="store_true")
     project_add.add_argument("--no-commit", action="store_true")
     project_add.add_argument("--push", action="store_true")
-    project_sub.add_parser("list", help="List projects")
+    project_list = project_sub.add_parser("list", help="List projects")
+    project_list.add_argument("--json", action="store_true")
 
     task = sub.add_parser("task", help="Manage tasks")
     task_sub = task.add_subparsers(dest="task_command", required=True)
@@ -56,6 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
     task_add.add_argument("--id")
     task_list = task_sub.add_parser("list", help="List tasks")
     task_list.add_argument("--state", choices=[state.value for state in TaskState])
+    task_list.add_argument("--json", action="store_true")
+    task_show = task_sub.add_parser("show", help="Show one task")
+    task_show.add_argument("task_id")
+    task_show.add_argument("--json", action="store_true")
     task_retry = task_sub.add_parser("retry", help="Retry a failed or blocked task")
     task_retry.add_argument("task_id")
 
@@ -69,7 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     decision = sub.add_parser("decision", help="View decisions requiring a person")
     decision_sub = decision.add_subparsers(dest="decision_command", required=True)
-    decision_sub.add_parser("list")
+    decision_list = decision_sub.add_parser("list")
+    decision_list.add_argument("--json", action="store_true")
 
     return parser
 
@@ -169,9 +195,16 @@ def cmd_project_add(config: ForgeConfig, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_project_list(config: ForgeConfig) -> int:
+def cmd_project_list(config: ForgeConfig, as_json: bool = False) -> int:
     db = ForgeDB(config.database_path)
-    for project in db.list_projects():
+    projects = db.list_projects()
+    if as_json:
+        write_response(
+            "project.list",
+            data={"projects": [project_to_public(project) for project in projects]},
+        )
+        return 0
+    for project in projects:
         print(f"{project.name}\t{project.repo_path}\tbase={project.default_branch}")
     return 0
 
@@ -206,8 +239,63 @@ def cmd_task_add(config: ForgeConfig, args: argparse.Namespace) -> int:
 def cmd_task_list(config: ForgeConfig, args: argparse.Namespace) -> int:
     db = ForgeDB(config.database_path)
     state = TaskState(args.state) if args.state else None
-    for task in db.list_tasks(state):
+    tasks = db.list_tasks(state)
+    if getattr(args, "json", False):
+        projects = {project.id: project.name for project in db.list_projects()}
+        write_response(
+            "task.list",
+            data={
+                "tasks": [
+                    task_to_public(
+                        task,
+                        project_name=projects.get(task.project_id),
+                        token_usage=db.task_token_usage(task.id),
+                        token_limit=config.max_task_tokens,
+                        runtime=db.task_runtime(task.id),
+                    )
+                    for task in tasks
+                ],
+                "filters": {"state": args.state},
+            },
+        )
+        return 0
+    for task in tasks:
         print(f"{task.id}\t{task.state.value}\tP{task.priority}\t{task.title}")
+    return 0
+
+
+def cmd_task_show(config: ForgeConfig, task_id: str, as_json: bool = False) -> int:
+    db = ForgeDB(config.database_path)
+    task = db.get_task(task_id)
+    if not task:
+        if as_json:
+            write_response(
+                "task.show",
+                error=StructuredError(
+                    code="TASK_NOT_FOUND",
+                    message="Task was not found.",
+                    details={"task_id": task_id},
+                ),
+            )
+        else:
+            print(f"Unknown task: {task_id}", file=sys.stderr)
+        return 2
+    if as_json:
+        project = db.get_project(task.project_id)
+        write_response(
+            "task.show",
+            data={
+                "task": task_to_public(
+                    task,
+                    project_name=project.name if project else None,
+                    token_usage=db.task_token_usage(task.id),
+                    token_limit=config.max_task_tokens,
+                    runtime=db.task_runtime(task.id),
+                )
+            },
+        )
+        return 0
+    print(f"{task.id}\t{task.state.value}\tP{task.priority}\t{task.title}")
     return 0
 
 
@@ -237,16 +325,22 @@ def cmd_status(config: ForgeConfig, as_json: bool) -> int:
     decisions = db.list_open_decisions()
     payload = {"tasks": counts, "open_decisions": len(decisions), "database": str(config.database_path)}
     if as_json:
-        print(json.dumps(payload, indent=2))
+        write_response("status", data=payload, legacy_fields=payload)
     else:
         print(" | ".join(f"{name}={count}" for name, count in counts.items() if count))
         print(f"OPEN_DECISIONS={len(decisions)}")
     return 0
 
 
-def cmd_decision_list(config: ForgeConfig) -> int:
+def cmd_decision_list(config: ForgeConfig, as_json: bool = False) -> int:
     db = ForgeDB(config.database_path)
     rows = db.list_open_decisions()
+    if as_json:
+        write_response(
+            "decision.list",
+            data={"decisions": [decision_to_public(row) for row in rows]},
+        )
+        return 0
     if not rows:
         print("No open decisions.")
         return 0
@@ -259,34 +353,95 @@ def cmd_decision_list(config: ForgeConfig) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    config = load_or_exit(args.config)
+def _requested_command(argv: list[str]) -> str:
+    tokens = list(argv)
+    if "--config" in tokens:
+        index = tokens.index("--config")
+        del tokens[index : index + 2]
+    words = [token for token in tokens if not token.startswith("-")]
+    if not words:
+        return "unknown"
+    if words[0] in {"project", "task", "decision"} and len(words) > 1:
+        return f"{words[0]}.{words[1]}"
+    return words[0]
 
-    if args.command == "init":
-        return cmd_init(config)
-    if args.command == "doctor":
-        return cmd_doctor(config)
-    if args.command == "project":
-        if args.project_command == "add":
-            return cmd_project_add(config, args)
-        return cmd_project_list(config)
-    if args.command == "task":
-        if args.task_command == "add":
-            return cmd_task_add(config, args)
-        if args.task_command == "list":
-            return cmd_task_list(config, args)
-        return cmd_task_retry(config, args.task_id)
-    if args.command == "status":
-        return cmd_status(config, args.json)
-    if args.command == "decision":
-        return cmd_decision_list(config)
-    if args.command == "run":
-        orchestrator = Orchestrator(config, package_root())
-        if args.daemon:
-            orchestrator.run_daemon()
-            return 0
-        return 0 if orchestrator.run_once() >= 0 else 1
-    parser.error("Unknown command")
-    return 2
+
+def _write_cli_error(command: str, code: str, message: str, details: dict | None = None) -> None:
+    write_response(
+        command,
+        error=StructuredError(code=code, message=message, details=details or {}),
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    json_requested = "--json" in raw_argv
+    ForgeArgumentParser.structured_errors = json_requested
+    parser = build_parser()
+    try:
+        args = parser.parse_args(raw_argv)
+    except CLIArgumentError as exc:
+        if json_requested:
+            _write_cli_error(
+                _requested_command(raw_argv),
+                "INVALID_ARGUMENT",
+                "Command arguments were invalid.",
+            )
+        else:
+            parser.print_usage(sys.stderr)
+            print(f"forge: error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        ForgeArgumentParser.structured_errors = False
+
+    try:
+        config = load_config(args.config)
+    except Exception as exc:
+        if json_requested:
+            print(f"ERROR: {type(exc).__name__}: Forge configuration could not be loaded.", file=sys.stderr)
+            _write_cli_error(
+                _requested_command(raw_argv),
+                "CONFIG_ERROR",
+                "Forge configuration could not be loaded.",
+            )
+            return 2
+        return load_or_exit(args.config)
+
+    try:
+        if args.command == "init":
+            return cmd_init(config)
+        if args.command == "doctor":
+            return cmd_doctor(config)
+        if args.command == "project":
+            if args.project_command == "add":
+                return cmd_project_add(config, args)
+            return cmd_project_list(config, args.json)
+        if args.command == "task":
+            if args.task_command == "add":
+                return cmd_task_add(config, args)
+            if args.task_command == "list":
+                return cmd_task_list(config, args)
+            if args.task_command == "show":
+                return cmd_task_show(config, args.task_id, args.json)
+            return cmd_task_retry(config, args.task_id)
+        if args.command == "status":
+            return cmd_status(config, args.json)
+        if args.command == "decision":
+            return cmd_decision_list(config, args.json)
+        if args.command == "run":
+            orchestrator = Orchestrator(config, package_root())
+            if args.daemon:
+                orchestrator.run_daemon()
+                return 0
+            return 0 if orchestrator.run_once() >= 0 else 1
+        raise CLIArgumentError("Unknown command")
+    except Exception as exc:
+        if json_requested:
+            print(f"ERROR: {type(exc).__name__}: command failed.", file=sys.stderr)
+            _write_cli_error(
+                _requested_command(raw_argv),
+                "COMMAND_FAILED",
+                "The command could not be completed.",
+            )
+            return 1
+        raise
