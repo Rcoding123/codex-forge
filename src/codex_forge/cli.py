@@ -15,6 +15,13 @@ from .control_plane import (
     write_response,
 )
 from .db import ForgeDB
+from .evidence import (
+    EVIDENCE_LIST_COMMAND,
+    EVIDENCE_SHOW_COMMAND,
+    EvidenceError,
+    evidence_list,
+    evidence_show,
+)
 from .gitops import clone_repository, verify_repository
 from .models import Project, Task, TaskState
 from .orchestrator import Orchestrator
@@ -100,6 +107,20 @@ def build_parser() -> argparse.ArgumentParser:
     task_show.add_argument("--json", action="store_true")
     task_retry = task_sub.add_parser("retry", help="Retry a failed or blocked task")
     task_retry.add_argument("task_id")
+
+    task_evidence = task_sub.add_parser("evidence", help="Inspect retained task evidence")
+    evidence_sub = task_evidence.add_subparsers(dest="evidence_command", required=True)
+    evidence_list = evidence_sub.add_parser("list", help="List publishable evidence artifacts")
+    evidence_list.add_argument("task_id")
+    evidence_list.add_argument("--schema-version", default=None)
+    evidence_list.add_argument("--json", action="store_true")
+    evidence_show = evidence_sub.add_parser("show", help="Show one evidence artifact")
+    evidence_show.add_argument("task_id")
+    evidence_show.add_argument(
+        "--artifact-id", required=True, help="Opaque artifact identifier from `task evidence list`"
+    )
+    evidence_show.add_argument("--schema-version", default=None)
+    evidence_show.add_argument("--json", action="store_true")
 
     run = sub.add_parser("run", help="Run ready tasks")
     mode = run.add_mutually_exclusive_group()
@@ -364,6 +385,61 @@ def cmd_task_retry(config: ForgeConfig, task_id: str) -> int:
     return 0
 
 
+def _evidence_failure(command: str, exc: EvidenceError, as_json: bool) -> int:
+    """Render an evidence failure identically in both output modes and map it to an exit code."""
+    if as_json:
+        print(f"ERROR: {exc.code}", file=sys.stderr)
+        write_response(
+            command,
+            error=StructuredError(code=exc.code, message=exc.message, details=exc.details),
+        )
+    else:
+        print(f"{exc.code}: {exc.message}", file=sys.stderr)
+    return error_exit_code(exc.code)
+
+
+def cmd_task_evidence_list(config: ForgeConfig, args: argparse.Namespace) -> int:
+    as_json = getattr(args, "json", False)
+    try:
+        data = evidence_list(config, args.task_id, schema_version=args.schema_version)
+    except EvidenceError as exc:
+        return _evidence_failure(EVIDENCE_LIST_COMMAND, exc, as_json)
+    if as_json:
+        write_response(EVIDENCE_LIST_COMMAND, data=data)
+        return 0
+    if not data["evidence_available"]:
+        print(f"No evidence recorded for {data['task_id']}.")
+        return 0
+    for artifact in data["artifacts"]:
+        print(
+            f"{artifact['artifact_id']}\t{artifact['artifact_kind']}\t"
+            f"{artifact['original_size_bytes']}\t{artifact['display_name']}"
+        )
+    return 0
+
+
+def cmd_task_evidence_show(config: ForgeConfig, args: argparse.Namespace) -> int:
+    as_json = getattr(args, "json", False)
+    try:
+        data = evidence_show(
+            config, args.task_id, args.artifact_id, schema_version=args.schema_version
+        )
+    except EvidenceError as exc:
+        return _evidence_failure(EVIDENCE_SHOW_COMMAND, exc, as_json)
+    if as_json:
+        write_response(EVIDENCE_SHOW_COMMAND, data=data)
+        return 0
+    artifact = data["artifact"]
+    content = data["content"]
+    print(f"{artifact['artifact_kind']}\t{artifact['display_name']}")
+    if content["truncated"]:
+        print(f"[truncated to {content['returned_size_bytes']} of {content['original_size_bytes']} bytes]")
+    if content["redacted"]:
+        print("[content was redacted]")
+    print(content["text"])
+    return 0
+
+
 def cmd_status(config: ForgeConfig, as_json: bool) -> int:
     db = ForgeDB(config.database_path)
     tasks = db.list_tasks()
@@ -409,6 +485,8 @@ def _requested_command(argv: list[str]) -> str:
     words = [token for token in tokens if not token.startswith("-")]
     if not words:
         return "unknown"
+    if words[0] == "task" and len(words) > 2 and words[1] == "evidence" and words[2] in {"list", "show"}:
+        return f"task.evidence.{words[2]}"
     if words[0] in {"project", "task", "decision"} and len(words) > 1:
         return f"{words[0]}.{words[1]}"
     return words[0]
@@ -471,6 +549,10 @@ def main(argv: list[str] | None = None) -> int:
                 return cmd_task_list(config, args)
             if args.task_command == "show":
                 return cmd_task_show(config, args.task_id, args.json)
+            if args.task_command == "evidence":
+                if args.evidence_command == "list":
+                    return cmd_task_evidence_list(config, args)
+                return cmd_task_evidence_show(config, args)
             return cmd_task_retry(config, args.task_id)
         if args.command == "status":
             return cmd_status(config, args.json)

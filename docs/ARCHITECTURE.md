@@ -38,6 +38,24 @@ isolated Windows development VPS
 
 The source repository is not the persistence boundary. Machine configuration, authentication, databases, worktrees, sessions, and evidence belong outside Git.
 
+### Evidence disclosure boundary
+
+The evidence tree is written for operators and for post-incident analysis, not for external
+consumption. On disk it retains raw model prompts, JSONL model event streams, unrestricted process
+stderr, thread identifiers, and absolute production paths. Nothing on disk is redacted.
+
+External applications therefore never read the evidence tree or `forge.db`. They call the read-only
+`task.evidence.list` and `task.evidence.show` control-plane commands, which are the disclosure
+boundary. `src/codex_forge/evidence.py` owns that boundary end to end — discovery, classification,
+opaque artifact identifiers, path canonicalization and containment, size bounds, redaction,
+structured sanitization, and structured errors — so no other module decides what is publishable and
+the CLI only renders what the module returns.
+
+The boundary is an allowlist keyed on the controller's evidence layout, not on file extensions: an
+artifact that is not positively recognized is excluded, so a new controller output cannot become
+public by accident. Adding a new public artifact class is a deliberate change to that module and to
+[the control-plane contract](CONTROL-PLANE-API.md).
+
 ## Task state flow
 
 ```text

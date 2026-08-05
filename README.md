@@ -180,11 +180,22 @@ Useful commands:
 .\forge.ps1 decision list
 .\forge.ps1 run --once
 .\forge.ps1 status --json
+.\forge.ps1 task evidence list TASK-001 --json
+.\forge.ps1 task evidence show TASK-001 --artifact-id <artifact-id> --json
 ```
 
 External applications must use the versioned [Control-plane JSON contract](docs/CONTROL-PLANE-API.md)
-instead of parsing terminal tables or reading `forge.db` directly. The contract covers inspection and
-task submission; it does not start, retry, cancel, merge, or push anything.
+instead of parsing terminal tables or reading `forge.db` directly. The contract covers inspection,
+task submission, and read-only task evidence; it does not start, retry, cancel, merge, or push
+anything.
+
+`task evidence list` returns a manifest of the artifacts Forge is willing to publish, each with an
+opaque `artifact_id`; `task evidence show` returns one bounded, redacted artifact selected by that
+identifier. A caller never supplies a file-system path. Prompts, model event streams, and
+unrestricted model stderr are excluded, structured results are reduced to an explicit allowlist, and
+absolute production paths are removed. Consumers must not read the data root directly — see
+[Control-plane JSON contract](docs/CONTROL-PLANE-API.md) for classifications, limits, redaction, and
+error codes.
 
 ## Task lifecycle and evidence
 
@@ -202,6 +213,8 @@ READY
 ```
 
 A genuine product ambiguity becomes `NEEDS_DECISION`; exhausted or deterministic failure becomes `FAILED`. Raw phase events, stderr, validation stdout/stderr, prompts, review output, token usage, patches, and the final result remain under `<DataRoot>\evidence\<project>\<task>`.
+
+That tree is an internal format and is not safe to read directly: it retains raw prompts, model event streams, unrestricted process stderr, and absolute production paths, none of which are redacted on disk. External applications must obtain evidence through `task evidence list` and `task evidence show`, which apply the public allowlist, redaction, size bounds, and path-safety guarantees.
 
 ## Updating and recovery
 

@@ -125,6 +125,26 @@ Raw output is authoritative. Controller/model summaries are deliberately bounded
 
 Retain failed-task evidence until root cause and recovery are complete.
 
+### Sharing evidence with an external application
+
+Operators inspect the raw tree directly. External applications must not: it retains prompts, model
+event streams, unrestricted stderr, and absolute production paths, and nothing on disk is redacted.
+Point integrations at the read-only control-plane commands instead:
+
+```powershell
+.\forge.ps1 task evidence list <task-id> --json
+.\forge.ps1 task evidence show <task-id> --artifact-id <artifact-id> --json
+```
+
+These publish only allowlisted artifacts — final results, validation logs, review results, patches,
+repair summaries — with redaction, a 256 KiB return bound, and path-safety checks applied. They are
+read-only, take no locks, and cannot block the controller from writing evidence. If a call returns
+`ARTIFACT_CHANGED_DURING_READ`, the task was writing that artifact; retry. See
+[the control-plane contract](CONTROL-PLANE-API.md) for classifications, limits, and error codes.
+
+Do not grant an integration file-system access to the data root as a workaround for a missing
+artifact class; add the class to the contract instead.
+
 ## RTK pytest limitation
 
 RTK 0.44.2 can describe a passing quiet pytest suite as if no tests were collected. Until RTK is upgraded and rebenchmarked, pytest compression is disabled:

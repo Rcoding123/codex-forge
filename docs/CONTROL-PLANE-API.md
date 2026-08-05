@@ -20,6 +20,8 @@ task execution — a submitted task waits for the existing controller loop.
 .\forge.ps1 decision list --json
 .\forge.ps1 task add <task arguments> --dry-run --json
 .\forge.ps1 task add <task arguments> --json
+.\forge.ps1 task evidence list <task-id> --json
+.\forge.ps1 task evidence show <task-id> --artifact-id <artifact-id> --json
 ```
 
 The same commands retain their existing human-readable output when `--json` is absent. `task add`
@@ -42,8 +44,8 @@ Every JSON response is one UTF-8 JSON document with this envelope:
 
 - `schema_version` identifies the public contract, not the Forge package version or database schema.
 - `command` is the stable dotted command name: `status`, `project.list`, `task.list`, `task.show`,
-  `decision.list`, or `task.add`. Validation and submission share the `task.add` command name and are
-  distinguished by `data.dry_run`.
+  `decision.list`, `task.add`, `task.evidence.list`, or `task.evidence.show`. Validation and
+  submission share the `task.add` command name and are distinguished by `data.dry_run`.
 - `success` is `true` only when the operation succeeded.
 - `data` contains command data on success and is `null` on failure.
 - `error` is `null` on success and contains a structured error on failure.
@@ -473,6 +475,317 @@ The current command lists open decisions, preserving existing CLI semantics.
 Decision resolution is not part of this checkpoint. `resolved_at` and `resolution` therefore remain
 `null` for the open collection.
 
+## Task evidence
+
+Two read-only commands expose the evidence a task produced, so an external application can display
+validation results, independent reviews, patches, and final results without reading Forge's file
+system or `forge.db`.
+
+```powershell
+.\forge.ps1 task evidence list <task-id> --json
+.\forge.ps1 task evidence show <task-id> --artifact-id <artifact-id> --json
+```
+
+Both accept an optional `--schema-version`. When supplied it must be `1.0`; any other value fails
+with `UNSUPPORTED_SCHEMA`. Both retain human-readable output when `--json` is absent: `list` prints
+one tab-separated line per artifact, and `show` prints the artifact header followed by its content.
+
+These commands never write. They do not create, retry, cancel, reconcile, or alter a task, and they
+do not modify the database or any evidence file.
+
+### Evidence manifest
+
+`task evidence list` returns a manifest of every artifact the public allowlist recognizes. A task
+that has not produced evidence yet is a success, not a failure: `evidence_available` is `false` and
+`artifacts` is empty.
+
+```json
+{
+  "schema_version": "1.0",
+  "command": "task.evidence.list",
+  "success": true,
+  "data": {
+    "task_id": "TASK-1042",
+    "project": "demo",
+    "task_state": "COMPLETED",
+    "evidence_available": true,
+    "attempt_count": 2,
+    "attempts_with_evidence": [0, 1],
+    "artifact_count": 11,
+    "availability": {
+      "final_result": true,
+      "validation_result": true,
+      "review_result": true,
+      "patch": true,
+      "repair_summary": true,
+      "implementation_result": true
+    },
+    "artifacts": [
+      {
+        "artifact_id": "ev_a9fb9c7eeaca90cefa3b5874075530b6",
+        "artifact_kind": "implementation_result",
+        "display_name": "attempt-00/implementation/implementation.final.json",
+        "media_type": "application/json",
+        "attempt": 0,
+        "phase": "implementation",
+        "original_size_bytes": 218,
+        "sha256": "47af3f610e4d1e4245899f0b55eb57146d76826c73da5807414bbf77fdcfba7d",
+        "modified_at": "2026-08-05T02:20:15.294367+00:00",
+        "content_available": true,
+        "truncated_when_read": false,
+        "redaction_required": true,
+        "structured": true
+      }
+    ],
+    "limits": {
+      "max_returned_bytes": 262144,
+      "max_readable_bytes": 8388608
+    }
+  },
+  "error": null
+}
+```
+
+- `attempt_count` is the controller's attempt counter for the task; `attempts_with_evidence` lists
+  the attempts that actually left artifacts on disk. They differ while an attempt is still running.
+- `phase` is the phase or validation group the artifact belongs to, and is `null` for artifacts that
+  belong to the attempt as a whole. A repair phase and the validation run that follows it share one
+  group directory, so `phase` identifies the group rather than a single controller step.
+- `display_name` is the artifact's path relative to the task's evidence root. It is structural, not
+  a production absolute path.
+- `modified_at` is the file's modification time in UTC. Forge does not report a creation time,
+  because it is not recorded consistently across platforms.
+- `sha256` covers the artifact's complete original bytes. It is `null` when the artifact is larger
+  than `max_readable_bytes`, or when the file changed while the manifest was being built — Forge
+  reports no hash rather than one that describes no version of the file.
+- `content_available` is `false` when the artifact is too large to read or holds binary content.
+- `truncated_when_read` predicts whether `show` will truncate, from the raw size alone. It is a
+  hint: redaction runs before truncation, so a redacted artifact can come back complete.
+- `redaction_required` is `true` for every public artifact: redaction is unconditional, not
+  conditional on a scan result.
+- Ordering is deterministic: by attempt number, then by relative path.
+
+### Artifact classification
+
+The contract is an explicit allowlist keyed on the controller's own evidence layout, not on file
+extensions. An artifact Forge does not positively recognize is excluded.
+
+| `artifact_kind` | Source file | Media type | Structured |
+|---|---|---|---|
+| `final_result` | `attempt-NN/task-result.json` | `application/json` | yes |
+| `patch` | `attempt-NN/changes.patch` | `text/x-diff` | no |
+| `implementation_result` | `attempt-NN/implementation/implementation.final.json` | `application/json` | yes |
+| `review_result` | `attempt-NN/review[-N]/review[-N].final.json` | `application/json` | yes |
+| `repair_summary` | `attempt-NN/{validation,review}-repair-N/*.final.json` | `application/json` | yes |
+| `validation_log` | `attempt-NN/<group>/validation-NN.{stdout,stderr}.log` | `text/plain` | no |
+
+Excluded from the public contract:
+
+| Excluded | Reason |
+|---|---|
+| `<phase>.prompt.txt` | Raw model prompt, which embeds controller paths and prior failure text. |
+| `<phase>.events.jsonl` | Unrestricted JSONL model event stream, including thread identifiers. |
+| `<phase>.stderr.log` | Unrestricted model process stderr, not classified as safe output. |
+| Anything else under the evidence root | Not positively recognized by the allowlist. |
+| Anything outside the task's evidence root | Refused by the path-safety checks below. |
+
+Also excluded, by construction rather than by filter: authentication material, credential files,
+cookies, tokens, raw process environments, environment dumps, session and thread identifiers, and
+controller configuration. None of these are classified as public, so none can be selected.
+
+A `validation_log` is a declared validation command's captured output. Both its streams are
+published because the command exists only because an operator registered it, and the failing stream
+is usually the one that explains a failure. This is deliberately distinct from a model process's own
+`<phase>.stderr.log`, which stays excluded.
+
+### Artifact identifiers and path safety
+
+An `artifact_id` is a deterministic, opaque identifier: `ev_` followed by 32 hex characters derived
+from a SHA-256 over the task identifier and the artifact's relative path. The same artifact of the
+same task always yields the same identifier; the identifier discloses no path information and is not
+valid for a different task.
+
+External callers never supply a file-system path. `show` recomputes the manifest and matches the
+supplied identifier against it — the identifier is matched, never decoded into a path. Consequently:
+
+- Path traversal, absolute paths, UNC paths, and alternate-data-stream names fail the identifier
+  shape check and return `ARTIFACT_NOT_FOUND`.
+- An excluded artifact is indistinguishable from a missing one, so `show` cannot be used to probe
+  for withheld files.
+
+In addition, Forge:
+
+1. Derives the task evidence root from controller state only, and proves the derived root is inside
+   the configured evidence root.
+2. Canonicalizes the evidence root and the candidate file, and confirms containment both when the
+   manifest is built and again immediately before reading.
+3. Inspects directory entries without following links, and refuses symlinks and Windows reparse
+   points, so a link that escapes the evidence root is never traversed or served.
+4. Refuses anything that is not a regular file: directories, devices, pipes, and sockets.
+5. Rejects path components containing `:`, `/`, `\`, or NUL, and the components `.` and `..`.
+6. Never executes an artifact and never opens one with an associated application.
+7. Never returns a production absolute file-system path in artifact content.
+
+### Artifact content
+
+`task evidence show` returns one bounded, redacted artifact.
+
+```json
+{
+  "schema_version": "1.0",
+  "command": "task.evidence.show",
+  "success": true,
+  "data": {
+    "task_id": "TASK-1042",
+    "project": "demo",
+    "task_state": "COMPLETED",
+    "artifact": {
+      "artifact_id": "ev_782bd8bac79b8ada58799e9e8ea86ddd",
+      "artifact_kind": "final_result",
+      "display_name": "attempt-01/task-result.json",
+      "media_type": "application/json",
+      "attempt": 1,
+      "phase": null,
+      "original_size_bytes": 904,
+      "sha256": "ade5a7ee8a94821b1bd51c8c58debea0c963cfbdee65ac02ab3f96e23b8dc2a5",
+      "modified_at": "2026-08-05T02:21:31.177431+00:00",
+      "content_available": true,
+      "truncated_when_read": false,
+      "redaction_required": true,
+      "structured": true
+    },
+    "content": {
+      "encoding": "utf-8",
+      "text": "{\n  \"status\": \"completed\",\n  \"summary\": \"Implemented the export.\"\n}",
+      "representation": "sanitized_json",
+      "original_size_bytes": 904,
+      "returned_size_bytes": 694,
+      "truncated": false,
+      "redacted": true,
+      "sha256": "ade5a7ee8a94821b1bd51c8c58debea0c963cfbdee65ac02ab3f96e23b8dc2a5",
+      "complete": true
+    },
+    "structured_status": "sanitized",
+    "structured_data": {
+      "status": "completed",
+      "summary": "Implemented the export.",
+      "changed_files": ["src/app.py"],
+      "validation_performed": ["python -m pytest"],
+      "assumptions": [],
+      "blocking_reason": null,
+      "decisions_needed": [],
+      "reusable_patterns": [{"trigger": "export", "lesson": "buffer writes"}],
+      "review": {"verdict": "pass", "summary": "No blocking issues.", "findings": []},
+      "controller_validation": [
+        {"command": "python -m pytest", "exit_code": 0, "passed": true, "duration_seconds": 1.5}
+      ],
+      "branch": "forge/task-1",
+      "commit": "abc123",
+      "completed_at": "2026-08-04T10:00:00+00:00"
+    },
+    "formatted_text": "Status: completed\nSummary: Implemented the export.",
+    "limits": {"max_returned_bytes": 262144, "max_readable_bytes": 8388608}
+  },
+  "error": null
+}
+```
+
+#### Size limits and truncation
+
+- Forge returns at most `limits.max_returned_bytes` (262144, 256 KiB) of content.
+- Forge refuses to read an artifact larger than `limits.max_readable_bytes` (8388608, 8 MiB) and
+  reports `ARTIFACT_TOO_LARGE`.
+- **Order of operations: read whole, sanitize, then bound.** Forge reads the artifact completely up
+  to the read limit, applies path scrubbing, redaction, and structured sanitization to the whole
+  content, and only then truncates to the return limit. Truncating first would let a secret that
+  straddles the return limit survive as an unmatched — and therefore unredacted — prefix.
+- Because redaction runs first, replacing a secret can bring content back under the return limit.
+  An artifact whose raw size exceeds `max_returned_bytes` is therefore not guaranteed to come back
+  truncated. `artifact.truncated_when_read` in the manifest is a prediction from the raw size;
+  `content.truncated` in a `show` response is authoritative.
+- `content.original_size_bytes` is the artifact's full size on disk; `content.returned_size_bytes`
+  is the UTF-8 byte length of the returned `text` after sanitization, redaction, and truncation. The
+  two differ routinely and neither implies the other.
+- `content.truncated` is `true` when the returned text was cut. `content.complete` is its inverse
+  and exists so a consumer cannot mistake a bounded response for a whole file. Forge never reports
+  complete content it did not return in full.
+- Truncation happens on a byte boundary and is then trimmed back to a valid UTF-8 character
+  boundary, so a multi-byte character is never split across the limit.
+
+#### Hash semantics
+
+`sha256` always covers the artifact's complete original bytes as they were on disk — never the
+returned, truncated, sanitized, or redacted text. A truncated response therefore carries a hash that
+does not match its own `text`; this is intentional, so a consumer can detect that an artifact
+changed between two calls.
+
+#### Redaction semantics
+
+Redaction is unconditional and applied line by line, so line structure and line counts survive. A
+pattern can never consume a newline and join two lines. `content.redacted` reports whether anything
+was replaced. Redacted values become `[REDACTED]`.
+
+Forge redacts at minimum: API keys, bearer tokens, OAuth tokens, `Authorization` headers,
+credential-style assignments (`password`, `secret`, `token`, `api_key`, `client_secret`,
+`private_key`, `passphrase`, and similar names), passwords, private-key blocks, URLs carrying user
+credentials, JWTs, and the known secret formats Forge already recognizes (`sk-`, `sk-ant-`, `ghp_`
+and related GitHub tokens, `github_pat_`, Slack `xox*`, Google `ya29.` and `AIza`, AWS `AKIA`/`ASIA`).
+
+Forge additionally replaces its own configured absolute roots — evidence, workspace, repository,
+knowledge, inbox, data, and installation roots — with placeholders such as `<evidence-root>`, so a
+log line that echoes a production path does not disclose it. Path scrubbing counts as redaction and
+sets `content.redacted`.
+
+Redaction is a presentation concern. The artifact on disk is never modified.
+
+#### Structured artifacts
+
+For a recognized controller document, `structured_data` holds an explicit allowlist of safe fields.
+Internal absolute paths (`worktree`, `patch`, per-run `stdout`/`stderr`), thread identifiers, raw
+prompts, and any unrecognized field are removed rather than masked. `formatted_text` is an optional
+sanitized rendering for display.
+
+Allowlisted fields are documented as strings, but the document is model-produced and Forge does not
+re-validate it against a schema here. Every string is therefore sanitized at every depth: a nested
+object or array appearing where a string was expected is still scrubbed and redacted rather than
+passed through. Nesting deeper than 8 levels is dropped, and allowlisted collections are capped at
+500 entries so the projection cannot outgrow the return limit.
+
+Arbitrary JSON is never passed through. When sanitization applies, `content.text` carries the
+serialized allowlisted projection — indicated by `content.representation` of `sanitized_json` — so a
+field removed from `structured_data` cannot reappear through the content channel.
+
+`structured_status` reports what happened:
+
+| Value | Meaning |
+|---|---|
+| `sanitized` | The document was valid and allowlisted. `content.representation` is `sanitized_json`. |
+| `invalid_json` | The file is not valid JSON. `structured_data` is `null` and the redacted raw text is returned as `redacted_text`. |
+| `unsupported_shape` | Valid JSON, but not a recognized controller document shape, or nested too deeply to parse. |
+| `unavailable_truncated` | The sanitized projection would exceed the return limit, so it was withheld and the redacted raw text returned instead. |
+| `not_structured` | The artifact is not a structured kind (a patch or validation log). |
+
+Because serializing a sanitized projection can expand it, Forge measures the result against
+`max_returned_bytes` and falls back to `redacted_text` rather than returning JSON truncated into
+invalid syntax.
+
+#### Consistency while a task is running
+
+Evidence is written while a task runs, so an artifact can change during inspection. Forge captures
+file metadata from the same descriptor before and after reading and compares size, modification
+time, and file identity. If the artifact changed, Forge returns `ARTIFACT_CHANGED_DURING_READ`
+rather than a stable-looking result, and the caller may retry; `error.details.retryable` is `true`.
+
+Inspecting a file and opening it cannot be made atomic, so Forge also proves that the descriptor it
+read refers to the file it inspected, by comparing device and inode identity across the open. This
+detects a regular file swapped for a link between the two steps. Where the underlying filesystem
+does not report file identity, Forge reports `ARTIFACT_CHANGED_DURING_READ` rather than skipping the
+check; the evidence root is expected to live on a filesystem that supplies it, such as NTFS.
+
+Forge opens artifacts for shared reading only and never takes a lock, so inspection cannot block the
+controller from writing evidence. An artifact deleted between `list` and `show` returns
+`ARTIFACT_NOT_FOUND`.
+
 ## Errors
 
 Expected and unexpected failures use the same envelope. Python tracebacks are never included in the
@@ -510,6 +823,42 @@ This response exits with code `2`. Stable current error codes are:
 | `INVALID_LIMIT` | 2 | `max_attempts` or `priority` was not an integer within its supported range. |
 | `CONFIGURATION_ERROR` | 2 | Forge is configured but not initialized. Run `forge init`. |
 | `DATABASE_ERROR` | 1 | The Forge database could not be read or written. |
+| `EVIDENCE_NOT_FOUND` | 2 | The task exists but has recorded no evidence. |
+| `EVIDENCE_UNAVAILABLE` | 2 | The task's evidence cannot be located, for example because its project is no longer registered. |
+| `ARTIFACT_NOT_FOUND` | 2 | The identifier is not a public artifact of this task, or the artifact was removed. |
+| `ARTIFACT_NOT_PUBLIC` | 2 | Reserved for an artifact excluded by the public allowlist. |
+| `ARTIFACT_OUTSIDE_EVIDENCE_ROOT` | 2 | A candidate resolved outside the task's evidence root and was refused. |
+| `ARTIFACT_UNSAFE_TYPE` | 2 | The artifact is binary, or is not a regular file. |
+| `ARTIFACT_TOO_LARGE` | 2 | The artifact exceeds `limits.max_readable_bytes`. |
+| `ARTIFACT_INVALID_UTF8` | 2 | The artifact is not valid UTF-8 text. |
+| `ARTIFACT_CHANGED_DURING_READ` | 1 | The artifact changed while being read. Retryable; `details.retryable` is `true`. |
+| `FILESYSTEM_ERROR` | 1 | The evidence tree could not be read. |
+| `UNSUPPORTED_SCHEMA` | 2 | The requested `--schema-version` is not supported. |
+
+An evidence failure is reported identically in both output modes: with `--json` the envelope carries
+the code and the process exits nonzero; without `--json` the same `CODE: message` line goes to
+stderr, stdout stays empty, and the exit code is unchanged. `ARTIFACT_NOT_PUBLIC` is reserved and
+documented for completeness; Forge currently reports `ARTIFACT_NOT_FOUND` for an excluded artifact so
+that the response cannot be used to confirm a withheld file exists.
+
+A failure example, which exits with code `2`:
+
+```json
+{
+  "schema_version": "1.0",
+  "command": "task.evidence.show",
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ARTIFACT_NOT_FOUND",
+    "message": "The artifact identifier is not a known artifact for this task.",
+    "details": {
+      "task_id": "TASK-1042",
+      "artifact_id": "ev_00000000000000000000000000000000"
+    }
+  }
+}
+```
 
 `INVALID_ARGUMENT` covers failures the argument parser rejects before Forge sees the request;
 `INVALID_TASK_REQUEST` covers values that parse but are not acceptable. More codes may be added
@@ -517,7 +866,9 @@ compatibly, so consumers must treat an unrecognized code as a failure rather tha
 
 Error `details` are structured and safe to log. They identify the offending field, index, or
 identifier, and never contain submitted command text, database messages, file-system paths, or
-Python exception text.
+Python exception text. Evidence failures follow the same rule: a SQLite message, an OS error string,
+a raw exception, a captured stdout or stderr fragment, and the bytes of a rejected artifact are all
+withheld.
 
 ## Security and compatibility expectations
 
@@ -532,6 +883,13 @@ Validation commands are redacted on the way out, in both `task.validation_comman
 still runs the command exactly as submitted — so a redacted response cannot be resubmitted verbatim
 as an identical request.
 
+Evidence retrieval is read-only and additive. It classifies by the controller's own layout rather
+than by file extension, so a new controller output is excluded until it is explicitly allowlisted.
+It withholds prompts, model event streams, unrestricted model stderr, thread and session identifiers,
+credentials, and controller configuration, and it removes internal absolute paths from structured
+documents instead of masking them. Evidence commands never write, never lock an evidence file, and
+never block the controller.
+
 Submission is the only write this contract performs. It inserts one task row and nothing else: it
 does not fetch, clone, create branches or worktrees, run validation commands, start the controller,
 or touch the file system. Both submission and validation refuse to run against a database that does
@@ -542,3 +900,15 @@ The SQLite schema is an internal persistence format and may change independently
 Reading `forge.db` directly can bypass redaction, couple an application to private fields, and produce
 inconsistent reads. External applications—including Shared Chat integrations—must invoke the
 documented `--json` commands and must not open `forge.db` directly.
+
+The same rule applies to evidence. The on-disk evidence tree under the Forge data root—`C:\CodexData`
+on the production VPS—is an internal format. It contains raw prompts, model event streams,
+unrestricted process stderr, and absolute production paths, none of which pass through redaction on
+disk. **Consumers must never read `C:\CodexData` directly.** Use `task evidence list` and
+`task evidence show`, which are the only supported way to obtain task evidence.
+
+Evidence layout, artifact classifications, and the set of `artifact_kind` values may gain additive
+members within schema `1.0`. Consumers must treat an unrecognized `artifact_kind`,
+`structured_status`, or `content.representation` as unknown rather than as an error, and must not
+depend on `display_name` remaining stable across controller versions — `artifact_id` is the stable
+handle within a task.

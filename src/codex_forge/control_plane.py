@@ -39,6 +39,18 @@ ERROR_EXIT_CODES: dict[str, int] = {
     "INVALID_LIMIT": 2,
     "CONFIGURATION_ERROR": 2,
     "DATABASE_ERROR": 1,
+    "EVIDENCE_NOT_FOUND": 2,
+    "EVIDENCE_UNAVAILABLE": 2,
+    "ARTIFACT_NOT_FOUND": 2,
+    "ARTIFACT_NOT_PUBLIC": 2,
+    "ARTIFACT_OUTSIDE_EVIDENCE_ROOT": 2,
+    "ARTIFACT_UNSAFE_TYPE": 2,
+    "ARTIFACT_TOO_LARGE": 2,
+    "ARTIFACT_INVALID_UTF8": 2,
+    "UNSUPPORTED_SCHEMA": 2,
+    # Retryable: the artifact was being written while it was read. The caller may repeat the call.
+    "ARTIFACT_CHANGED_DURING_READ": 1,
+    "FILESYSTEM_ERROR": 1,
 }
 
 
@@ -131,13 +143,23 @@ def project_to_public(project: Project) -> dict[str, Any]:
     }
 
 
+def redact_secret_arguments(text: str) -> str:
+    """Redact credential-shaped CLI arguments and URL credentials.
+
+    This is the subset of command redaction that is safe to apply to free-form captured output. It
+    deliberately excludes the blanket `name=value` rule, which would destroy ordinary log lines such
+    as `exit_code=0`.
+    """
+    redacted = _SECRET_ARGUMENT_PATTERN.sub(
+        lambda match: f"{match.group('prefix')}[REDACTED]", text
+    )
+    return _URL_CREDENTIAL_PATTERN.sub(r"\g<scheme>[REDACTED]@", redacted)
+
+
 def redact_command(command: str) -> str:
     """Replace credential-shaped values in a command with `[REDACTED]`."""
     redacted = _ASSIGNMENT_PATTERN.sub(lambda match: f"{match.group('prefix')}[REDACTED]", command)
-    redacted = _SECRET_ARGUMENT_PATTERN.sub(
-        lambda match: f"{match.group('prefix')}[REDACTED]", redacted
-    )
-    return _URL_CREDENTIAL_PATTERN.sub(r"\g<scheme>[REDACTED]@", redacted)
+    return redact_secret_arguments(redacted)
 
 
 def _safe_task_error(last_error: str | None) -> tuple[str | None, str | None]:
