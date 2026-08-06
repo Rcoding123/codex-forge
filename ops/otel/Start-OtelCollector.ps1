@@ -29,7 +29,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-. (Join-Path $ScriptRoot "Resolve-OtelCollector.ps1")
+$ResolverScript = Join-Path $ScriptRoot "Resolve-OtelCollector.ps1"
 
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $ScriptRoot "collector-config.yaml"
@@ -39,11 +39,15 @@ if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
 }
 $ConfigPath = (Resolve-Path -LiteralPath $ConfigPath).Path
 
-$collector = Resolve-OtelCollectorPath -CollectorPath $CollectorPath
+# Invoked, never dot-sourced. Dot-sourcing Resolve-OtelCollector.ps1 would run its param block in
+# this scope and rebind $CollectorPath to an empty string, discarding the operator's explicit path
+# before it ever reaches the resolver. A child invocation cannot touch this scope's variables.
+$collector = & $ResolverScript -CollectorPath $CollectorPath
 
 if ($ValidateOnly) {
     Write-Host "Validating $ConfigPath"
-    & $collector validate --config $ConfigPath
+    $collectorArguments = @("validate", "--config", $ConfigPath)
+    & $collector @collectorArguments
     if ($LASTEXITCODE -ne 0) {
         # Older Collector builds predate `validate`. Report that rather than implying the
         # configuration itself was rejected.
@@ -55,5 +59,6 @@ if ($ValidateOnly) {
 Write-Host "Starting Collector: $collector"
 Write-Host "Configuration:      $ConfigPath"
 Write-Host "Listening on 127.0.0.1:4317 (gRPC) and 127.0.0.1:4318 (HTTP). Spans print below. Ctrl+C to stop."
-& $collector --config $ConfigPath
+$collectorArguments = @("--config", $ConfigPath)
+& $collector @collectorArguments
 exit $LASTEXITCODE

@@ -218,8 +218,16 @@ $env:OTELCOL_PATH = 'C:\Tools\otelcol-contrib\otelcol-contrib.exe'
 ```
 
 The helper resolves the binary from `-CollectorPath`, then `OTELCOL_PATH`, then `PATH`, and fails
-with all three locations listed when none has it. It creates no Windows service and no scheduled
-task; stop the Collector with Ctrl+C.
+with all three locations listed when none has it. An explicit `-CollectorPath` always wins, needs no
+`OTELCOL_PATH`, need not be on `PATH`, and may contain spaces. It creates no Windows service and no
+scheduled task; stop the Collector with Ctrl+C.
+
+Whichever source supplies it, the path must name an existing file carrying a Windows PE header.
+Directories, `.cmd`/`.bat`/`.ps1` and other interpreted files, and non-executables renamed to `.exe`
+are refused rather than handed to the shell — `PATHEXT` otherwise lets an `otelcol-contrib.cmd`
+planted earlier on `PATH` run as a script under your identity. More than one `otelcol-contrib` on
+`PATH` is refused as ambiguous instead of silently taking whichever comes first; name the one you
+want with `-CollectorPath` or `OTELCOL_PATH`.
 
 `ops/otel/collector-config.yaml` listens on `127.0.0.1:4317` (gRPC) and `127.0.0.1:4318` (HTTP),
 applies a memory limiter and a batch processor, and exports **only** through the `debug` exporter.
