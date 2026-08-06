@@ -16,9 +16,10 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Iterator, Mapping
 
 from .config import ForgeConfig
-from .control_plane import redact_command, task_to_public
+from .control_plane import DEFAULT_SCHEMA_VERSION, redact_command, task_to_public
 from .db import ForgeDB
 from .models import Project, Task, TaskState
+from .usage import empty_token_usage
 from .utils import flatten_unique, json_dumps, slugify, stable_id
 
 
@@ -568,7 +569,7 @@ def _defaults_payload(
     return resolved
 
 
-EMPTY_TOKEN_USAGE = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+EMPTY_TOKEN_USAGE = empty_token_usage()
 
 
 def _task_payload(
@@ -576,8 +577,9 @@ def _task_payload(
     *,
     config: ForgeConfig,
     project: Project,
-    token_usage: Mapping[str, int],
+    token_usage: Mapping[str, Any],
     runtime: Mapping[str, Any],
+    schema_version: str = DEFAULT_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     payload = task_to_public(
         task,
@@ -585,6 +587,7 @@ def _task_payload(
         token_usage=token_usage,
         token_limit=config.max_task_tokens,
         runtime=runtime,
+        schema_version=schema_version,
     )
     payload["acceptance_criteria"] = list(task.acceptance)
     payload["validation_commands"] = [redact_command(command) for command in task.validation_commands]
@@ -630,13 +633,23 @@ def _conflict_error(request: TaskRequest, task_id: str) -> TaskSubmissionError:
 
 
 def _persisted_task_payload(
-    db: ForgeDB, task: Task, *, config: ForgeConfig, project: Project
+    db: ForgeDB,
+    task: Task,
+    *,
+    config: ForgeConfig,
+    project: Project,
+    schema_version: str = DEFAULT_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     with _database_scope():
         token_usage = db.task_token_usage(task.id)
         runtime = db.task_runtime(task.id)
     return _task_payload(
-        task, config=config, project=project, token_usage=token_usage, runtime=runtime
+        task,
+        config=config,
+        project=project,
+        token_usage=token_usage,
+        runtime=runtime,
+        schema_version=schema_version,
     )
 
 
@@ -680,12 +693,17 @@ def _insert_once(
 
 
 def submit_task(
-    config: ForgeConfig, request: TaskRequest, *, dry_run: bool, db: ForgeDB | None = None
+    config: ForgeConfig,
+    request: TaskRequest,
+    *,
+    dry_run: bool,
+    db: ForgeDB | None = None,
+    schema_version: str = DEFAULT_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     """Validate a request and, unless `dry_run`, persist it exactly once.
 
-    Returns the `data` payload of the schema 1.0 envelope. Raises `TaskSubmissionError` for every
-    expected failure so the caller emits one stable structured error.
+    Returns the `data` payload of the envelope for `schema_version`. Raises `TaskSubmissionError`
+    for every expected failure so the caller emits one stable structured error.
     """
     db = db or open_database(config)
     project = _resolve_project(db, request.project)
@@ -706,7 +724,9 @@ def submit_task(
             "dry_run": dry_run,
             "created": False,
             "would_create": False,
-            "task": _persisted_task_payload(db, existing, config=config, project=project),
+            "task": _persisted_task_payload(
+                db, existing, config=config, project=project, schema_version=schema_version
+            ),
             "normalized_request": normalized,
             "defaults_applied": defaults,
         }
@@ -723,6 +743,7 @@ def submit_task(
                 project=project,
                 token_usage=EMPTY_TOKEN_USAGE,
                 runtime={},
+                schema_version=schema_version,
             ),
             "normalized_request": normalized,
             "defaults_applied": defaults,
@@ -741,7 +762,9 @@ def submit_task(
         "dry_run": False,
         "created": created,
         "would_create": False,
-        "task": _persisted_task_payload(db, stored, config=config, project=project),
+        "task": _persisted_task_payload(
+            db, stored, config=config, project=project, schema_version=schema_version
+        ),
         "normalized_request": normalized,
         "defaults_applied": defaults,
     }

@@ -148,8 +148,6 @@ def test_runs_record_effort_and_sum_usage(tmp_path: Path):
     with db.connect() as connection:
         effort = connection.execute("SELECT effort FROM runs WHERE id=?", (run_id,)).fetchone()[0]
     assert effort == "medium"
-    assert db.task_token_usage(task.id) == {
-        "input_tokens": 12,
-        "output_tokens": 3,
-        "total_tokens": 15,
-    }
+    usage = db.task_token_usage(task.id)
+    assert (usage["input_tokens"], usage["output_tokens"], usage["total_tokens"]) == (12, 3, 15)
+    assert usage["raw_total_tokens"] == 15

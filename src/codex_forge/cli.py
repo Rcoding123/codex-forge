@@ -7,11 +7,16 @@ from pathlib import Path
 
 from .config import ForgeConfig, load_config
 from .control_plane import (
+    DEFAULT_SCHEMA_VERSION,
+    SUPPORTED_SCHEMA_VERSIONS,
     StructuredError,
+    UnsupportedSchemaVersion,
     decision_to_public,
     error_exit_code,
     project_to_public,
+    resolve_schema_version,
     task_to_public,
+    unsupported_schema_error,
     write_response,
 )
 from .db import ForgeDB
@@ -56,6 +61,19 @@ def package_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _add_schema_version_argument(parser: argparse.ArgumentParser) -> None:
+    """Let a caller pin the contract version a command's JSON response declares.
+
+    Omitting it keeps the response on the default version, so an installed consumer keeps receiving
+    exactly the contract it was built against.
+    """
+    parser.add_argument(
+        "--schema-version",
+        default=None,
+        help=f"Contract version to emit ({' or '.join(SUPPORTED_SCHEMA_VERSIONS)}).",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = ForgeArgumentParser(prog="forge", description="Autonomous Codex engineering controller")
     parser.add_argument("--config", help="Path to forge.toml")
@@ -77,6 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     project_add.add_argument("--no-commit", action="store_true")
     project_add.add_argument("--push", action="store_true")
     project_list = project_sub.add_parser("list", help="List projects")
+    _add_schema_version_argument(project_list)
     project_list.add_argument("--json", action="store_true")
 
     task = sub.add_parser("task", help="Manage tasks")
@@ -98,12 +117,15 @@ def build_parser() -> argparse.ArgumentParser:
     task_add.add_argument(
         "--dry-run", action="store_true", help="Validate the request without writing to the database"
     )
+    _add_schema_version_argument(task_add)
     task_add.add_argument("--json", action="store_true")
     task_list = task_sub.add_parser("list", help="List tasks")
     task_list.add_argument("--state", choices=[state.value for state in TaskState])
+    _add_schema_version_argument(task_list)
     task_list.add_argument("--json", action="store_true")
     task_show = task_sub.add_parser("show", help="Show one task")
     task_show.add_argument("task_id")
+    _add_schema_version_argument(task_show)
     task_show.add_argument("--json", action="store_true")
     task_retry = task_sub.add_parser("retry", help="Retry a failed or blocked task")
     task_retry.add_argument("task_id")
@@ -112,14 +134,14 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_sub = task_evidence.add_subparsers(dest="evidence_command", required=True)
     evidence_list = evidence_sub.add_parser("list", help="List publishable evidence artifacts")
     evidence_list.add_argument("task_id")
-    evidence_list.add_argument("--schema-version", default=None)
+    _add_schema_version_argument(evidence_list)
     evidence_list.add_argument("--json", action="store_true")
     evidence_show = evidence_sub.add_parser("show", help="Show one evidence artifact")
     evidence_show.add_argument("task_id")
     evidence_show.add_argument(
         "--artifact-id", required=True, help="Opaque artifact identifier from `task evidence list`"
     )
-    evidence_show.add_argument("--schema-version", default=None)
+    _add_schema_version_argument(evidence_show)
     evidence_show.add_argument("--json", action="store_true")
 
     run = sub.add_parser("run", help="Run ready tasks")
@@ -128,11 +150,13 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--daemon", action="store_true")
 
     status = sub.add_parser("status", help="Show queue status")
+    _add_schema_version_argument(status)
     status.add_argument("--json", action="store_true")
 
     decision = sub.add_parser("decision", help="View decisions requiring a person")
     decision_sub = decision.add_subparsers(dest="decision_command", required=True)
     decision_list = decision_sub.add_parser("list")
+    _add_schema_version_argument(decision_list)
     decision_list.add_argument("--json", action="store_true")
 
     return parser
@@ -233,13 +257,16 @@ def cmd_project_add(config: ForgeConfig, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_project_list(config: ForgeConfig, as_json: bool = False) -> int:
+def cmd_project_list(
+    config: ForgeConfig, as_json: bool = False, schema_version: str = DEFAULT_SCHEMA_VERSION
+) -> int:
     db = ForgeDB(config.database_path)
     projects = db.list_projects()
     if as_json:
         write_response(
             "project.list",
             data={"projects": [project_to_public(project) for project in projects]},
+            schema_version=schema_version,
         )
         return 0
     for project in projects:
@@ -247,9 +274,11 @@ def cmd_project_list(config: ForgeConfig, as_json: bool = False) -> int:
     return 0
 
 
-def cmd_task_add(config: ForgeConfig, args: argparse.Namespace) -> int:
+def cmd_task_add(
+    config: ForgeConfig, args: argparse.Namespace, schema_version: str = DEFAULT_SCHEMA_VERSION
+) -> int:
     if getattr(args, "json", False) or getattr(args, "dry_run", False):
-        return cmd_task_submit(config, args)
+        return cmd_task_submit(config, args, schema_version)
     db = ForgeDB(config.database_path)
     project = db.get_project(args.project)
     if not project:
@@ -276,25 +305,28 @@ def cmd_task_add(config: ForgeConfig, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_task_submit(config: ForgeConfig, args: argparse.Namespace) -> int:
+def cmd_task_submit(
+    config: ForgeConfig, args: argparse.Namespace, schema_version: str = DEFAULT_SCHEMA_VERSION
+) -> int:
     """Handle `task add --json` and `task add --dry-run` through the versioned contract."""
     as_json = getattr(args, "json", False)
     dry_run = getattr(args, "dry_run", False)
     try:
         request = build_task_request(args)
-        data = submit_task(config, request, dry_run=dry_run)
+        data = submit_task(config, request, dry_run=dry_run, schema_version=schema_version)
     except TaskSubmissionError as exc:
         if as_json:
             print(f"ERROR: {exc.code}", file=sys.stderr)
             write_response(
                 SUBMISSION_COMMAND,
                 error=StructuredError(code=exc.code, message=exc.message, details=exc.details),
+                schema_version=schema_version,
             )
         else:
             print(f"{exc.code}: {exc.message}", file=sys.stderr)
         return error_exit_code(exc.code)
     if as_json:
-        write_response(SUBMISSION_COMMAND, data=data)
+        write_response(SUBMISSION_COMMAND, data=data, schema_version=schema_version)
         return 0
     task = data["task"]
     if dry_run:
@@ -305,7 +337,9 @@ def cmd_task_submit(config: ForgeConfig, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_task_list(config: ForgeConfig, args: argparse.Namespace) -> int:
+def cmd_task_list(
+    config: ForgeConfig, args: argparse.Namespace, schema_version: str = DEFAULT_SCHEMA_VERSION
+) -> int:
     db = ForgeDB(config.database_path)
     state = TaskState(args.state) if args.state else None
     tasks = db.list_tasks(state)
@@ -321,11 +355,13 @@ def cmd_task_list(config: ForgeConfig, args: argparse.Namespace) -> int:
                         token_usage=db.task_token_usage(task.id),
                         token_limit=config.max_task_tokens,
                         runtime=db.task_runtime(task.id),
+                        schema_version=schema_version,
                     )
                     for task in tasks
                 ],
                 "filters": {"state": args.state},
             },
+            schema_version=schema_version,
         )
         return 0
     for task in tasks:
@@ -333,7 +369,12 @@ def cmd_task_list(config: ForgeConfig, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_task_show(config: ForgeConfig, task_id: str, as_json: bool = False) -> int:
+def cmd_task_show(
+    config: ForgeConfig,
+    task_id: str,
+    as_json: bool = False,
+    schema_version: str = DEFAULT_SCHEMA_VERSION,
+) -> int:
     db = ForgeDB(config.database_path)
     task = db.get_task(task_id)
     if not task:
@@ -345,6 +386,7 @@ def cmd_task_show(config: ForgeConfig, task_id: str, as_json: bool = False) -> i
                     message="Task was not found.",
                     details={"task_id": task_id},
                 ),
+                schema_version=schema_version,
             )
         else:
             print(f"Unknown task: {task_id}", file=sys.stderr)
@@ -360,8 +402,10 @@ def cmd_task_show(config: ForgeConfig, task_id: str, as_json: bool = False) -> i
                     token_usage=db.task_token_usage(task.id),
                     token_limit=config.max_task_tokens,
                     runtime=db.task_runtime(task.id),
+                    schema_version=schema_version,
                 )
             },
+            schema_version=schema_version,
         )
         return 0
     print(f"{task.id}\t{task.state.value}\tP{task.priority}\t{task.title}")
@@ -385,27 +429,35 @@ def cmd_task_retry(config: ForgeConfig, task_id: str) -> int:
     return 0
 
 
-def _evidence_failure(command: str, exc: EvidenceError, as_json: bool) -> int:
+def _evidence_failure(
+    command: str,
+    exc: EvidenceError,
+    as_json: bool,
+    schema_version: str = DEFAULT_SCHEMA_VERSION,
+) -> int:
     """Render an evidence failure identically in both output modes and map it to an exit code."""
     if as_json:
         print(f"ERROR: {exc.code}", file=sys.stderr)
         write_response(
             command,
             error=StructuredError(code=exc.code, message=exc.message, details=exc.details),
+            schema_version=schema_version,
         )
     else:
         print(f"{exc.code}: {exc.message}", file=sys.stderr)
     return error_exit_code(exc.code)
 
 
-def cmd_task_evidence_list(config: ForgeConfig, args: argparse.Namespace) -> int:
+def cmd_task_evidence_list(
+    config: ForgeConfig, args: argparse.Namespace, schema_version: str = DEFAULT_SCHEMA_VERSION
+) -> int:
     as_json = getattr(args, "json", False)
     try:
         data = evidence_list(config, args.task_id, schema_version=args.schema_version)
     except EvidenceError as exc:
         return _evidence_failure(EVIDENCE_LIST_COMMAND, exc, as_json)
     if as_json:
-        write_response(EVIDENCE_LIST_COMMAND, data=data)
+        write_response(EVIDENCE_LIST_COMMAND, data=data, schema_version=schema_version)
         return 0
     if not data["evidence_available"]:
         print(f"No evidence recorded for {data['task_id']}.")
@@ -418,7 +470,9 @@ def cmd_task_evidence_list(config: ForgeConfig, args: argparse.Namespace) -> int
     return 0
 
 
-def cmd_task_evidence_show(config: ForgeConfig, args: argparse.Namespace) -> int:
+def cmd_task_evidence_show(
+    config: ForgeConfig, args: argparse.Namespace, schema_version: str = DEFAULT_SCHEMA_VERSION
+) -> int:
     as_json = getattr(args, "json", False)
     try:
         data = evidence_show(
@@ -427,7 +481,7 @@ def cmd_task_evidence_show(config: ForgeConfig, args: argparse.Namespace) -> int
     except EvidenceError as exc:
         return _evidence_failure(EVIDENCE_SHOW_COMMAND, exc, as_json)
     if as_json:
-        write_response(EVIDENCE_SHOW_COMMAND, data=data)
+        write_response(EVIDENCE_SHOW_COMMAND, data=data, schema_version=schema_version)
         return 0
     artifact = data["artifact"]
     content = data["content"]
@@ -440,7 +494,9 @@ def cmd_task_evidence_show(config: ForgeConfig, args: argparse.Namespace) -> int
     return 0
 
 
-def cmd_status(config: ForgeConfig, as_json: bool) -> int:
+def cmd_status(
+    config: ForgeConfig, as_json: bool, schema_version: str = DEFAULT_SCHEMA_VERSION
+) -> int:
     db = ForgeDB(config.database_path)
     tasks = db.list_tasks()
     counts = {state.value: 0 for state in TaskState}
@@ -449,20 +505,25 @@ def cmd_status(config: ForgeConfig, as_json: bool) -> int:
     decisions = db.list_open_decisions()
     payload = {"tasks": counts, "open_decisions": len(decisions), "database": str(config.database_path)}
     if as_json:
-        write_response("status", data=payload, legacy_fields=payload)
+        write_response(
+            "status", data=payload, legacy_fields=payload, schema_version=schema_version
+        )
     else:
         print(" | ".join(f"{name}={count}" for name, count in counts.items() if count))
         print(f"OPEN_DECISIONS={len(decisions)}")
     return 0
 
 
-def cmd_decision_list(config: ForgeConfig, as_json: bool = False) -> int:
+def cmd_decision_list(
+    config: ForgeConfig, as_json: bool = False, schema_version: str = DEFAULT_SCHEMA_VERSION
+) -> int:
     db = ForgeDB(config.database_path)
     rows = db.list_open_decisions()
     if as_json:
         write_response(
             "decision.list",
             data={"decisions": [decision_to_public(row) for row in rows]},
+            schema_version=schema_version,
         )
         return 0
     if not rows:
@@ -520,6 +581,23 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         ForgeArgumentParser.structured_errors = False
 
+    # Resolved once, before any command runs, so an unknown version fails closed everywhere rather
+    # than in each command's own path.
+    try:
+        schema_version = resolve_schema_version(getattr(args, "schema_version", None))
+    except UnsupportedSchemaVersion as exc:
+        if json_requested:
+            print("ERROR: UNSUPPORTED_SCHEMA", file=sys.stderr)
+            write_response(
+                _requested_command(raw_argv), error=unsupported_schema_error(exc.requested)
+            )
+        else:
+            print(
+                f"UNSUPPORTED_SCHEMA: {exc.requested} is not a supported contract schema version.",
+                file=sys.stderr,
+            )
+        return error_exit_code("UNSUPPORTED_SCHEMA")
+
     try:
         config = load_config(args.config)
     except Exception as exc:
@@ -541,23 +619,23 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "project":
             if args.project_command == "add":
                 return cmd_project_add(config, args)
-            return cmd_project_list(config, args.json)
+            return cmd_project_list(config, args.json, schema_version)
         if args.command == "task":
             if args.task_command == "add":
-                return cmd_task_add(config, args)
+                return cmd_task_add(config, args, schema_version)
             if args.task_command == "list":
-                return cmd_task_list(config, args)
+                return cmd_task_list(config, args, schema_version)
             if args.task_command == "show":
-                return cmd_task_show(config, args.task_id, args.json)
+                return cmd_task_show(config, args.task_id, args.json, schema_version)
             if args.task_command == "evidence":
                 if args.evidence_command == "list":
-                    return cmd_task_evidence_list(config, args)
-                return cmd_task_evidence_show(config, args)
+                    return cmd_task_evidence_list(config, args, schema_version)
+                return cmd_task_evidence_show(config, args, schema_version)
             return cmd_task_retry(config, args.task_id)
         if args.command == "status":
-            return cmd_status(config, args.json)
+            return cmd_status(config, args.json, schema_version)
         if args.command == "decision":
-            return cmd_decision_list(config, args.json)
+            return cmd_decision_list(config, args.json, schema_version)
         if args.command == "run":
             orchestrator = Orchestrator(config, package_root())
             if args.daemon:

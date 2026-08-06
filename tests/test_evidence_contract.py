@@ -1531,19 +1531,22 @@ def test_unsupported_schema_version_is_rejected(tmp_path: Path, capsys):
 
     assert exit_code == 2
     assert payload["error"]["code"] == "UNSUPPORTED_SCHEMA"
-    assert payload["error"]["details"]["supported"] == ["1.0"]
+    assert payload["error"]["details"]["supported"] == ["1.0", "1.1"]
 
 
-def test_requested_schema_version_one_zero_is_accepted(tmp_path: Path, capsys):
+@pytest.mark.parametrize("requested", ["1.0", "1.1"])
+def test_requested_supported_schema_versions_are_accepted(tmp_path: Path, capsys, requested: str):
+    """Each supported version is served, and the response declares the version that was asked for."""
     config, db = _configured(tmp_path)
     _seed(db, tmp_path)
 
     exit_code, payload, _ = _run_json(
-        config, capsys, "task", "evidence", "list", TASK_ID, "--schema-version", "1.0", "--json"
+        config, capsys, "task", "evidence", "list", TASK_ID, "--schema-version", requested, "--json"
     )
 
     assert exit_code == 0
     assert payload["success"] is True
+    assert payload["schema_version"] == requested
 
 
 def test_database_error_is_structured(tmp_path: Path, monkeypatch, capsys):

@@ -10,7 +10,19 @@ from .models import Project, Task
 from .utils import json_loads
 
 
-SCHEMA_VERSION = "1.0"
+# The version a response declares when the caller does not ask for one. A newer contract version is
+# opt-in and never arrives by upgrading Forge: an installed consumer validates the version it was
+# built against, so silently emitting a newer one would break it even though every added field is
+# additive. `1.1` is served only to a caller that asked for `1.1`.
+DEFAULT_SCHEMA_VERSION = "1.0"
+LATEST_SCHEMA_VERSION = "1.1"
+# Every version in major 1 a caller may request. A removal, rename, or meaning change needs major 2.
+SUPPORTED_SCHEMA_VERSIONS = ("1.0", "1.1")
+
+# `token_usage` as schema 1.0 declares it. A 1.0 document that carried the 1.1 categories would
+# disagree with the version it announces, so the projection is by declared version, not by what
+# Forge happens to have computed.
+LEGACY_TOKEN_USAGE_FIELDS = ("input_tokens", "output_tokens", "total_tokens")
 _ASSIGNMENT_PATTERN = re.compile(
     r"(?P<prefix>(?:^|[\s;&])(?:\$env:)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*)"
     r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s;&]+)"
@@ -59,6 +71,39 @@ def error_exit_code(code: str) -> int:
     return ERROR_EXIT_CODES.get(code, 1)
 
 
+class UnsupportedSchemaVersion(ValueError):
+    """A caller requested a contract version this controller does not implement."""
+
+    def __init__(self, requested: str):
+        super().__init__(f"Unsupported contract schema version: {requested}")
+        self.requested = requested
+
+
+def resolve_schema_version(requested: str | None) -> str:
+    """Return the contract version a response must declare, failing closed on an unknown one.
+
+    Omitting the option keeps the caller on `DEFAULT_SCHEMA_VERSION`, which is the version every
+    already-installed consumer was built against.
+    """
+    if requested is None:
+        return DEFAULT_SCHEMA_VERSION
+    if requested not in SUPPORTED_SCHEMA_VERSIONS:
+        raise UnsupportedSchemaVersion(requested)
+    return requested
+
+
+def project_token_usage(token_usage: Mapping[str, Any], schema_version: str) -> dict[str, Any]:
+    """Return the `token_usage` object the declared contract version defines.
+
+    Schema 1.0 declares exactly three fields and consumers may validate that shape, so the extra
+    categories are withheld rather than added silently. Schema 1.1 declares the categorized shape,
+    which is whatever the aggregation reports.
+    """
+    if schema_version == DEFAULT_SCHEMA_VERSION:
+        return {field: token_usage.get(field, 0) for field in LEGACY_TOKEN_USAGE_FIELDS}
+    return dict(token_usage)
+
+
 @dataclass(frozen=True, slots=True)
 class StructuredError:
     code: str
@@ -73,15 +118,25 @@ class StructuredError:
         }
 
 
+def unsupported_schema_error(requested: str) -> StructuredError:
+    """Return the structured error a rejected schema-version request reports."""
+    return StructuredError(
+        code="UNSUPPORTED_SCHEMA",
+        message="The requested contract schema version is not supported.",
+        details={"requested": requested, "supported": list(SUPPORTED_SCHEMA_VERSIONS)},
+    )
+
+
 def response_envelope(
     command: str,
     *,
     data: Mapping[str, Any] | None = None,
     error: StructuredError | None = None,
     legacy_fields: Mapping[str, Any] | None = None,
+    schema_version: str = DEFAULT_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema_version,
         "command": command,
         "success": error is None,
         "data": dict(data) if data is not None else None,
@@ -116,6 +171,7 @@ def write_response(
     data: Mapping[str, Any] | None = None,
     error: StructuredError | None = None,
     legacy_fields: Mapping[str, Any] | None = None,
+    schema_version: str = DEFAULT_SCHEMA_VERSION,
     stream: TextIO | None = None,
 ) -> None:
     output = _utf8_stream(stream or sys.stdout)
@@ -124,6 +180,7 @@ def write_response(
         data=data,
         error=error,
         legacy_fields=legacy_fields,
+        schema_version=schema_version,
     )
     output.write(json.dumps(document, indent=2, ensure_ascii=False) + "\n")
 
@@ -180,9 +237,10 @@ def task_to_public(
     task: Task,
     *,
     project_name: str | None,
-    token_usage: Mapping[str, int],
+    token_usage: Mapping[str, Any],
     token_limit: int,
     runtime: Mapping[str, Any],
+    schema_version: str = DEFAULT_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     error_code, error_message = _safe_task_error(task.last_error)
     completed_at = task.result.get("completed_at")
@@ -196,7 +254,7 @@ def task_to_public(
         "risk": task.risk,
         "attempt_count": task.attempts,
         "max_attempts": task.max_attempts,
-        "token_usage": dict(token_usage),
+        "token_usage": project_token_usage(token_usage, schema_version),
         "token_limit": token_limit,
         "branch": task.branch,
         "worktree": str(task.worktree_path) if task.worktree_path else None,

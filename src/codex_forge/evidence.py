@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 from .config import ForgeConfig
-from .control_plane import SCHEMA_VERSION, redact_secret_arguments
+from .control_plane import SUPPORTED_SCHEMA_VERSIONS, redact_secret_arguments
 from .db import ForgeDB
 from .models import Task
 
@@ -873,11 +873,11 @@ def _format_structured(kind: str, payload: Mapping[str, Any]) -> str:
 
 
 def _require_schema(schema_version: str | None) -> None:
-    if schema_version is not None and schema_version != SCHEMA_VERSION:
+    if schema_version is not None and schema_version not in SUPPORTED_SCHEMA_VERSIONS:
         raise EvidenceError(
             "UNSUPPORTED_SCHEMA",
             "The requested contract schema version is not supported.",
-            {"requested": schema_version, "supported": [SCHEMA_VERSION]},
+            {"requested": schema_version, "supported": list(SUPPORTED_SCHEMA_VERSIONS)},
         )
 
 

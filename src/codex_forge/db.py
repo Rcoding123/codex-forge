@@ -3,9 +3,10 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from .models import Project, Task, TaskState
+from .usage import aggregate_token_usage
 from .utils import json_dumps, json_loads, utc_now
 
 
@@ -332,20 +333,18 @@ class ForgeDB:
                 (thread_id, exit_code, json_dumps(usage), utc_now(), run_id),
             )
 
-    def task_token_usage(self, task_id: str) -> dict[str, int]:
-        totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    def task_token_usage(self, task_id: str) -> dict[str, Any]:
+        """Aggregate the usage every completed run of a task reported.
+
+        The categories are derived from the persisted `usage_json` rather than from normalized
+        columns, so runs recorded before the categories were exposed report the same detail as runs
+        recorded today. `total_tokens` keeps its previous meaning and value.
+        """
         with self.connect() as connection:
             rows = connection.execute(
                 "SELECT usage_json FROM runs WHERE task_id=? AND completed_at IS NOT NULL", (task_id,)
             ).fetchall()
-        for row in rows:
-            usage = json_loads(row["usage_json"], {})
-            input_tokens = int(usage.get("input_tokens", 0) or 0)
-            output_tokens = int(usage.get("output_tokens", 0) or 0)
-            totals["input_tokens"] += input_tokens
-            totals["output_tokens"] += output_tokens
-        totals["total_tokens"] = totals["input_tokens"] + totals["output_tokens"]
-        return totals
+        return aggregate_token_usage(row["usage_json"] for row in rows)
 
     def task_runtime(self, task_id: str) -> dict[str, str | None]:
         with self.connect() as connection:

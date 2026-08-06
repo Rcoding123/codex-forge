@@ -65,6 +65,24 @@ The version uses `major.minor` numbering.
   must not infer a value from a missing operational artifact.
 - New read-only commands may be added without changing existing command payloads.
 
+Version history:
+
+| Version | Change |
+|---|---|
+| `1.0` | Initial contract. The default. |
+| `1.1` | `task.token_usage` gained additive reported token categories. Every `1.0` field kept its name, type, meaning, and value. Opt-in. |
+
+**`1.0` is the default and stays the default.** Every command accepts `--schema-version`; when it is
+omitted the response declares `1.0` and contains exactly the `1.0` payload. A newer version is served
+only to a caller that asks for it by name, because an installed consumer validates the version it was
+built against and would reject a document announcing a version it does not know — even though every
+added field is additive. Upgrading Forge therefore never changes what an existing consumer receives.
+
+A response always declares the version it was asked for, and its payload always matches that version:
+a `1.0` response never carries `1.1` fields. An unsupported version is refused with
+`UNSUPPORTED_SCHEMA` and exit code `2` before the command runs; it is never silently downgraded to
+the default.
+
 ## Output streams and exit codes
 
 With `--json`, stdout contains exactly one JSON document. Forge does not write banners, progress text,
@@ -206,7 +224,7 @@ Field notes:
 - `project` is the registered project name. It is `null` only if durable task state references a
   missing project.
 - `token_usage` totals completed persisted run records; `token_limit` is the active configured task
-  limit.
+  limit. The categories are described below.
 - `current_phase` and `evidence_path` are taken from the latest persisted run record. They are not
   synthesized from task state.
 - `started_at` is the first persisted run start. `completed_at` is present only when Forge persisted
@@ -214,6 +232,64 @@ Field notes:
 - Raw result objects, failure fingerprints, run thread IDs, authentication data, and raw subprocess
   output are not exposed. Known controller error markers receive stable safe codes and messages; other
   stored error text is represented as `TASK_ERROR` without returning the raw text.
+
+### Token usage categories
+
+`token_usage` totals every completed run of the task. Its shape is the one the declared schema
+version defines.
+
+Schema `1.0` — the default, and what every command emits unless `--schema-version 1.1` is passed:
+
+```json
+"token_usage": {"input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500}
+```
+
+Schema `1.1` — requested explicitly, adds the categories the worker reported:
+
+```json
+"token_usage": {
+  "input_tokens": 1200,
+  "cached_input_tokens": 900,
+  "fresh_input_tokens": 300,
+  "cache_write_input_tokens": 0,
+  "output_tokens": 300,
+  "reasoning_output_tokens": 120,
+  "raw_total_tokens": 1500,
+  "total_tokens": 1500,
+  "cache_hit_ratio": 0.75,
+  "accounting_basis": "reported_token_categories",
+  "budget_basis": "raw_input_plus_output"
+}
+```
+
+Schema 1.1 is an accounting view, not a billing view: it contains no price, no universal billable-
+token value, and no cache discount, because those depend on the model, plan, and date and none of
+them are observable from a persisted run record.
+
+| Field | Version | Type | Meaning |
+|---|---|---|---|
+| `input_tokens` | 1.0 | integer | Reported input tokens. Includes the cached portion. |
+| `output_tokens` | 1.0 | integer | Reported output tokens. Includes the reasoning portion. |
+| `total_tokens` | 1.0 | integer | `sum(input_tokens + output_tokens)`. Unchanged meaning and value. |
+| `cached_input_tokens` | 1.1 | integer | The subset of `input_tokens` served from the prompt cache. |
+| `fresh_input_tokens` | 1.1 | integer | `sum(max(0, input_tokens - cached_input_tokens))` per run. |
+| `cache_write_input_tokens` | 1.1 | integer | Reported input tokens written into the cache. |
+| `reasoning_output_tokens` | 1.1 | integer | The subset of `output_tokens` spent on reasoning. |
+| `raw_total_tokens` | 1.1 | integer | `sum(input_tokens + output_tokens)`, always equal to `total_tokens`. |
+| `cache_hit_ratio` | 1.1 | number | `cached_input_tokens / input_tokens`, `0.0` when no input was reported, always within `[0.0, 1.0]`. |
+| `accounting_basis` | 1.1 | string | `"reported_token_categories"`. |
+| `budget_basis` | 1.1 | string | `"raw_input_plus_output"` — what `token_limit` is compared against. |
+
+`cached_input_tokens` and `reasoning_output_tokens` are subtotals of `input_tokens` and
+`output_tokens`, so neither is ever added into a total; adding them would double-count. Only
+`input_tokens` and `output_tokens` are summed, which is exactly the value the token budget has always
+enforced. Making these categories visible changed no budget decision, and both versions report the
+same `input_tokens`, `output_tokens`, and `total_tokens` for the same task — 1.1 adds detail, it does
+not restate the total.
+
+Values a run reported as missing, null, negative, boolean, non-numeric, or otherwise unusable are
+counted as `0`. No category and no derived field can be negative, and an unrecognized member of a
+persisted usage record is ignored rather than added to a total.
 
 ## Task validation and submission
 
@@ -421,7 +497,8 @@ Field notes:
 - `state` is `READY`, or `BACKLOG` when the request declares dependencies. Submission does not run
   the task; the existing controller loop picks it up.
 - `token_limit` is the active configured task limit, not a per-task value. A configured limit of `0`
-  means the controller does not enforce a token budget.
+  means the controller does not enforce a token budget. The limit is compared against
+  `token_usage.total_tokens`, as `token_usage.budget_basis` states.
 
 ### Submission failures
 
@@ -486,9 +563,11 @@ system or `forge.db`.
 .\forge.ps1 task evidence show <task-id> --artifact-id <artifact-id> --json
 ```
 
-Both accept an optional `--schema-version`. When supplied it must be `1.0`; any other value fails
-with `UNSUPPORTED_SCHEMA`. Both retain human-readable output when `--json` is absent: `list` prints
-one tab-separated line per artifact, and `show` prints the artifact header followed by its content.
+Both accept `--schema-version` like every other command. When supplied it must be `1.0` or `1.1`;
+any other value fails with `UNSUPPORTED_SCHEMA`. These two payloads are identical in both versions,
+since neither carries `token_usage`. Both retain human-readable output
+when `--json` is absent: `list` prints one tab-separated line per artifact, and `show` prints the
+artifact header followed by its content.
 
 These commands never write. They do not create, retry, cancel, reconcile, or alter a task, and they
 do not modify the database or any evidence file.
