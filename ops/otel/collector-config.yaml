@@ -1,0 +1,59 @@
+# Local-only OpenTelemetry Collector configuration for Codex Forge.
+#
+# This pipeline terminates on this machine. It listens on the loopback interface, prints spans to
+# the Collector's own console through the debug exporter, and has no exporter that opens an
+# outbound connection. Adding one would send Forge trace data off the host, which this slice does
+# not do.
+#
+# Start it with ops/otel/Start-OtelCollector.ps1. Nothing in this repository downloads or installs
+# the Collector binary.
+
+receivers:
+  otlp:
+    protocols:
+      # 127.0.0.1 rather than 0.0.0.0: the receiver must not be reachable from the network.
+      grpc:
+        endpoint: 127.0.0.1:4317
+      # Optional second entrance for tools that speak OTLP/HTTP. Forge itself uses gRPC.
+      http:
+        endpoint: 127.0.0.1:4318
+
+processors:
+  # Sheds load before the Collector can grow without bound. Declared first in the pipeline so it
+  # applies before batching accumulates spans.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+    send_batch_max_size: 1024
+
+exporters:
+  # The only exporter. `detailed` prints span names, attributes, and parentage to the Collector
+  # console, which is what `verify spans` in docs/TELEMETRY.md reads.
+  debug:
+    verbosity: detailed
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+service:
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      # The Collector's own metrics endpoint is loopback-bound for the same reason the receivers
+      # are. `level: none` would also be acceptable.
+      level: basic
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 127.0.0.1
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]

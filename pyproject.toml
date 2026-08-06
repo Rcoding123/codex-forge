@@ -13,7 +13,14 @@ authors = [{name = "Codex Forge"}]
 dependencies = ["PyYAML>=6.0.2,<7"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3,<9", "ruff>=0.12,<1"]
+# Telemetry is opt-in and inert unless `[telemetry] enabled = true`, so the tracing SDK is an
+# extra rather than a runtime dependency. Without it installed, Forge runs exactly as before.
+telemetry = [
+    "opentelemetry-api>=1.27,<2",
+    "opentelemetry-sdk>=1.27,<2",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.27,<2",
+]
+dev = ["pytest>=8.3,<9", "ruff>=0.12,<1", "codex-forge[telemetry]"]
 
 [project.scripts]
 forge = "codex_forge.cli:main"

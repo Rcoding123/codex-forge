@@ -2,6 +2,17 @@
 
 All notable changes to Codex Forge are documented here. This project follows semantic versioning.
 
+## [Unreleased]
+
+### Added
+
+- Optional local OpenTelemetry tracing: `forge.task` → `forge.attempt` → `forge.phase` spans with
+  bounded phase names, categorized token usage from the shared usage normalizer, and a loopback-only
+  OTLP/gRPC exporter. Disabled by default; a `forge.toml` without `[telemetry]` is unchanged.
+- `ops/otel/collector-config.yaml` and PowerShell helpers that run an already-installed Collector
+  locally. Nothing downloads a Collector, and the pipeline exports only through the debug exporter.
+- `docs/TELEMETRY.md` covering emitted attributes, privacy guarantees, verification, and rollback.
+
 ## [0.2.0] - 2026-08-02
 
 ### Added

@@ -14,6 +14,31 @@ from .knowledge import KnowledgeStore
 from .models import Project, Task, TaskState, ValidationResult
 from .prompts import implementation_prompt, review_prompt, validation_failure_summary
 from .runner import CodexRunner
+from .telemetry import (
+    ATTR_ATTEMPT_TERMINATED_BY,
+    ERROR_CODEX_EXIT_NONZERO,
+    OUTCOME_COMPLETED,
+    OUTCOME_FAILED,
+    OUTCOME_NEEDS_DECISION,
+    OUTCOME_NONCOMPLETION,
+    OUTCOME_OK,
+    OUTCOME_REVIEW_CHANGES_REQUIRED,
+    OUTCOME_SKIPPED,
+    OUTCOME_VALIDATION_FAILED,
+    PHASE_COMPLETION,
+    PHASE_EVIDENCE,
+    ROLE_CONTROLLER,
+    ROLE_IMPLEMENTER,
+    ROLE_REVIEWER,
+    ROLE_VALIDATOR,
+    TERMINATED_BY_EXCEPTION,
+    TERMINATED_BY_OUTCOME,
+    SpanHandle,
+    build_telemetry,
+    normalize_phase,
+    phase_usage_attributes,
+    usage_attributes,
+)
 from .utils import ControllerAlreadyRunning, controller_lock, ensure_dir, flatten_unique, tail_text, utc_now
 from .validation import run_validations
 
@@ -26,6 +51,8 @@ class Orchestrator:
         self.db.initialize()
         self.runner = CodexRunner(config, package_root / "schemas")
         self.knowledge = KnowledgeStore(config.knowledge_root)
+        # Inert unless `[telemetry] enabled = true`. Built before any worker thread starts.
+        self.telemetry = build_telemetry(config.telemetry)
         for path in (
             config.workspace_root,
             config.data_root,
@@ -126,6 +153,48 @@ class Orchestrator:
         self.db.add_task(task)
 
     def _execute_task(self, task: Task) -> None:
+        """Execute one attempt of a task, traced as forge.task -> forge.attempt -> forge.phase.
+
+        The spans wrap the unchanged body: the outcome the body reports is recorded as an
+        attribute, and an exception is re-raised to `_handle_unexpected_failure` exactly as before
+        after the span helpers have marked and closed both spans.
+        """
+        with self.telemetry.task_span(
+            task_id=task.id,
+            project_id=task.project_id,
+            risk=task.risk,
+            max_attempts=task.max_attempts,
+        ) as task_span, self.telemetry.attempt_span(attempt_number=task.attempts) as attempt_span:
+            outcome = self._execute_task_body(task)
+            task_span.set_outcome(outcome)
+            attempt_span.set_outcome(outcome)
+            # `.get` rather than indexing: a lookup miss must never raise out of instrumentation
+            # and be handled as a task failure.
+            attempt_span.set(
+                ATTR_ATTEMPT_TERMINATED_BY, TERMINATED_BY_OUTCOME.get(outcome, TERMINATED_BY_EXCEPTION)
+            )
+            self._record_task_usage(task_span, task)
+
+    def _record_task_usage(self, span: SpanHandle, task: Task) -> None:
+        """Attach the task's categorized token totals to its span.
+
+        Only read when a span is actually recording, so a disabled telemetry configuration issues
+        no additional query. The read is read-only and guarded, so it cannot change a task outcome.
+        """
+        if not span.recording:
+            return
+        try:
+            span.set_many(usage_attributes(self.db.task_token_usage(task.id)))
+        except Exception:
+            return
+
+    def _execute_task_body(self, task: Task) -> str:
+        """Run the task and report the bounded outcome that ended it.
+
+        The returned value is observability only. Every caller of `_execute_task` ignored the
+        return value before this slice and still does; task state is written to the database by the
+        same calls as before.
+        """
         project = self.db.get_project(task.project_id)
         if not project:
             raise RuntimeError(f"Project missing for task {task.id}: {task.project_id}")
@@ -151,9 +220,10 @@ class Orchestrator:
                 previous_failure=task.last_error if task.attempts > 1 else None,
             ),
             schema="task-result.schema.json",
+            role=ROLE_IMPLEMENTER,
         )
         if self._handle_noncompletion(task, result.final):
-            return
+            return _noncompletion_outcome(result.final)
 
         commands = flatten_unique([*project.validation_commands, *task.validation_commands])
         validation_results = self._validate(task, worktree, artifact_dir, commands)
@@ -171,14 +241,15 @@ class Orchestrator:
                 effort="high",
                 prompt=implementation_prompt(project, task, worktree, patterns, previous_failure=failure),
                 schema="task-result.schema.json",
+                role=ROLE_IMPLEMENTER,
             )
             if self._handle_noncompletion(task, result.final):
-                return
+                return _noncompletion_outcome(result.final)
             validation_results = self._validate(task, worktree, artifact_dir, commands, suffix=f"repair-{repair_cycle}")
 
         if not self._all_passed(validation_results):
             self._retry_or_fail(task, validation_failure_summary(validation_results))
-            return
+            return OUTCOME_VALIDATION_FAILED
 
         self.db.update_task(task.id, state=TaskState.REVIEWING)
         review = self._run_codex_phase(
@@ -191,6 +262,7 @@ class Orchestrator:
             prompt=review_prompt(project, task, worktree),
             schema="review-result.schema.json",
             sandbox="read-only",
+            role=ROLE_REVIEWER,
         )
         review_final = review.final
 
@@ -208,9 +280,10 @@ class Orchestrator:
                 effort="high",
                 prompt=implementation_prompt(project, task, worktree, patterns, review_findings=findings),
                 schema="task-result.schema.json",
+                role=ROLE_IMPLEMENTER,
             )
             if self._handle_noncompletion(task, repair.final):
-                return
+                return _noncompletion_outcome(repair.final)
             result = repair
             validation_results = self._validate(task, worktree, artifact_dir, commands, suffix=f"review-repair-{review_cycle}")
             if not self._all_passed(validation_results):
@@ -225,41 +298,48 @@ class Orchestrator:
                 prompt=review_prompt(project, task, worktree, previous_findings=findings),
                 schema="review-result.schema.json",
                 sandbox="read-only",
+                role=ROLE_REVIEWER,
             )
             review_final = review.final
 
         if review_final.get("verdict") != "pass":
             self._retry_or_fail(task, json.dumps(review_final, ensure_ascii=False))
-            return
+            return OUTCOME_REVIEW_CHANGES_REQUIRED
 
         validation_results = self._validate(task, worktree, artifact_dir, commands, suffix="final")
         if not self._all_passed(validation_results):
             self._retry_or_fail(task, validation_failure_summary(validation_results))
-            return
+            return OUTCOME_VALIDATION_FAILED
 
-        patch_path = artifact_dir / "changes.patch"
-        write_patch(worktree, patch_path)
-        commit_hash = commit_task(worktree, task) if project.auto_commit else None
-        if project.auto_push and commit_hash:
-            from .gitops import _git
-            _git(worktree, "push", "-u", "origin", branch, timeout=1200)
+        with self.telemetry.phase_span(phase_name=PHASE_EVIDENCE, role=ROLE_CONTROLLER) as span:
+            patch_path = artifact_dir / "changes.patch"
+            write_patch(worktree, patch_path)
+            commit_hash = commit_task(worktree, task) if project.auto_commit else None
+            if project.auto_push and commit_hash:
+                from .gitops import _git
+                _git(worktree, "push", "-u", "origin", branch, timeout=1200)
 
-        final_result = {
-            **result.final,
-            "status": "completed",
-            "controller_validation": [self._validation_to_dict(item) for item in validation_results],
-            "review": review_final,
-            "branch": branch,
-            "commit": commit_hash,
-            "worktree": str(worktree),
-            "patch": str(patch_path),
-            "completed_at": utc_now(),
-        }
-        (artifact_dir / "task-result.json").write_text(
-            json.dumps(final_result, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        self.knowledge.add_patterns(task.id, project.id, result.final.get("reusable_patterns") or [])
-        self.db.update_task(task.id, state=TaskState.COMPLETED, result=final_result, last_error="")
+            final_result = {
+                **result.final,
+                "status": "completed",
+                "controller_validation": [self._validation_to_dict(item) for item in validation_results],
+                "review": review_final,
+                "branch": branch,
+                "commit": commit_hash,
+                "worktree": str(worktree),
+                "patch": str(patch_path),
+                "completed_at": utc_now(),
+            }
+            (artifact_dir / "task-result.json").write_text(
+                json.dumps(final_result, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            span.set_outcome(OUTCOME_OK)
+
+        with self.telemetry.phase_span(phase_name=PHASE_COMPLETION, role=ROLE_CONTROLLER) as span:
+            self.knowledge.add_patterns(task.id, project.id, result.final.get("reusable_patterns") or [])
+            self.db.update_task(task.id, state=TaskState.COMPLETED, result=final_result, last_error="")
+            span.set_outcome(OUTCOME_OK)
+        return OUTCOME_COMPLETED
 
     def _run_codex_phase(
         self,
@@ -273,33 +353,44 @@ class Orchestrator:
         prompt: str,
         schema: str,
         sandbox: str | None = None,
+        role: str = ROLE_IMPLEMENTER,
     ):
-        phase_dir = ensure_dir(artifact_dir / phase)
-        self._enforce_usage_budget(task)
-        run_id = self.db.record_run_start(task.id, phase, model, effort, phase_dir)
-        result = self.runner.run(
-            prompt=prompt,
-            cwd=task.worktree_path or project.repo_path,
-            artifact_dir=phase_dir,
-            phase=phase,
-            model=model,
-            effort=effort,
-            schema_name=schema,
-            sandbox=sandbox,
-        )
-        self.db.record_run_end(
-            run_id,
-            thread_id=result.thread_id,
-            exit_code=result.exit_code,
-            usage=result.usage,
-        )
-        self._enforce_usage_budget(task)
-        if result.exit_code != 0:
-            raise RuntimeError(
-                f"Codex phase {phase} failed with exit {result.exit_code}: "
-                f"{tail_text(result.stderr_path.read_text(encoding='utf-8', errors='replace'))}"
+        phase_name, cycle = normalize_phase(phase)
+        with self.telemetry.phase_span(
+            phase_name=phase_name, cycle=cycle, role=role, model=model, effort=effort
+        ) as span:
+            phase_dir = ensure_dir(artifact_dir / phase)
+            self._enforce_usage_budget(task)
+            run_id = self.db.record_run_start(task.id, phase, model, effort, phase_dir)
+            result = self.runner.run(
+                prompt=prompt,
+                cwd=task.worktree_path or project.repo_path,
+                artifact_dir=phase_dir,
+                phase=phase,
+                model=model,
+                effort=effort,
+                schema_name=schema,
+                sandbox=sandbox,
             )
-        return result
+            self.db.record_run_end(
+                run_id,
+                thread_id=result.thread_id,
+                exit_code=result.exit_code,
+                usage=result.usage,
+            )
+            if span.recording:
+                span.set_many(phase_usage_attributes(result.usage))
+            self._enforce_usage_budget(task)
+            if result.exit_code != 0:
+                # Recorded before raising so the span carries the specific cause; the raised text
+                # itself is never attached, because it embeds a stderr tail.
+                span.set_error_code(ERROR_CODEX_EXIT_NONZERO)
+                raise RuntimeError(
+                    f"Codex phase {phase} failed with exit {result.exit_code}: "
+                    f"{tail_text(result.stderr_path.read_text(encoding='utf-8', errors='replace'))}"
+                )
+            span.set_outcome(OUTCOME_OK)
+            return result
 
     def _validate(
         self,
@@ -309,16 +400,23 @@ class Orchestrator:
         commands: list[str],
         suffix: str = "initial",
     ) -> list[ValidationResult]:
-        self.db.update_task(task.id, state=TaskState.VALIDATING)
-        if not commands:
-            return []
-        return run_validations(
-            commands,
-            cwd=worktree,
-            artifact_dir=artifact_dir / f"validation-{suffix}",
-            timeout_seconds=self.config.task_timeout_minutes * 60,
-            max_summary_chars=self.config.max_output_chars,
-        )
+        phase_name, cycle = normalize_phase(suffix, kind="validation")
+        with self.telemetry.phase_span(
+            phase_name=phase_name, cycle=cycle, role=ROLE_VALIDATOR
+        ) as span:
+            self.db.update_task(task.id, state=TaskState.VALIDATING)
+            if not commands:
+                span.set_outcome(OUTCOME_SKIPPED)
+                return []
+            results = run_validations(
+                commands,
+                cwd=worktree,
+                artifact_dir=artifact_dir / f"validation-{suffix}",
+                timeout_seconds=self.config.task_timeout_minutes * 60,
+                max_summary_chars=self.config.max_output_chars,
+            )
+            span.set_outcome(OUTCOME_OK if self._all_passed(results) else OUTCOME_FAILED)
+            return results
 
     def _handle_noncompletion(self, task: Task, final: dict) -> bool:
         status = final.get("status")
@@ -419,3 +517,12 @@ class Orchestrator:
 
 class TaskUsageBudgetExceeded(RuntimeError):
     pass
+
+
+def _noncompletion_outcome(final: dict) -> str:
+    """Name the bounded outcome for a Codex result that `_handle_noncompletion` already acted on.
+
+    This reads the same `status` field that method reads and makes no decision of its own; the
+    state written to the database is whatever `_handle_noncompletion` wrote.
+    """
+    return OUTCOME_NEEDS_DECISION if final.get("status") == "needs_decision" else OUTCOME_NONCOMPLETION

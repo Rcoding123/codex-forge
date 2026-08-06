@@ -145,6 +145,22 @@ read-only, take no locks, and cannot block the controller from writing evidence.
 Do not grant an integration file-system access to the data root as a workaround for a missing
 artifact class; add the class to the contract instead.
 
+## Optional local tracing
+
+Telemetry is off by default and emits nothing until `[telemetry] enabled = true` is set in
+`forge.toml`. When enabled, the controller exports `forge.task` → `forge.attempt` → `forge.phase`
+spans to an OpenTelemetry Collector on the loopback interface only. Spans carry bounded
+vocabularies, opaque task identifiers, and token counts — never prompts, source, commands, paths,
+branches, credentials, or review prose.
+
+Forge neither downloads nor manages a Collector. Install one yourself and start it with
+`ops\otel\Start-OtelCollector.ps1`, which creates no service and no scheduled task. A missing or
+unreachable Collector is not a task failure: telemetry degrades to a no-op.
+
+See [the telemetry guide](TELEMETRY.md) for the attribute reference, the privacy guarantees, and
+the rollback procedure. Model-call-level tracing is a later slice; one `forge.phase` span covers a
+whole Codex invocation, which may issue several model requests internally.
+
 ## RTK pytest limitation
 
 RTK 0.44.2 can describe a passing quiet pytest suite as if no tests were collected. Until RTK is upgraded and rebenchmarked, pytest compression is disabled:

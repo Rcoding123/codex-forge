@@ -114,6 +114,10 @@ max_task_tokens = 2000000
 max_output_chars = 12000
 ```
 
+An optional `[telemetry]` section enables local OpenTelemetry tracing. It is disabled by default, a
+`forge.toml` without the section behaves exactly as before, and enabling it changes no task
+behavior. See [the telemetry guide](docs/TELEMETRY.md).
+
 Model identifiers must remain valid for the installed Codex CLI and authenticated account. Routine inventory, queue work, validation, and summaries are local and model-free. Terra/medium handles normal implementation and review; Sol/high is reserved for explicit high/critical risk or escalation.
 
 ## Register a project

@@ -638,10 +638,16 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_decision_list(config, args.json, schema_version)
         if args.command == "run":
             orchestrator = Orchestrator(config, package_root())
-            if args.daemon:
-                orchestrator.run_daemon()
-                return 0
-            return 0 if orchestrator.run_once() >= 0 else 1
+            # Telemetry is flushed and torn down on every exit path, including a daemon that is
+            # interrupted. The shutdown is time-bounded, so an unreachable collector cannot delay
+            # process exit.
+            try:
+                if args.daemon:
+                    orchestrator.run_daemon()
+                    return 0
+                return 0 if orchestrator.run_once() >= 0 else 1
+            finally:
+                orchestrator.telemetry.shutdown()
         raise CLIArgumentError("Unknown command")
     except Exception as exc:
         if json_requested:

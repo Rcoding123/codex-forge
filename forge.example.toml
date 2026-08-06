@@ -35,3 +35,15 @@ max_repair_cycles = 2
 max_identical_failures = 2
 max_task_tokens = 2000000
 max_output_chars = 12000
+
+# Optional. Omitting this whole section is identical to leaving it disabled.
+# Spans are exported only to a Collector on this machine; the endpoint must be loopback and
+# carries no credentials. See docs/TELEMETRY.md.
+[telemetry]
+enabled = false
+service_name = "codex-forge"
+endpoint = "http://127.0.0.1:4317"
+protocol = "grpc"
+exporter = "otlp"
+sample_ratio = 1.0
+environment = "local"
