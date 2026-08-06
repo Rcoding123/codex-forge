@@ -617,15 +617,21 @@ Notes that make the ordering meaningful:
   exported, 2 deliberately filtered, 0 refused, 0 send-failed, and a **zero unresolved remainder**;
   the privacy checks passed, the Collector exited 0, and Claude exited 0. The earlier attempt, whose
   two-span discrepancy this gate note previously recorded, is superseded.
-- **Gate 6 has not started, and passing Gate 5 does not begin it.** Gate 6 remains incomplete unless
+- **Gate 6 has not passed, and passing Gate 5 did not begin it.** Gate 6 remains incomplete unless
   and until **every** safely exported Claude resource, span, and metric field has been individually
   inspected and approved by a human. The canary exported one span; one span reaching an exporter is
   not an inspection of what it carried. A field that was dropped is not exempt either — it is simply
   not yet in scope, because Gate 6 governs what is *kept*.
+- **The Gate 6 harness exists; the Gate 6 inspection does not.** `tests/otel_inventory.py` produces
+  the deterministic field inventory the gate requires, and
+  `ops/otel/claude-field-approvals.yaml` is the manifest a reviewer approves fields in. Neither is
+  evidence about Claude: **no supervised inventory run has been made**, the manifest approves
+  nothing, names nobody, and carries the review state `candidate`, and the harness refuses to return
+  a PASS verdict while that is so. See [Section 16](#16--field-inventory).
 
-Gate 1 is the approval of this document. Gates 2–5 have passed. Gate 6 is unstarted and everything
-after it is unbuilt. Native Claude and Codex telemetry remain disabled: Gate 5 authorized one
-supervised run, not an enabled exporter.
+Gate 1 is the approval of this document. Gates 2–5 have passed. Gate 6 has its apparatus and none of
+its evidence; everything after it is unbuilt. Native Claude and Codex telemetry remain disabled:
+Gate 5 authorized one supervised run, not an enabled exporter.
 
 ---
 
@@ -666,6 +672,15 @@ before treating that as more than it is. Every other item remains **[REQUIRED]**
 | 25 | **The bounded diagnostic publishes only vocabulary names and counts** — hostile span, resource, scope, link, and event attributes cannot reach it, and it emits no identifier of any kind **[CERTIFIED]** | 5 |
 | 26 | **The diagnostic does not weaken what it measures** — linked spans and exemplars stay blocked from the export path, and every deviation from the Gate 3 configuration is enumerated **[CERTIFIED]** | 5 |
 | 27 | **The privacy check always runs and is always reported**, including on a crashed or unbalanced run, and the Collector and agent are reaped on every path **[CERTIFIED]** | 5 |
+| 28 | **The inventory reads only post-privacy telemetry** — it declares no receiver, exporter, connector, or pipeline, imports no transport, and its sole input is the debug exporter's output **[CERTIFIED]** | 6 |
+| 29 | **A dynamic value is reduced to a bounded class and never printed**, and a static value is printed only through an explicit per-key allowlist **[CERTIFIED]** | 6 |
+| 30 | **Unknown keys, span names, metric names, scope names, units, descriptions, value types, and unclassifiable values fail closed** and are reported with a count **[CERTIFIED]** | 6 |
+| 30a | **Every distinct unknown schema identifier gets its own entry**, is rendered exactly when it passes the safe-identifier policy, and is fingerprinted rather than published when it does not **[CERTIFIED]** | 6 |
+| 30b | **A candidate manifest makes the review self-contained** — it names every safe unknown identifier, proposes UNAPPROVED entries, carries no telemetry value, and closes every UNKNOWN when merged **[CERTIFIED]** | 6 |
+| 31 | **The inventory accounting balances** — observed equals approved plus blocked plus redacted plus unapproved plus unknown plus an unresolved remainder, and expected-but-unobserved fields are reported **[CERTIFIED]** | 6 |
+| 32 | **The JSON and Markdown reports are deterministic and describe the same inventory** **[CERTIFIED]** | 6 |
+| 33 | **The inventory run starts nothing without `--approved-by`**, launches an exact approved argument vector, refuses bypass flags and conflicting commands, refuses to overwrite an existing output directory, and reaps the Collector and child on every failure path **[CERTIFIED]** | 6 |
+| 34 | **Every observed Claude field is inspected and approved by a human** — the manifest names the reviewer, no observed field is UNAPPROVED, and the verdict is PASS | 6 |
 
 ### What "certified at the helper level" means for items 1–7 and 9
 
@@ -692,8 +707,12 @@ the difference matters:
 Almost none of this is evidence about what an agent emits. Items 24–27 are certified against
 synthetic payloads: they certify that the accounting works. The supervised Claude canary then ran
 under that accounting and balanced, which is what passed Gate 5 and certified item 8 at the
-interaction level — it is **not** an inspection of the fields that span carried. Gate 6 is
-untouched, and so are Gates 7–8, which no Codex run has approached.
+interaction level — it is **not** an inspection of the fields that span carried. Items 28–33 are
+certified in the same narrow sense: they certify that the **inventory harness** behaves, against
+synthetic payloads and the Gate 3 hostile ones. **Item 34 — the actual Gate 6 requirement — remains
+[REQUIRED].** It is the one item in this table that no amount of test code can satisfy, because it
+asks for a human's judgement about a field set nobody has observed yet. Gates 7–8 are where they
+were, since no Codex run has approached them.
 
 ---
 
@@ -841,7 +860,8 @@ It settles nothing else:
 - **It is not Gate 6.** The accounting explains where spans went, not whether the one that arrived is
   safe to keep. Gate 6 remains incomplete unless every safely exported Claude resource, span, and
   metric field has been inspected and approved — every field, not a sample, and not "the ones we
-  expected".
+  expected". [Section 16](#16--field-inventory) defines how that inspection is produced; the
+  apparatus now exists and the inspection has still not been made.
 - **It does not make request-level trace attribution available.** That is **[BLOCKED]**; see
   [Section 4](#claude-correlation).
 - **It changes no authority.** Forge persisted usage stays authoritative, native metrics stay
@@ -849,6 +869,190 @@ It settles nothing else:
   ([Section 8](#8--token-semantics)).
 - **It enables nothing.** Native Claude telemetry remains disabled. Gate 5 approved one supervised
   run; enabling an exporter needs Gate 6 and its own human approval.
+
+---
+
+## 16 — Field inventory
+
+Added while building the Gate 6 apparatus. [Section 15](#15--span-accounting) governs the spans a run
+did *not* export. This section governs the fields the ones it *did* export are carrying.
+
+**Gate 6 is not passed by this section existing.** What follows defines how the inspection is
+produced and how it is approved. The inspection itself has not been made.
+
+### Observed fields and approved fields are different things
+
+A Gate 6 inspection has two halves, and they **MUST** be separate artifacts:
+
+| | Observed inventory | Approval manifest |
+| --- | --- | --- |
+| Produced by | the harness, on every run | a human, once per agent and Collector version |
+| Answers | "what did the pipeline export?" | "what may the pipeline export?" |
+| Location | the run's own output directory | `ops/otel/claude-field-approvals.yaml` |
+
+The harness **MUST NOT** write to the manifest, and a test **MUST NOT** record an approval in it. An
+observation that can adjust its own approval is not a review.
+
+### The inventory MUST observe only post-privacy telemetry
+
+An inventory **MUST** read only telemetry that has already passed the certified privacy processors
+for its signal — `memory_limiter`, `filter/unredactable`, `transform/privacy`, and whatever else
+[Section 9](#9--collector-contract) requires. There **MUST NOT** exist a receiver-to-inventory route
+that bypasses any of them.
+
+The implementation satisfies this by declaring **no Collector component at all**: it runs the shipped
+configuration plus the bounded span-name diagnostic, and its only input is what the `debug` exporter
+printed at the end of the certified pipelines. A temporary certification configuration **MAY** be
+used; `ops/otel/collector-config.yaml` **MUST NOT** be broadened for it.
+
+**[CERTIFIED]** — `tests/otel_inventory.py`, proven by `tests/test_otel_field_inventory.py`.
+
+### Coverage
+
+For every safely exported record, an inventory **MUST** report:
+
+- **resource** — attribute key, OTLP value type, normalized value class or exact approved static
+  value, occurrence count.
+- **scope** — name, version, attribute keys and types, occurrence count.
+- **span** — bounded name, kind, status code, attribute keys, attribute value types, value classes or
+  approved static values, event names, event attribute keys and types, **link count**, occurrence
+  count.
+- **metric** — name, description, unit, data type, aggregation temporality where applicable,
+  monotonicity where applicable, data-point attribute keys and value types, value classes or approved
+  static values, **exemplar count**, occurrence count.
+
+It **MUST NOT** print trace IDs, span IDs, parent IDs, trace state, or raw timestamps.
+
+### Normalization
+
+A dynamic value **MUST** be represented by a bounded class and **MUST NOT** be reproduced. The
+classes are `absent`, `boolean`, `integer`, `nonnegative-integer`, `double`, `nonnegative-double`,
+`lowercase-hex-32`, `lowercase-hex-16`, `semantic-version`, `duration`, `timestamp-present`,
+`localhost-endpoint`, `approved-enum`, `approved-static-string`, and `unclassifiable`.
+
+- A static value **MAY** be printed **only** through an explicit per-key allowlist in the manifest.
+- There **MUST NOT** be a catch-all "bounded string" class. A value matching nothing is
+  `unclassifiable`, and `unclassifiable` is never approved by default.
+- The following **MUST NOT** appear in an inventory report in any form: prompts, responses, tool
+  input or output, error text, exception messages, email addresses, user/account/organization
+  identifiers, session identifiers, API keys or authorization data, file-system paths, repository
+  paths, URLs or query strings, hostnames other than approved loopback values, environment-variable
+  values, trace IDs, span IDs, parent IDs, invocation IDs in raw form, span-link data, and exemplar
+  data.
+
+The implementation enforces the last rule twice: the classifier never produces such a value, and a
+pattern scan **refuses to write** a report that contains one, writing a stub that names the matched
+pattern without reproducing the match.
+
+### Unknown fields fail closed and stay visible
+
+Unknown attribute keys, span names, event names, metric names, scope names, units, descriptions,
+value types, and unclassifiable values **MUST** fail closed and remain visibly **UNAPPROVED** or
+**UNKNOWN**. They **MUST NOT** be silently omitted.
+
+A line the parser cannot interpret **MUST** be counted as an **unresolved inventory remainder**. A
+nonzero remainder **MUST NOT** be explained away, exactly as in [Section 15](#15--span-accounting).
+
+### Schema identifiers MUST be reviewable from the report alone
+
+The inventory report **MUST** contain enough for a human to review each unknown field and add it to
+the manifest. Requiring the reviewer to open the raw Collector log is **NOT** acceptable: it moves
+the review out of the artifact that gets checked in, and makes the report a pointer to evidence
+rather than the evidence.
+
+A **schema identifier** is one of exactly nine things — a resource attribute key, a scope name, a
+scope attribute key, a span name, a span attribute key, an event name, an event attribute key, a
+metric name, or a metric data-point attribute key. This list is closed.
+
+- Every distinct unknown schema identifier **MUST** receive its own deterministic inventory entry.
+  Distinct unknowns **MUST NOT** be aggregated into a single row.
+- An unknown identifier **MAY** be rendered exactly, and **only** when it passes a documented,
+  strict safe-identifier policy: a bounded maximum length, a conservative identifier grammar, valid
+  UTF-8, no control characters, no whitespace where the identifier type does not require it, no
+  path, URL, email, credential, UUID, trace-ID, span-ID, session-ID, or invocation-ID shape, and no
+  forbidden content-bearing key pattern.
+- When an identifier fails that policy, the entry **MUST** carry a stable SHA-256 fingerprint and the
+  identifier's category, **MUST** be classified `UNPRINTABLE_UNKNOWN`, **MUST NOT** emit the original
+  string anywhere — report, candidate manifest, log, or exception — and **MUST** fail Gate 6.
+- A run **MUST** emit a deterministic **candidate manifest** containing only safe schema identifiers
+  and proposed `UNAPPROVED` entries, such that a reviewer can copy them into the approval manifest
+  without editing Python and without reading the Collector log.
+- The candidate manifest **MUST NOT** contain any telemetry value. Widening the printable-value
+  allowlist is a decision a human takes with the value in front of them.
+
+**Descriptions and units are values, not identifiers.** They stay normalized or allowlisted, and
+**MUST NOT** be printed merely because the metric name carrying them turned out to be safe.
+
+**[CERTIFIED]** — `tests/otel_inventory.py`, proven by `tests/test_otel_field_inventory.py`.
+
+### The approval manifest
+
+The manifest **MUST** be versioned and pinned to one agent version and one Collector version — for
+this slice, Claude Code 2.1.223 and Collector 0.158.0. A drift in either invalidates it under
+[Section 10](#10--version-and-drift-policy).
+
+Each field **MAY** be classified `APPROVED`, `BLOCKED`, `REDACTED`, or `UNAPPROVED`:
+
+| Status | Meaning | Observing it |
+| --- | --- | --- |
+| `APPROVED` | a human reviewed the field and accepts its export | expected |
+| `BLOCKED` | the pipeline refuses this field's carrier | a Gate 6 failure |
+| `REDACTED` | `transform/privacy` is required to delete this key | a Gate 6 failure |
+| `UNAPPROVED` | not yet reviewed, or reviewed and rejected | fails the verdict |
+
+A reviewer **MUST** be able to approve a field by editing the manifest alone. Approving a field
+**MUST NOT** require editing executable test logic.
+
+### Gate 6 passes only when
+
+- every observed field is represented in the manifest;
+- every observed field is `APPROVED`, `BLOCKED`, or `REDACTED` **as appropriate** — a `BLOCKED` or
+  `REDACTED` field that was *observed* is a failure, not a pass;
+- no observed field is `UNAPPROVED`;
+- no unknown field exists;
+- no observed schema identifier is `UNPRINTABLE_UNKNOWN`;
+- no forbidden value appears in the report;
+- no span link and no metric exemplar reached the post-privacy inventory;
+- every field the manifest expects was observed;
+- all accounting balances — `observed = approved + blocked + redacted + unapproved + unknown +
+  unresolved remainder`, with a zero remainder — and the span accounting of
+  [Section 15](#15--span-accounting) balances too;
+- the Collector and the child process exit cleanly;
+- the report is complete and deterministic, in both its machine-readable and human-readable forms;
+- **and a human is named in the manifest.** The harness treats an empty `approved_by` or a review
+  state other than `approved` as an automatic FAIL, whatever the individual field statuses say.
+
+### The supervised run
+
+One run, separately supervised, and not part of the slice that built the harness. It **MUST**:
+
+- require an explicit `--approved-by` value and start **nothing** without it;
+- build the child environment through `build_claude_child_environment` and no second builder;
+- run the child in a temporary isolated working directory that is removed on every path;
+- use a **tool-disabled, non-bypass, one-turn** Claude invocation, enforced rather than documented,
+  and held as an **argument vector** rather than a command string so no quoting layer can join or
+  truncate an argument. The approved vector is `claude -p <prompt> --model sonnet --permission-mode
+  dontAsk --tools "" --disable-slash-commands --max-turns 1`; an operator-supplied command must
+  parse to it exactly, differing at most in the path used to reach the executable. Every flag in it
+  **MUST** be verified against the agent version the canary targets, and the verification **MUST**
+  be recorded in the repository — a flag that a vendor renames is a drift event under
+  [Section 10](#10--version-and-drift-policy), and one that never existed is a canary that refused
+  nothing;
+- refuse to overwrite an existing inventory output directory unless an explicit safe replacement
+  option is given, and never delete a file the harness did not write;
+- reap the Collector and the child on every success and failure path, including a startup timeout, an
+  agent timeout, and a failure while generating the report.
+
+### What a field inventory does not change
+
+- **Request-level Claude trace attribution stays [BLOCKED]** under Collector 0.158.0
+  ([Section 4](#claude-correlation)). The manifest records `claude_code.llm_request` as `BLOCKED`;
+  observing one after the privacy pipeline is a failure, not a newly available capability.
+- **Forge persisted usage remains authoritative** ([Section 8](#8--token-semantics)). Accounting,
+  budgets, retries, task state, database schemas, and the public JSON contract are untouched.
+- **Native agent metrics remain observational evidence only.**
+- **It enables nothing.** Approving a field is not approving an exporter; that is Gate 10's business
+  and needs its own approval.
 
 ---
 

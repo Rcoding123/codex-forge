@@ -12,6 +12,15 @@ All notable changes to Codex Forge are documented here. This project follows sem
 - `ops/otel/collector-config.yaml` and PowerShell helpers that run an already-installed Collector
   locally. Nothing downloads a Collector, and the pipeline exports only through the debug exporter.
 - `docs/TELEMETRY.md` covering emitted attributes, privacy guarantees, verification, and rollback.
+- Gate 6 field-inventory harness (`tests/otel_inventory.py`) and its versioned approval manifest
+  (`ops/otel/claude-field-approvals.yaml`). The harness inventories every field that survives the
+  certified privacy pipeline, reducing dynamic values to bounded classes and printing a static value
+  only through an explicit allowlist. It declares no Collector component, so its only input is the
+  debug exporter's post-privacy output. Every distinct unknown schema identifier gets its own entry,
+  rendered exactly when it passes a strict safe-identifier policy and fingerprinted with SHA-256 when
+  it does not, and each run emits a `candidate-manifest.yaml` a reviewer can merge without reading
+  the Collector log. **Gate 6 has not passed**: no supervised inventory run has been made, the
+  manifest approves nothing, and the harness refuses a PASS verdict until a human is named in it.
 
 ## [0.2.0] - 2026-08-02
 

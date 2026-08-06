@@ -828,6 +828,291 @@ carry unbounded vendor text, or relocate Codex credential and session storage.
 configuration, and contract section 7 requires unrelated processes and settings to be unaffected.
 Forge neither sets it nor removes it.
 
+## Field inventory (Gate 6)
+
+Gate 5 answered *how many* spans survived. [Contract Gate
+6](AGENT-TELEMETRY-CONTRACT.md#11--rollout-gates) asks what the survivors **carry**: every field on
+every safely exported resource, scope, span, event, and metric, individually inspected and approved.
+
+`tests/otel_inventory.py` is the harness that produces that inspection.
+`ops/otel/claude-field-approvals.yaml` is where the approvals are recorded. They are deliberately two
+files.
+
+**Gate 6 has not passed.** This slice builds the harness. The supervised run that feeds it has not
+been made, nothing has been approved, and the shipped manifest approves nothing.
+
+### Observed fields are not approved fields
+
+This is the distinction the whole design turns on.
+
+| | Observed inventory | Approval manifest |
+| --- | --- | --- |
+| Written by | the harness, per run | a human, once per agent/Collector version |
+| Lives in | the run's output directory | `ops/otel/claude-field-approvals.yaml` |
+| Says | "this field appeared, N times, carrying this class of value" | "a human is content for this field to be exported" |
+| Changes when | a run observes something different | somebody reviews and decides |
+
+A report that could edit its own approvals would not be a review. The harness never writes to the
+manifest, and no test writes an approval into it.
+
+### Where the inventory gets its data
+
+From the `debug` exporter's own output, and from nothing else. The harness declares **no receiver, no
+exporter, no connector, and no pipeline**: `inventory_configuration()` returns
+`ops/otel/collector-config.yaml` plus the bounded span-name diagnostic, byte-identical to what a Gate
+5 canary runs.
+
+That is what makes "only post-privacy telemetry is inventoried" a structural fact rather than a
+promise. The `debug` exporter is the terminal component of the `traces` and `metrics` pipelines,
+whose processors are `memory_limiter` → `filter/unredactable` → `transform/privacy` → `batch`. There
+is no receiver-to-inventory route that bypasses those, because there is no receiver-to-inventory
+route at all — the module imports no `socket`, no `urllib`, no `grpc`, and no OpenTelemetry package,
+which `test_the_only_input_to_the_inventory_is_the_exporters_own_output` asserts against the parsed
+import list.
+
+### What is inventoried
+
+| Surface | Fields |
+| --- | --- |
+| resource | attribute key, OTLP value type, value class or approved static value, occurrences |
+| scope | name, version class, attribute keys and types, occurrences |
+| span | name, kind, status code, attribute keys/types/value classes, event names, event attribute keys and types, link count, occurrences |
+| metric | name, description class or approved description, unit class or approved unit, data type, aggregation temporality, monotonicity, data-point attribute keys/types/value classes, exemplar count, occurrences |
+
+Every entry that names a schema identifier also carries `identifier_status`
+(`KNOWN` / `UNKNOWN_SAFE` / `UNPRINTABLE_UNKNOWN`) and `identifier_category`, plus a `fingerprint`
+when the identifier could not be printed.
+
+Trace IDs, span IDs, parent IDs, trace state, and raw timestamps are recognized by the parser so they
+are not counted as unresolved, and then dropped. They are never stored and never rendered.
+
+### Normalization: a class, not a value
+
+A dynamic value is classified where it is read and the original is discarded. Nothing downstream —
+not the JSON, not the Markdown, not an exception message — has the value to leak, because nothing
+downstream was ever handed it.
+
+`absent`, `boolean`, `integer`, `nonnegative-integer`, `double`, `nonnegative-double`,
+`lowercase-hex-32`, `lowercase-hex-16`, `semantic-version`, `duration`, `timestamp-present`,
+`localhost-endpoint`, `approved-enum`, `approved-static-string`, `unclassifiable`.
+
+Two rules govern the list:
+
+- **Only `approved-static-string` and `approved-enum` may carry a value**, and only through a
+  per-key allowlist in the manifest. `service.name` prints as `claude-code` because a human wrote
+  that exact string into `static_values`. The same string under a key the manifest does not
+  allowlist is not printed.
+- **There is deliberately no `bounded-string` class.** A free-form string matching none of the
+  patterns is `unclassifiable`, which **no approval may cover** — an APPROVED field observed
+  carrying an unclassifiable value is downgraded to UNAPPROVED. "It looked short and harmless" is
+  how a prompt preview gets published.
+
+Values include a metric's unit and description, under the pseudo-keys `metric.unit` and
+`metric.description`. They are not identifiers and are not printed because the metric name was safe.
+
+The forbidden-output list — prompts, responses, tool input and output, error and exception text,
+email addresses, user/account/organization/session identifiers, API keys and authorization material,
+file-system and repository paths, URLs and query strings, non-loopback hostnames, environment values,
+trace and span and parent identifiers, raw invocation IDs, span-link data, exemplar data — is
+enforced twice: by the classifier, which never produces them, and by a pattern scan that **refuses to
+write** a report that contains one, substituting a stub that names the pattern without reproducing
+the match.
+
+### Unknown schema identifiers get their own entry, and are usually printed in full
+
+A **schema identifier** names the shape of the telemetry rather than its payload. There are exactly
+nine, and the list is closed:
+
+resource attribute keys · scope names · scope attribute keys · span names · span attribute keys ·
+event names · event attribute keys · metric names · metric data-point attribute keys
+
+An unknown identifier gets **its own deterministic inventory entry**. Distinct unknowns are never
+merged into a shared bucket, whether or not they can be printed — two new span names produce two
+entries with their own occurrence counts.
+
+**A reviewer never has to open the Collector log to review an identifier.** An unknown identifier is
+printed exactly, provided it passes the safe-identifier policy below, and the run also writes
+`candidate-manifest.yaml`: a copy-and-paste proposal of the vocabulary entries and UNAPPROVED field
+entries the manifest would need. `test_the_candidate_manifest_closes_every_unknown_field` merges that
+proposal back in and shows nothing is left UNKNOWN.
+
+#### The safe-identifier policy
+
+An identifier is printed verbatim only when **every** check passes. Each check is named in the
+report's `identifier_findings` when it fires, so a refusal says which rule refused it.
+
+| Check | Rule |
+| --- | --- |
+| category | one of the nine above |
+| non-empty | not the empty string |
+| length | ≤ 100 characters, or ≤ 200 for a scope name |
+| UTF-8 | encodable as UTF-8 — no lone surrogate |
+| control characters | no Unicode `Cc`, `Cf`, `Cs`, `Co`, or `Cn` code point |
+| whitespace | none at all; no identifier category requires it |
+| grammar | `[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+)*`, plus `/` segments for scope names only |
+| path shape | no `\`, no leading `/`, no `~`, no drive-letter prefix |
+| URL / email / credential shape | no `:`, `@`, `?`, `=`; no `sk-`-style key; no separator-free 40+ character blob |
+| opaque-identifier shape | no UUID, and no run of 16+ hexadecimal characters — the shape of a trace ID, span ID, session ID, or invocation ID |
+| content-bearing words | no segment word in `prompt`, `response`, `content`, `body`, `message`, `payload`, `stdout`, `stderr`, `stacktrace`, `snippet`, `secret`, `credential`, `password`, `authorization`, `cookie`, `email`, `command`, `argv`, `traceparent`, … |
+
+Words are matched per dot-segment after splitting on `_` and `-`, so `user_prompt` is refused and
+`gen_ai.usage.input_tokens` is not. `token`, `model`, `usage`, and `session` are deliberately absent
+from that list: a key mentioning them is ordinary telemetry, while a key mentioning `prompt` is
+announcing what its value is.
+
+#### When an identifier fails
+
+The entry is classed `UNPRINTABLE_UNKNOWN` and carries:
+
+- `fingerprint` — the unsalted SHA-256 of the identifier's UTF-8 bytes, 64 lowercase hex characters
+- `fingerprint_algorithm` — `sha256`
+- `identifier_category` — which of the nine positions it occupied
+- `identifier_findings` — the checks that failed, by name
+
+The original string is not emitted anywhere: not in the JSON, not in the Markdown, not in the
+candidate manifest, not in an exception message, and not in a log line. The entry id becomes
+`<kind>/sha256-<digest>`, so two distinct unsafe identifiers still get two entries. An
+`UNPRINTABLE_UNKNOWN` entry **fails Gate 6** and can never be approved, whatever the manifest says.
+
+The fingerprint is unsalted so that two runs — and two machines — agree on it, which is what makes it
+something a reviewer can track. The tradeoff is accepted deliberately: a fingerprint of a low-entropy
+name is guessable, and the alternative is publishing the name.
+
+#### Units and descriptions are values, not identifiers
+
+A safe metric *name* buys the prose beneath it nothing. A metric's unit and description go through
+the same allowlist every other value does, under the pseudo-keys `metric.unit` and
+`metric.description`, and are reported as `unit_classes` / `description_classes` unless a human has
+allowlisted the exact string. The candidate manifest proposes **no value of any kind** — widening
+`static_values` stays a decision taken with the value in front of you.
+
+#### Nothing is silently omitted
+
+An unknown key, unknown span name, unknown metric name, unknown value type, or unclassifiable value
+produces a visible entry with a reason and a count, and fails the verdict. A line the parser cannot
+interpret becomes an `unresolved/<context>` entry, which is the report's **unresolved inventory
+remainder** — the same "a nonzero remainder is not explained away" discipline the span accounting
+uses. An `unclassifiable` value can never be approved: the reviewer must allowlist it or reject the
+field.
+
+### The accounting the report must balance
+
+```
+fields observed = approved + blocked + redacted + unapproved + unknown + unresolved remainder
+```
+
+plus a separate count of fields the manifest expects that the run did not observe — reported, never
+treated as approved-and-absent.
+
+### The Gate 6 verdict
+
+`PASS` requires all of: a manifest pinned to Claude Code 2.1.223 and Collector 0.158.0; a human name
+and an `approved` review state in the manifest; at least one field observed; every observed field
+present in the manifest; none UNAPPROVED, BLOCKED, or REDACTED; every expected field observed; a zero
+unresolved remainder; **every observed identifier printable**; zero span links and zero exemplars
+reaching the inventory; a clean forbidden-output scan; a balanced span accounting; a passing canary;
+and a clean exit from both the Collector and the child.
+
+The shipped manifest has an empty `approved_by` and a `candidate` review state, so **no run can
+currently return PASS**. That is the intended state until a human reviews a real inventory.
+
+### The agent vector
+
+The canonical form of the canary invocation is an **argument vector**, not a command string. A string
+would have to survive PowerShell quoting and then `shlex` quoting before it became argv, and every
+one of those hops is somewhere an argument can be joined to its neighbour or lost. The vector is a
+constant in `tests/otel_inventory.py` (`DEFAULT_CLAUDE_ARGV`) and is handed to `subprocess` as it
+stands:
+
+```
+[0]  claude
+[1]  -p
+[2]  Reply with exactly CANARY_OK and nothing else.
+[3]  --model
+[4]  sonnet
+[5]  --permission-mode
+[6]  dontAsk
+[7]  --tools
+[8]  <empty string>
+[9]  --disable-slash-commands
+[10] --max-turns
+[11] 1
+```
+
+One shot, one turn, one pinned model, no tools, no slash commands, and a permission mode that
+suppresses the prompt without granting anything. `python tests/otel_inventory.py --output-dir <dir>
+--dry-run` prints this vector and the PowerShell command below, and starts nothing.
+
+#### Verified against the CLI
+
+Checked against Claude Code **2.1.223** by reading `claude --help`, and by parsing the complete
+vector through `subprocess` with one deliberately bogus trailing flag — which makes the CLI stop at
+its unknown-option check *before* the action handler, so the whole vector was proven to parse without
+a model request being made. `VERIFIED_CLAUDE_FLAGS` in `tests/otel_inventory.py` records this, and
+`test_every_flag_in_the_vector_is_recorded_as_verified_against_the_cli` keeps the record complete.
+
+| Flag | Status |
+| --- | --- |
+| `-p` | in `--help`: "Print response and exit" |
+| `--model sonnet` | in `--help`; `sonnet` named as a valid alias |
+| `--permission-mode dontAsk` | in `--help`; choices are `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan` |
+| `--tools ""` | in `--help`: "Use `\"\"` to disable all tools" |
+| `--disable-slash-commands` | in `--help`: "Disable all skills" |
+| `--max-turns 1` | **accepted but absent from `--help`** — re-verify on any version change |
+
+`--tools` is the right flag and `--allowedTools` is not: the first restricts the available set,
+the second pre-approves a list. Confusing them is how a canary ends up with every built-in tool
+available, so `--allowedTools` / `--allowed-tools` are refused by name.
+
+`--agent-command` exists as an escape hatch for naming the `claude` executable by path. A supplied
+command must parse to the same vector; anything else is refused as a conflict, and
+`--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, `--allowedTools`,
+`--allowed-tools`, `--disallowedTools`, `--disallowed-tools`, and every `--permission-mode` other
+than `dontAsk` are refused by name.
+
+### The later supervised run
+
+Not part of this slice. It is a separate, supervised event that needs its own approval.
+
+```powershell
+$env:OTELCOL_PATH = 'C:\Tools\OpenTelemetry\otelcol-contrib\0.158.0\otelcol-contrib.exe'
+.\.venv\Scripts\python.exe tests\otel_inventory.py `
+    --output-dir 'C:\CodexData\canary\inventory1' `
+    --approved-by '<the human approving this run>'
+```
+
+The agent vector deliberately does not appear on that command line. There is no command string for a
+shell to mangle.
+
+- **`--approved-by` is mandatory.** Without it the harness prints a refusal and starts nothing — no
+  Collector, no child, no output directory.
+- **The child runs in a temporary isolated directory** built by
+  `agent_telemetry.build_claude_child_environment`, pointed at the run's own ephemeral loopback port.
+  The directory holds the child's stdout — which is its reply — and is removed on every path,
+  including a timeout.
+- **An existing output directory is not overwritten.** `--replace-existing` replaces this harness's
+  own three report files and nothing else; a directory holding anything else still stops the run.
+- **The Collector and the child are reaped on every path**, including a startup timeout, an agent
+  timeout, and a failure while building the report.
+
+The run writes three files: `inventory-report.json`, `inventory-report.md`, and
+`candidate-manifest.yaml`. A human reads the Markdown, merges the candidate manifest into
+`ops/otel/claude-field-approvals.yaml`, decides each entry, sets `review.approved_by` and
+`review.state: approved`, and re-runs. Approving a field is a data edit; it changes no executable
+logic, and it needs no other file — the Collector log is not part of the identifier review.
+
+### What Gate 6 does not change
+
+- **Request-level Claude trace attribution stays BLOCKED** under Collector 0.158.0.
+  `claude_code.llm_request` spans carry links, `filter/unredactable` drops them, and the manifest
+  records that span name as `BLOCKED` — observing one after the privacy pipeline is a Gate 6 failure,
+  not a new capability.
+- **Forge persisted usage remains authoritative.** Nothing here feeds accounting, budgets, retries,
+  task state, database schemas, or the public JSON contract.
+- **Native agent metrics remain observational only.**
+- **Nothing is enabled.** `ops/otel/collector-config.yaml` is unchanged, no production module imports
+  the harness, and native Claude and Codex telemetry stay disabled.
+
 ## Verify spans
 
 1. Start the Collector in one terminal.

@@ -1,0 +1,601 @@
+# Gate 6 approval manifest for Claude Code 2.1.223 under OpenTelemetry Collector 0.158.0.
+#
+# This file records what a **human** has approved. It is not, and must never become, a record of
+# what a run observed -- that is the inventory report, written by `tests/otel_inventory.py` into
+# an output directory of its own. Keeping the two apart is the point: an observation that edits
+# its own approval is not an approval.
+#
+# A reviewer works here and nowhere else. Nothing in this file is executable, and approving a
+# field never means editing test logic: no test asserts that a field carries a particular status.
+# The rules the tests do enforce are consistency rules a real review satisfies on its way past --
+# `review.approved_by` and `review.state` must agree, and an APPROVED field requires a named
+# reviewer -- plus the two the contract fixes: `claude_code.llm_request` stays BLOCKED under
+# Collector 0.158.0, and no key on the minimum deletion set may be allowlisted for printing.
+#
+# ## How a review works
+#
+# A run writes three files: `inventory-report.json`, `inventory-report.md`, and
+# `candidate-manifest.yaml`. The last one proposes, in copy-and-paste form, exactly the additions
+# below that the run needs -- vocabulary entries and UNAPPROVED field entries. Merge them, decide
+# each one, set `review.approved_by` and `review.state: approved`, and re-run. **No inspection of
+# the raw Collector log is required to review a schema identifier**, because every identifier that
+# can be printed safely is printed in full in the report and in the candidate manifest.
+#
+# ## Two independent axes, which are easy to confuse
+#
+#   * `vocabulary` records the schema identifiers this repository already knows -- attribute
+#     keys, scope names, span names, event names, metric names. Membership means `KNOWN` rather
+#     than `UNKNOWN_SAFE` in a report. It is *not* approval, and it is *not* what decides whether
+#     an identifier may be printed: an unknown identifier is printed in full whenever it passes
+#     the safe-identifier policy in tests/otel_inventory.py.
+#   * `status` on a field decides whether it is **approved**. Every entry below ships UNAPPROVED.
+#
+# `static_values` and `enum_values` are a different thing again: they are the only values that may
+# be reproduced verbatim in a report. A metric's unit and description are **values**, listed under
+# the pseudo-keys `metric.unit` and `metric.description`. A safe metric *name* buys the prose
+# beneath it nothing.
+#
+# ## The four statuses
+#
+#   APPROVED   a human reviewed this field and is content for it to be exported and reported.
+#   BLOCKED    the pipeline refuses this field's carrier. Observing it is a Gate 6 failure.
+#   REDACTED   `transform/privacy` deletes this key. Observing it is a Gate 6 failure.
+#   UNAPPROVED not yet reviewed, or reviewed and rejected. Observing it fails the Gate 6 verdict.
+#
+# **Gate 6 has not passed.** `review.approved_by` is empty and `review.state` is `candidate`, and
+# the inventory refuses a PASS verdict while that is so, whatever the individual statuses say.
+
+schema: forge.claude.field-approvals/1
+version: 0.2.0-candidate
+
+subject:
+  agent: claude-code
+  agent_version: 2.1.223
+  collector_version: 0.158.0
+  contract_version: "1.0"
+
+# Filled in by the human who reviews an observed inventory. Until both are set, no run passes.
+review:
+  approved_by: ""
+  state: candidate
+  reviewed_on: ""
+
+vocabulary:
+  # The Collector's own `keep_keys` allowlist, the contract's minimum deletion set, and the
+  # unknown-key sentinels the Gate 3 hostile payloads inject.
+  attribute_keys:
+    - service.name
+    - service.version
+    - deployment.environment
+    - forge.telemetry.contract.version
+    - forge.invocation.id
+    - forge.task.id
+    - forge.project.id
+    - forge.task.risk
+    - forge.task.max_attempts
+    - forge.task.outcome
+    - forge.attempt.number
+    - forge.attempt.kind
+    - forge.attempt.outcome
+    - forge.attempt.terminated_by
+    - forge.retry.bucket
+    - forge.phase.name
+    - forge.phase.cycle
+    - forge.phase.outcome
+    - forge.phase.duration_ms
+    - forge.agent.role
+    - gen_ai.request.model
+    - gen_ai.request.reasoning_effort
+    - gen_ai.usage.input_tokens
+    - gen_ai.usage.cached_input_tokens
+    - gen_ai.usage.output_tokens
+    - gen_ai.usage.reasoning_tokens
+    - gen_ai.token.type
+    - forge.usage.fresh_input_tokens
+    - forge.usage.raw_total_tokens
+    - forge.usage.cache_hit_ratio
+    - forge.usage.accounting_basis
+    - forge.usage.budget_basis
+    - forge.usage.token_type
+    - error.type
+    - error.code
+    - user.email
+    - organization.id
+    - user.id
+    - user.account_uuid
+    - user.account_id
+    - session.id
+    - ccr.session.id
+    - workspace.host_paths
+    - user_prompt
+    - system_prompt
+    - system_prompt_preview
+    - user_system_prompt
+    - assistant_response
+    - response
+    - tool_input
+    - tool_parameters
+    - tool_output
+    - payload
+    - content
+    - error
+    - error.message
+    - url.full
+    - url.query
+    - app.workspace.root
+    - claude.prompt.v3
+    - code.snippet
+    - codex.turn.agent_message
+    - exception.message
+    - exception.stacktrace
+    - forge.review.findings
+    - forge.validation.stdout
+    - gen_ai.completion.0.content
+    - gen_ai.prompt.0.content
+    - http.request.header.authorization
+    - process.command_line
+    - process.environment
+    - vcs.ref.head.name
+    - vcs.ref.head.revision
+    - vcs.repository.url
+  # The bounded span-name vocabulary from tests/otel_certification.py.
+  span_names:
+    - forge.task
+    - forge.attempt
+    - forge.phase
+    - claude_code.interaction
+    - claude_code.llm_request
+    - claude_code.tool
+    - claude_code.tool.execution
+    - claude_code.subagent.spawn
+    - claude_code.hook
+    - claude_code.compaction
+  # Empty on purpose. No Claude span-event name has been observed or written down. An event name
+  # a run produces is reported in full when it is safe, so a reviewer can add it from the
+  # candidate manifest without reading a log.
+  event_names: []
+  # Only the diagnostic counters this harness itself emits. No Claude metric name has been
+  # observed by this repository, and guessing one here would be inventing evidence. A real run
+  # reports Claude's metric names in full, subject to the safe-identifier policy.
+  metric_names:
+    - forge.diagnostic.span.accepted.forge_task
+    - forge.diagnostic.span.accepted.forge_attempt
+    - forge.diagnostic.span.accepted.forge_phase
+    - forge.diagnostic.span.accepted.claude_code_interaction
+    - forge.diagnostic.span.accepted.claude_code_llm_request
+    - forge.diagnostic.span.accepted.claude_code_tool
+    - forge.diagnostic.span.accepted.claude_code_tool_execution
+    - forge.diagnostic.span.accepted.claude_code_subagent_spawn
+    - forge.diagnostic.span.accepted.claude_code_hook
+    - forge.diagnostic.span.accepted.claude_code_compaction
+    - forge.diagnostic.span.accepted.other
+    - forge.diagnostic.span.exported.forge_task
+    - forge.diagnostic.span.exported.forge_attempt
+    - forge.diagnostic.span.exported.forge_phase
+    - forge.diagnostic.span.exported.claude_code_interaction
+    - forge.diagnostic.span.exported.claude_code_llm_request
+    - forge.diagnostic.span.exported.claude_code_tool
+    - forge.diagnostic.span.exported.claude_code_tool_execution
+    - forge.diagnostic.span.exported.claude_code_subagent_spawn
+    - forge.diagnostic.span.exported.claude_code_hook
+    - forge.diagnostic.span.exported.claude_code_compaction
+    - forge.diagnostic.span.exported.other
+  scope_names:
+    - github.com/open-telemetry/opentelemetry-collector-contrib/connector/countconnector
+    - forge.certification
+
+# The only values that may be reproduced verbatim in a report. Everything else is reduced to a
+# bounded class. A value that is not listed here for its key is never printed, whatever it is.
+static_values:
+  service.name:
+    - claude-code
+    - codex-forge
+  deployment.environment:
+    - local
+  forge.telemetry.contract.version:
+    - "1.0"
+  # Metric units and descriptions are values, not identifiers. These are the ones this
+  # repository produces; a vendor's own prose is not printed until a human puts it here.
+  metric.unit:
+    - "{token}"
+    - ms
+  metric.description:
+    - "spans named forge.task, counted accepted"
+    - "spans named forge.attempt, counted accepted"
+    - "spans named forge.phase, counted accepted"
+    - "spans named claude_code.interaction, counted accepted"
+    - "spans named claude_code.llm_request, counted accepted"
+    - "spans named claude_code.tool, counted accepted"
+    - "spans named claude_code.tool.execution, counted accepted"
+    - "spans named claude_code.subagent.spawn, counted accepted"
+    - "spans named claude_code.hook, counted accepted"
+    - "spans named claude_code.compaction, counted accepted"
+    - "spans named outside the diagnostic vocabulary, counted accepted"
+    - "spans named forge.task, counted exported"
+    - "spans named forge.attempt, counted exported"
+    - "spans named forge.phase, counted exported"
+    - "spans named claude_code.interaction, counted exported"
+    - "spans named claude_code.llm_request, counted exported"
+    - "spans named claude_code.tool, counted exported"
+    - "spans named claude_code.tool.execution, counted exported"
+    - "spans named claude_code.subagent.spawn, counted exported"
+    - "spans named claude_code.hook, counted exported"
+    - "spans named claude_code.compaction, counted exported"
+    - "spans named outside the diagnostic vocabulary, counted exported"
+
+# Bounded enumerations whose members may be printed. Kept separate from `static_values` so a
+# reviewer can tell a fixed constant from a small closed set.
+enum_values:
+  forge.agent.role:
+    - implementer
+    - reviewer
+    - validator
+  gen_ai.token.type:
+    - input
+    - output
+
+# Keys `transform/privacy` is required to delete, on every surface of both signals. Declared by
+# key rather than per surface: redaction is a property of the key, and a per-surface list is a
+# list somebody forgets to extend. Observing any of these post-privacy is a Gate 6 failure.
+redacted_keys:
+  - user.email
+  - organization.id
+  - user.id
+  - user.account_uuid
+  - user.account_id
+  - session.id
+  - ccr.session.id
+  - workspace.host_paths
+  - user_prompt
+  - system_prompt
+  - system_prompt_preview
+  - user_system_prompt
+  - assistant_response
+  - response
+  - tool_input
+  - tool_parameters
+  - tool_output
+  - payload
+  - content
+  - error
+  - error.message
+  - url.full
+  - url.query
+  - app.workspace.root
+  - claude.prompt.v3
+  - code.snippet
+  - codex.turn.agent_message
+  - exception.message
+  - exception.stacktrace
+  - forge.review.findings
+  - forge.validation.stdout
+  - gen_ai.completion.0.content
+  - gen_ai.prompt.0.content
+  - http.request.header.authorization
+  - process.command_line
+  - process.environment
+  - vcs.ref.head.name
+  - vcs.ref.head.revision
+  - vcs.repository.url
+
+# ---------------------------------------------------------------------------------------------
+# Reviewable fields
+# ---------------------------------------------------------------------------------------------
+#
+# `expected: true` means the contract says this field must be there. It is reported when a run
+# does not produce it, rather than being quietly treated as approved-and-absent.
+#
+# An observed field with no entry below is reported UNKNOWN, which fails the verdict, and appears
+# in that run's `candidate-manifest.yaml` ready to be pasted in here.
+fields:
+
+  # -- Correlation, contract section 4 ---------------------------------------------------------
+  # Both reach the child through OTEL_RESOURCE_ATTRIBUTES and nothing else sets them.
+  - id: resource.attribute/traces/forge.invocation.id
+    status: UNAPPROVED
+    expected: true
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Gate 5 observed a Claude trace resource, so this must appear.
+  - id: resource.attribute/traces/forge.telemetry.contract.version
+    status: UNAPPROVED
+    expected: true
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      The pinned contract version, allowlisted so the exact string is printed.
+  - id: resource.attribute/metrics/forge.invocation.id
+    status: UNAPPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      No Claude metric has been observed yet; set expected: true once one is.
+  - id: resource.attribute/metrics/forge.telemetry.contract.version
+    status: UNAPPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      The pinned contract version, allowlisted so the exact string is printed.
+
+  # -- Claude's own resource identity ----------------------------------------------------------
+  # Candidates. Claude Code is documented to set service.name and service.version on its
+  # resource; neither has been observed through this pipeline, so both ship unapproved and
+  # unexpected. A value that is not the allowlisted one classes as `unclassifiable`, which no
+  # approval may cover.
+  - id: resource.attribute/traces/service.name
+    status: UNAPPROVED
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Candidate. Approve only after a run shows the exact value.
+  - id: resource.attribute/traces/service.version
+    status: UNAPPROVED
+    types: [Str]
+    value_classes: [semantic-version]
+    note: >-
+      Candidate. The version itself is never printed; only its shape is.
+  - id: resource.attribute/metrics/service.name
+    status: UNAPPROVED
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Candidate. Approve only after a run shows the exact value.
+  - id: resource.attribute/metrics/service.version
+    status: UNAPPROVED
+    types: [Str]
+    value_classes: [semantic-version]
+    note: >-
+      Candidate. The version itself is never printed; only its shape is.
+
+  # -- Spans -----------------------------------------------------------------------------------
+  - id: span/claude_code.interaction
+    status: UNAPPROVED
+    expected: true
+    kinds: [Internal, Client, Server]
+    status_codes: [Unset, Ok, Error]
+    note: >-
+      The one Claude span the Gate 5 canary exported. Its fields are what Gate 6 is about.
+  - id: span/claude_code.llm_request
+    status: BLOCKED
+    note: >-
+      Claude Code 2.1.223 attaches span links to these, and filter/unredactable drops any span
+      carrying a link because no Collector 0.158.0 processor can empty a link attribute map.
+      Request-level trace attribution is BLOCKED, not pending. Observing one of these after the
+      privacy pipeline means the filter did not run.
+  - id: span/claude_code.tool
+    status: UNAPPROVED
+    kinds: [Internal, Client, Server]
+    status_codes: [Unset, Ok, Error]
+    note: >-
+      Candidate. A tool-disabled one-turn canary should not produce this span at all.
+  - id: span/claude_code.tool.execution
+    status: UNAPPROVED
+    kinds: [Internal, Client, Server]
+    status_codes: [Unset, Ok, Error]
+    note: >-
+      Candidate. A tool-disabled one-turn canary should not produce this span at all.
+  - id: span/claude_code.subagent.spawn
+    status: UNAPPROVED
+    kinds: [Internal, Client, Server]
+    status_codes: [Unset, Ok, Error]
+    note: >-
+      Candidate. A tool-disabled one-turn canary should not produce this span at all.
+  - id: span/claude_code.hook
+    status: UNAPPROVED
+    kinds: [Internal, Client, Server]
+    status_codes: [Unset, Ok, Error]
+    note: >-
+      Candidate. A tool-disabled one-turn canary should not produce this span at all.
+  - id: span/claude_code.compaction
+    status: UNAPPROVED
+    kinds: [Internal, Client, Server]
+    status_codes: [Unset, Ok, Error]
+    note: >-
+      Candidate. A tool-disabled one-turn canary should not produce this span at all.
+  - id: span/forge.task
+    status: UNAPPROVED
+    kinds: [Internal]
+    status_codes: [Unset, Ok, Error]
+    note: >-
+      Forge's own span. A Claude-only inventory run emits none; the Gate 3 synthetic payloads
+      do, which is how the harness is tested.
+  - id: span/forge.attempt
+    status: UNAPPROVED
+    kinds: [Internal]
+    status_codes: [Unset, Ok, Error]
+    note: >-
+      Forge's own span. A Claude-only inventory run emits none; the Gate 3 synthetic payloads
+      do, which is how the harness is tested.
+  - id: span/forge.phase
+    status: UNAPPROVED
+    kinds: [Internal]
+    status_codes: [Unset, Ok, Error]
+    note: >-
+      Forge's own span. A Claude-only inventory run emits none; the Gate 3 synthetic payloads
+      do, which is how the harness is tested.
+
+  # -- Instrumentation scopes ------------------------------------------------------------------
+  - id: scope/metrics/github.com/open-telemetry/opentelemetry-collector-contrib/connector/countconnector
+    status: UNAPPROVED
+    version_classes: [absent]
+    note: >-
+      The bounded span-name diagnostic's own count connector. Its records are counted separately
+      in the report's `carriers` block and carry no attribute of any kind.
+  - id: scope/traces/forge.certification
+    status: UNAPPROVED
+    version_classes: [semantic-version, nonnegative-double, absent]
+    note: >-
+      The synthetic Gate 3 payload scope. Never produced by a real agent.
+  - id: scope/metrics/forge.certification
+    status: UNAPPROVED
+    version_classes: [semantic-version, nonnegative-double, absent]
+    note: >-
+      The synthetic Gate 3 payload scope. Never produced by a real agent.
+
+  # -- The diagnostic counters -----------------------------------------------------------------
+  # This harness's own instrument, not Claude's. Inventoried anyway: a field that is not reported
+  # because somebody decided it was ours is a field nobody reviewed. The unit is empty and the
+  # description is allowlisted above, so both classify without anything vendor-written leaking.
+  - id: metric/forge.diagnostic.span.accepted.forge_task
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.accepted.forge_attempt
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.accepted.forge_phase
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.accepted.claude_code_interaction
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.accepted.claude_code_llm_request
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.accepted.claude_code_tool
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.accepted.claude_code_tool_execution
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.accepted.claude_code_subagent_spawn
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.accepted.claude_code_hook
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.accepted.claude_code_compaction
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.accepted.other
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.exported.forge_task
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.exported.forge_attempt
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.exported.forge_phase
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.exported.claude_code_interaction
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.exported.claude_code_llm_request
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.exported.claude_code_tool
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.exported.claude_code_tool_execution
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.exported.claude_code_subagent_spawn
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.exported.claude_code_hook
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.exported.claude_code_compaction
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.exported.other
+    status: UNAPPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+
+# The Gate 3 synthetic payloads also carry two metrics of their own,
+# `forge.certification.token.usage` and `forge.certification.phase.duration`. They are
+# deliberately absent from the vocabulary and from this list: a run that reports them by name,
+# marks them UNKNOWN, and proposes them in its candidate manifest is the harness demonstrating
+# exactly the review path a real Claude field will take.
