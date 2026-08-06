@@ -22,8 +22,12 @@ deletes identity and content from every telemetry surface and keeps only an expl
 vocabulary — see [Collector redaction](#collector-redaction) and
 [Synthetic certification](#synthetic-certification-gate-3) below. That work changes what the
 Collector would do *if* an agent signal ever arrived. **It enables nothing**: native Claude Code and
-Codex telemetry remain disabled, and the next gate (Gate 4, child-process environment and
-correlation helpers, off by default) is still unbuilt.
+Codex telemetry remain disabled.
+
+**The Gate 4 primitives now exist too, and they are not wired.** The correlation identifier, the
+trace-context extraction, and the Claude child-environment builder are implemented and tested in
+`src/codex_forge/agent_telemetry.py`, and no production code path calls any of them — see
+[Agent correlation primitives](#agent-correlation-primitives-gate-4). No canary has run.
 
 ## What is emitted
 
@@ -481,6 +485,142 @@ Reverting removes the `metrics` pipeline and the privacy processor together. Tha
 while native Claude and Codex telemetry stay disabled**, which is the state this repository ships in.
 Do not revert it as a prerequisite for enabling an agent exporter; the privacy processor is the
 reason those gates can be approached at all.
+
+## Agent correlation primitives (Gate 4)
+
+`src/codex_forge/agent_telemetry.py` implements the correlation and child-process helpers that
+[contract Gate 4](AGENT-TELEMETRY-CONTRACT.md#11--rollout-gates) requires, and
+`tests/test_agent_telemetry.py` proves them. Five statements, all of them current:
+
+- **The Gate 4 primitives exist but are not wired.** No module in `codex_forge` imports
+  `agent_telemetry`, no production code path calls any function in it, and `CodexRunner.run()`
+  builds the same process arguments and the same child environment it built before this slice. Both
+  facts are asserted by tests, not merely intended.
+- **Native Claude Code and Codex telemetry remain disabled.** This slice adds no exporter, no
+  agent-side setting on any process Forge starts, and no CLI override.
+- **No canary has run.** Nothing here has been exercised against a real Claude or Codex process.
+  Claude parentage under `forge.phase` is still unproven — inbound `TRACEPARENT` acceptance was
+  observed during the audit and nothing more.
+- **Claude requires the certified Collector redaction before any runtime use.** Claude attaches
+  `user.email`, `organization.id`, and `user.id` with **no configuration gate at all**, so no child
+  environment can suppress them; the Collector's privacy processor is what removes them. Enabling a
+  Claude exporter without it running exports operator identity on the first request.
+- **Codex strict-config behavior remains unresolved.** The exact `-c` nesting for telemetry
+  overrides, and whether custom attributes reach *every* request span, are still open questions. No
+  Codex override is implemented here, and the Codex correlation mechanism stays **proposed**.
+
+### What the module provides
+
+| Helper | Returns |
+| --- | --- |
+| `new_invocation_id()` | 128 CSPRNG bits as 32 lowercase hex characters — a new value on every call |
+| `is_valid_invocation_id(value)` | True only for that exact shape; uppercase, wrong length, padded, and non-string values are rejected |
+| `current_traceparent()` | The W3C `traceparent` of the active Forge span, or `None` |
+| `InvocationContext` | `invocation_id`, `contract_version`, `traceparent` — and nothing else |
+| `build_claude_child_environment(base, context)` | A **new** dictionary; `os.environ` and `base` are left byte-for-byte unchanged |
+| `validate_loopback_endpoint(value)` | The endpoint unchanged, or `ValueError` |
+
+`AGENT_TELEMETRY_CONTRACT_VERSION` is defined once, in that module, and is the only place in
+`codex_forge` that spells the contract version out. (`control_plane.DEFAULT_SCHEMA_VERSION` is also
+`"1.0"` and is an unrelated number — the control-plane JSON contract's, not this one's.)
+
+**The invocation identifier is uniformly random and nothing else.** It takes no arguments, so no task
+id, project id, phase, attempt, branch, commit, path, prompt, response, model, or account identity
+can reach it — not directly, not hashed, not encoded. Contract section 4 is absolute about this: a
+deterministic derivative of a sensitive value is a sensitive value. It is not persisted and not
+reused; a retry, a cancellation, a second phase, or a second provider each get their own.
+
+**The traceparent comes from the official propagator.** `current_traceparent()` asks
+`TraceContextTextMapPropagator` to inject into an empty carrier and returns the `traceparent` it
+wrote, rather than formatting trace and span ids by hand — hand composition is how a wrong flag byte
+or a truncated id reaches a child that will believe it. `opentelemetry.propagate.inject` is
+deliberately *not* used: it honors `OTEL_PROPAGATORS` and includes baggage, which would let operator
+key/value pairs into the header set. `tracestate` is discarded even when the active context carries
+one. The function returns `None` — never an exception — when telemetry is disabled, when the SDK is
+not installed, when no recording span is active, or when propagation fails for any reason.
+
+### The exact future Claude environment
+
+This is what `build_claude_child_environment` returns for a child that does not exist yet. Reading
+it here is not enabling it.
+
+| Variable | Value |
+| --- | --- |
+| `CLAUDE_CODE_ENABLE_TELEMETRY` | `1` |
+| `CLAUDE_CODE_ENHANCED_TELEMETRY_BETA` | `1` |
+| `OTEL_TRACES_EXPORTER` | `otlp` |
+| `OTEL_METRICS_EXPORTER` | `otlp` |
+| `OTEL_LOGS_EXPORTER` | `none` |
+| `OTEL_LOG_USER_PROMPTS` | `false` |
+| `OTEL_LOG_ASSISTANT_RESPONSES` | `false` |
+| `OTEL_LOG_RAW_API_BODIES` | `false` |
+| `OTEL_LOG_TOOL_DETAILS` | `false` |
+| `OTEL_LOG_TOOL_CONTENT` | `false` |
+| `OTEL_METRICS_INCLUDE_SESSION_ID` | `false` |
+| `OTEL_METRICS_INCLUDE_ACCOUNT_UUID` | `false` |
+| `OTEL_METRICS_INCLUDE_VERSION` | `false` |
+| `OTEL_METRICS_INCLUDE_ENTRYPOINT` | `false` |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://127.0.0.1:4317` |
+| `OTEL_EXPORTER_OTLP_INSECURE` | `true` |
+| `OTEL_EXPORTER_OTLP_HEADERS` | *(empty)* |
+| `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | *(empty)* |
+| `OTEL_EXPORTER_OTLP_METRICS_HEADERS` | *(empty)* |
+| `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` | `delta` |
+| `OTEL_METRIC_EXPORT_INTERVAL` | `10000` |
+| `OTEL_TRACES_EXPORT_INTERVAL` | `1000` |
+| `CLAUDE_CODE_OTEL_SHUTDOWN_TIMEOUT_MS` | `2000` |
+| `CLAUDE_CODE_OTEL_FLUSH_TIMEOUT_MS` | `2000` |
+| `OTEL_RESOURCE_ATTRIBUTES` | `forge.invocation.id=<opaque>,forge.telemetry.contract.version=1.0` |
+| `TRACEPARENT` | The active phase span's header — **omitted entirely** when there is no active recording span |
+
+Nothing else. `OTEL_RESOURCE_ATTRIBUTES` carries exactly two attributes and never a service name, a
+host, a task, a project, a phase, a path, a branch, a model, or an account. The three header
+variables are set **empty rather than left absent**, so no inherited value can fill them: contract
+section 7 treats a header reaching an agent as evidence of an unapproved destination.
+
+The endpoint is validated as loopback `http` with an explicit port, no userinfo, no path, no query,
+and no fragment. A remote host, `https`, a credential, or a trailing path raises rather than being
+accepted and redacted downstream. This check is stricter than `forge.toml`'s: `::1` is refused too,
+because the Collector binds `127.0.0.1` and an IPv6 literal has not been exercised end to end.
+
+### Inherited-configuration neutralization
+
+The builder removes inherited agent-telemetry configuration **before** applying the block above. The
+exact policy, which the tests assert against directly:
+
+1. A key is neutralized when its name — compared **case-insensitively**, because Windows environment
+   names are — either matches one of `TRACEPARENT`, `TRACESTATE`, `CLAUDE_CODE_ENABLE_TELEMETRY`,
+   `CLAUDE_CODE_ENHANCED_TELEMETRY_BETA`, `CLAUDE_CODE_PROPAGATE_TRACEPARENT`,
+   `CLAUDE_CODE_WORKSPACE_HOST_PATHS`, `ENABLE_BETA_TRACING_DETAILED`, `BETA_TRACING_ENDPOINT`, or
+   begins with `OTEL_` or `CLAUDE_CODE_OTEL_`.
+2. Neutralized means **absent** from the returned dictionary — not blanked, not defaulted. An agent
+   reading a variable Forge did not anticipate finds nothing rather than something Forge guessed at.
+3. The approved block is applied afterwards, so an approved key always holds its approved value no
+   matter what the parent environment held.
+4. **Nothing else is removed.** `PATH`, `CODEX_HOME`, the credentials the agent needs to run, and
+   every unrelated operator variable survive byte-for-byte. `OTELCOL_PATH` survives — it does not
+   begin with `OTEL_`.
+
+The `OTEL_*` prefix is swept wholesale rather than enumerated on purpose. The set of variables the
+SDKs read grows with every release, and contract section 10 makes an unrecognized setting
+deny-by-default; enumerating them would mean a new exporter, endpoint, header, resource-attribute, or
+content-logging variable arrives inherited and enabled.
+
+### What the builder never sets
+
+`CLAUDE_CODE_PROPAGATE_TRACEPARENT`, `CLAUDE_CODE_WORKSPACE_HOST_PATHS`,
+`ENABLE_BETA_TRACING_DETAILED`, `BETA_TRACING_ENDPOINT`, `TRACESTATE`, and `CODEX_HOME`.
+
+The first is the important one. Inbound trace context is accepted by the child; **outbound
+propagation is forbidden**, because it would put Forge's internal trace and span identifiers on
+Claude's requests to Anthropic. That is a hard boundary in contract section 4, not a default. The
+other five publish absolute paths, enable a content-carrying beta signal with its own destination,
+carry unbounded vendor text, or relocate Codex credential and session storage.
+
+`CODEX_HOME` is the one of the six that is *not* neutralized: an operator's own value is unrelated
+configuration, and contract section 7 requires unrelated processes and settings to be unaffected.
+Forge neither sets it nor removes it.
 
 ## Verify spans
 

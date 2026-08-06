@@ -152,7 +152,10 @@ One provider-neutral identifier joins agent telemetry to the Forge phase that pr
 
 **Attribute name:** `forge.invocation.id`
 
-**Format** **[REQUIRED]**:
+**Format** **[CERTIFIED]** — implemented as `codex_forge.agent_telemetry.new_invocation_id`, which
+takes no arguments and returns 128 `secrets` bits as 32 lowercase hexadecimal characters, with
+`is_valid_invocation_id` failing closed beside it. Minting the identifier is certified; **attaching**
+it to a `forge.phase` span or to an agent process is not, and no code does either yet:
 
 - Generated from at least **128 bits** of cryptographically secure randomness (e.g. `secrets`, not
   `random`).
@@ -189,7 +192,10 @@ sensitive. An identifier "derived from the task ID" fails this contract even if 
 ### Claude correlation
 
 - Forge **SHOULD** inject a valid W3C `TRACEPARENT` derived from the active `forge.phase` span into
-  the child environment. **[REQUIRED]**
+  the child environment. **[CERTIFIED]** for the helpers that derive and place it —
+  `agent_telemetry.current_traceparent` takes it from the official W3C propagator, and
+  `build_claude_child_environment` writes it into a returned dictionary. **[REQUIRED]** at the
+  invocation site: no process is started with that dictionary.
 - Claude interaction spans **SHOULD** then appear as descendants of `forge.phase` in one trace.
   **[AUDITED]** — inbound acceptance was observed in the audit; it has not been exercised under
   Forge.
@@ -379,7 +385,10 @@ pipeline does not satisfy this contract even if it names the right keys.
 
 ## 7 — Child-process configuration
 
-All agent telemetry settings **MUST** be invocation-scoped. **[REQUIRED]**
+All agent telemetry settings **MUST** be invocation-scoped. **[CERTIFIED]** for
+`agent_telemetry.build_claude_child_environment`, which is a pure function returning a new
+dictionary and is covered by `tests/test_agent_telemetry.py`. **[REQUIRED]** everywhere else: no
+invocation passes that dictionary to a process, and no Codex equivalent exists.
 
 - The parent `os.environ` **MUST NOT** be mutated — not even temporarily. The controller is
   concurrent, and a temporary mutation is visible to every other thread and every unrelated child
@@ -555,7 +564,10 @@ Notes that make the ordering meaningful:
 
 - Gate 3 uses **synthetic** payloads precisely so that redaction is proven before any real agent
   identity data has ever been received. It MUST NOT be satisfied by inspecting a real canary.
-- Gate 4 delivers code that is **off by default**. Merging enablement is not part of Gate 4.
+- Gate 4 delivers code that is **off by default**. Merging enablement is not part of Gate 4. The
+  helpers now exist in `src/codex_forge/agent_telemetry.py`; nothing in the package imports them, no
+  production path calls them, and `CodexRunner` builds the arguments and the environment it built
+  before. Approving that code is not approving a canary.
 - Gates 5–6 (Claude) and 7–8 (Codex) are separate supervision events. Approving Claude does not
   approve Codex; the two agents have different identity exposure and different unresolved risks.
 - Gates 6 and 8 require inspecting **every** attribute, not a sample. "We saw the ones we expected"
@@ -570,20 +582,21 @@ Gate 1 is the approval of this document. Everything after it is unbuilt.
 
 Each item maps to the gate that cannot pass without it. Items 12–18 are **[CERTIFIED]** — they are
 implemented in `tests/test_otel_collector.py` and `tests/test_otel_redaction_certification.py`, the
-latter running a real Collector against synthetic hostile payloads. Every other item remains
-**[REQUIRED]** and unbuilt.
+latter running a real Collector against synthetic hostile payloads. Items 1–7 and 9 are
+**[CERTIFIED]** at the helper level in `tests/test_agent_telemetry.py`; read the note below the table
+before treating that as more than it is. Every other item remains **[REQUIRED]** and unbuilt.
 
 | # | Test | Gate |
 | --- | --- | --- |
-| 1 | Disabled-by-default behavior — no agent telemetry configuration is emitted unless explicitly enabled | 4 |
-| 2 | No parent-environment mutation — `os.environ` is byte-identical before and after an invocation | 4 |
-| 3 | Exact child-environment allowlist — the child receives precisely the enumerated variables and nothing else | 4 |
-| 4 | Inherited `OTEL_*` configuration neutralization — pre-existing operator variables do not reach the child | 4 |
-| 5 | Invocation-ID format and uniqueness — alphabet, length, and no collision across attempts, retries, phases, providers | 4 |
-| 6 | No identifiers or paths encoded in invocation IDs — the value is independent of task ID, project ID, path, branch, and commit | 4 |
-| 7 | Valid W3C `TRACEPARENT` — well-formed, and derived from the active `forge.phase` span | 4 |
+| 1 | Disabled-by-default behavior — no agent telemetry configuration is emitted unless explicitly enabled **[CERTIFIED]** | 4 |
+| 2 | No parent-environment mutation — `os.environ` is byte-identical before and after an invocation **[CERTIFIED]** | 4 |
+| 3 | Exact child-environment allowlist — the child receives precisely the enumerated variables and nothing else **[CERTIFIED]** | 4 |
+| 4 | Inherited `OTEL_*` configuration neutralization — pre-existing operator variables do not reach the child **[CERTIFIED]** | 4 |
+| 5 | Invocation-ID format and uniqueness — alphabet, length, and no collision across attempts, retries, phases, providers **[CERTIFIED]** | 4 |
+| 6 | No identifiers or paths encoded in invocation IDs — the value is independent of task ID, project ID, path, branch, and commit **[CERTIFIED]** | 4 |
+| 7 | Valid W3C `TRACEPARENT` — well-formed, and derived from the active `forge.phase` span **[CERTIFIED]** | 4 |
 | 8 | Claude parentage under `forge.phase` | 5, 6 |
-| 9 | **No traceparent propagation to Anthropic** — `CLAUDE_CODE_PROPAGATE_TRACEPARENT` is never enabled | 4 |
+| 9 | **No traceparent propagation to Anthropic** — `CLAUDE_CODE_PROPAGATE_TRACEPARENT` is never enabled **[CERTIFIED]** | 4 |
 | 10 | Codex `-c` strict-config acceptance — the override is accepted and does not fail the invocation | 7 |
 | 11 | Windows shim quoting — the override survives the shim without splitting or mangling | 7 |
 | 12 | Collector redaction of **span attributes** **[CERTIFIED]** | 3 |
@@ -598,6 +611,28 @@ latter running a real Collector against synthetic hostile payloads. Every other 
 | 21 | Task states and budgets unchanged | 9 |
 | 22 | Cancellation and retry lifecycle — a cancelled or retried invocation produces a fresh invocation ID and leaks no state | 4 |
 | 23 | Version-drift rejection — an unrecognized agent version or unrecognized attribute is denied, not passed through | 10 |
+
+### What "certified at the helper level" means for items 1–7 and 9
+
+`src/codex_forge/agent_telemetry.py` implements them and `tests/test_agent_telemetry.py` proves
+them, so they meet the **[CERTIFIED]** bar: implemented in this repository today and covered by the
+test suite. What they are certified *about* is narrower than the wording of the rows suggests, and
+the difference matters:
+
+- **"The child" in items 2–4 is the dictionary the builder returns, not a process.** No invocation
+  passes it to a subprocess, because no code calls the builder at all. Item 1 is certified in that
+  same sense — and by tests asserting that `CodexRunner` introduces no agent telemetry variable and
+  no telemetry process argument.
+- **Item 7 is certified for the header, not for its effect.** The `traceparent` a Forge phase span
+  produces is well-formed and carries that span's own trace and span identifiers. Whether Claude
+  adopts it as a parent is item 8, which stays **[REQUIRED]** until Gates 5 and 6.
+- **Item 9 is certified as an absence.** The builder never sets
+  `CLAUDE_CODE_PROPAGATE_TRACEPARENT`, and neutralizes an inherited one. Nothing has yet been
+  observed on the wire.
+- **Item 22 stays [REQUIRED].** A new identifier per call is proven; there is no invocation
+  lifecycle to cancel or retry, so the lifecycle half of that row is untested.
+
+None of this is evidence about what an agent emits. Gates 5–8 are untouched, and no canary has run.
 
 ---
 
