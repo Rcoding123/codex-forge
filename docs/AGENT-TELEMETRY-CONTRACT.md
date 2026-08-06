@@ -20,10 +20,16 @@ Every claim below is tagged. Do not promote a tag without the evidence the tag r
 | **[CERTIFIED]** | Implemented in this repository today and covered by the test suite. |
 | **[AUDITED]** | Observed in vendor source or documentation during the audit. Not exercised against a live agent under Forge, and therefore not proven. |
 | **[UNRESOLVED]** | Named in the audit and still unknown. MUST NOT be assumed in either direction. |
+| **[BLOCKED]** | Attempted, measured, and prevented by a mandatory safety control. Not available, and **not pending**: it becomes reachable only if the control's precondition changes and the change is certified. |
 | **[REQUIRED]** | A future implementation obligation created by this contract. Not yet built. |
 
 An **[AUDITED]** capability MUST NOT be described in code comments, documentation, dashboards, or
 commit messages as if it were **[CERTIFIED]**.
+
+A **[BLOCKED]** capability MUST NOT be described as certified, as available, or as merely pending.
+"Pending" implies waiting; nothing is waiting. The control that denies it is working as designed, and
+relaxing that control to unblock the capability is forbidden by
+[Section 6](#6--privacy-policy).
 
 ## Normative language
 
@@ -197,14 +203,28 @@ sensitive. An identifier "derived from the task ID" fails this contract even if 
   `build_claude_child_environment` writes it into a returned dictionary. **[REQUIRED]** at the
   invocation site: no process is started with that dictionary.
 - Claude interaction spans **SHOULD** then appear as descendants of `forge.phase` in one trace.
-  **[AUDITED]** — inbound acceptance was observed in the audit; it has not been exercised under
-  Forge.
-- **Request-level trace attribution is [UNRESOLVED], not certified.** The first supervised canary
-  had two of six accepted spans not reach the exporter, and nothing in that run recorded which two
-  or why (see [Section 15](#15--span-accounting)). Until one supervised run under the span
-  accounting shows an unresolved remainder of zero, no slice, document, or dashboard may describe
-  per-request trace attribution as available. Forge's persisted usage remains the authoritative
-  account of what a request consumed, exactly as [Section 8](#8--token-semantics) requires.
+  **[CERTIFIED]** — **Forge → Claude interaction-span correlation is certified.** A supervised Claude
+  Code 2.1.223 canary, run through `build_claude_child_environment`, emitted one
+  `claude_code.interaction` span; the receiver accepted it and the exporter sent it through the
+  certified pipeline, with the run's span accounting balancing at a zero unresolved remainder (see
+  [Section 15](#15--span-accounting)). This certifies the interaction level and **nothing below it**.
+- **Request-level trace attribution is [BLOCKED] under Collector 0.158.0.** In the same canary, both
+  `claude_code.llm_request` spans carried **span links**, whose attribute map no Collector 0.158.0
+  processor can reach ([Section 6](#6--privacy-policy)). `filter/unredactable` therefore dropped them
+  whole, and the accounting recorded them as deliberately filtered — 3 accepted, 1 exported, 2
+  filtered, 0 refused, 0 send-failed, 0 unresolved. This is the fail-closed control working exactly
+  as specified, not a defect and not a measurement gap.
+  - No slice, document, or dashboard may describe per-request trace attribution as **certified**, as
+    **available**, or as **pending**. It is blocked.
+  - The filter **MUST NOT** be weakened, narrowed, or bypassed to make those spans exportable.
+    Exporting an unredactable carrier is the one outcome this contract will not trade for coverage.
+  - A **future Collector version MAY be reevaluated** if it gains safe span-link attribute
+    processing — an OTTL `spanlink` context, or an equivalent that can empty the slice. Such a
+    version is a drift event under [Section 10](#10--version-and-drift-policy): it re-enters at Gate
+    3, and only a passing certification may change this status.
+  - Forge's persisted usage remains the authoritative account of what a request consumed, exactly as
+    [Section 8](#8--token-semantics) requires. Nothing here changes accounting, budgets, retries, or
+    task state.
 - `forge.invocation.id` **MUST** *also* be supplied as a resource attribute, so that Claude **metric
   points**, which carry no trace context, can still be joined to the phase. Trace parentage alone is
   insufficient.
@@ -383,6 +403,11 @@ than assumed:
   redacted it MUST be refused: the span or data point carrying it is dropped whole. Passing an
   unredactable carrier through because the surface is not named above does not satisfy this
   contract. **[CERTIFIED]** — implemented as `filter/unredactable`.
+- **This now has an observed cost, and the cost is accepted.** The supervised Claude canary showed
+  every `claude_code.llm_request` span carrying links, so all of them were dropped whole. Losing a
+  signal Forge wants is the intended behaviour of a fail-closed filter, and the filter **MUST NOT**
+  be relaxed to recover it. A Collector version that gains safe span-link attribute processing **MAY**
+  be reevaluated at Gate 3; until one is certified, the carrier stays refused.
 
 A drop is silent by construction, and that has a consequence this contract now requires to be
 handled rather than discovered: **a pipeline that may deny a carrier MUST be accounted for, not
@@ -585,13 +610,22 @@ Notes that make the ordering meaningful:
 - Gates 6 and 8 require inspecting **every** attribute, not a sample. "We saw the ones we expected"
   does not pass — the risk is the attribute nobody expected.
 - Gate 9 is evidence-gathering only. It does not change authority; Gate 10 does.
-- **A canary MUST account for every span the receiver accepted.** One supervised Claude canary has
-  been run and **Gate 5 did not pass on it**: six spans were accepted, four exported, and nothing
-  recorded the fate of the other two. Gate 5 is not satisfied by a run that completes; it is
-  satisfied by a run whose spans add up. See [Section 15](#15--span-accounting).
+- **A canary MUST account for every span the receiver accepted.** Gate 5 is not satisfied by a run
+  that completes; it is satisfied by a run whose spans add up. See
+  [Section 15](#15--span-accounting).
+- **Gate 5 has passed.** A supervised Claude Code 2.1.223 canary settled with 3 spans accepted, 1
+  exported, 2 deliberately filtered, 0 refused, 0 send-failed, and a **zero unresolved remainder**;
+  the privacy checks passed, the Collector exited 0, and Claude exited 0. The earlier attempt, whose
+  two-span discrepancy this gate note previously recorded, is superseded.
+- **Gate 6 has not started, and passing Gate 5 does not begin it.** Gate 6 remains incomplete unless
+  and until **every** safely exported Claude resource, span, and metric field has been individually
+  inspected and approved by a human. The canary exported one span; one span reaching an exporter is
+  not an inspection of what it carried. A field that was dropped is not exempt either — it is simply
+  not yet in scope, because Gate 6 governs what is *kept*.
 
-Gate 1 is the approval of this document. Gate 5 has been attempted once and did not pass. Everything
-else after Gate 4 is unbuilt.
+Gate 1 is the approval of this document. Gates 2–5 have passed. Gate 6 is unstarted and everything
+after it is unbuilt. Native Claude and Codex telemetry remain disabled: Gate 5 authorized one
+supervised run, not an enabled exporter.
 
 ---
 
@@ -612,7 +646,7 @@ before treating that as more than it is. Every other item remains **[REQUIRED]**
 | 5 | Invocation-ID format and uniqueness — alphabet, length, and no collision across attempts, retries, phases, providers **[CERTIFIED]** | 4 |
 | 6 | No identifiers or paths encoded in invocation IDs — the value is independent of task ID, project ID, path, branch, and commit **[CERTIFIED]** | 4 |
 | 7 | Valid W3C `TRACEPARENT` — well-formed, and derived from the active `forge.phase` span **[CERTIFIED]** | 4 |
-| 8 | Claude parentage under `forge.phase` | 5, 6 |
+| 8 | Claude parentage under `forge.phase` — **[CERTIFIED] for `claude_code.interaction`** by the supervised canary; **[BLOCKED] for `claude_code.llm_request`**, which `filter/unredactable` drops for links | 5, 6 |
 | 9 | **No traceparent propagation to Anthropic** — `CLAUDE_CODE_PROPAGATE_TRACEPARENT` is never enabled **[CERTIFIED]** | 4 |
 | 10 | Codex `-c` strict-config acceptance — the override is accepted and does not fail the invocation | 7 |
 | 11 | Windows shim quoting — the override survives the shim without splitting or mangling | 7 |
@@ -644,18 +678,22 @@ the difference matters:
   passes it to a subprocess, because no code calls the builder at all. Item 1 is certified in that
   same sense — and by tests asserting that `CodexRunner` introduces no agent telemetry variable and
   no telemetry process argument.
-- **Item 7 is certified for the header, not for its effect.** The `traceparent` a Forge phase span
-  produces is well-formed and carries that span's own trace and span identifiers. Whether Claude
-  adopts it as a parent is item 8, which stays **[REQUIRED]** until Gates 5 and 6.
+- **Item 7 is certified for the header; item 8 is now certified for its effect at one level.** The
+  `traceparent` a Forge phase span produces is well-formed and carries that span's own trace and span
+  identifiers, and the supervised canary showed a Claude interaction span correlated through it.
+  Below that level item 8 is **[BLOCKED]**, not outstanding: `claude_code.llm_request` spans carry
+  links and are deliberately dropped.
 - **Item 9 is certified as an absence.** The builder never sets
   `CLAUDE_CODE_PROPAGATE_TRACEPARENT`, and neutralizes an inherited one. Nothing has yet been
   observed on the wire.
 - **Item 22 stays [REQUIRED].** A new identifier per call is proven; there is no invocation
   lifecycle to cancel or retry, so the lifecycle half of that row is untested.
 
-None of this is evidence about what an agent emits. One supervised Claude canary has been run and
-did not pass Gate 5; Gates 6–8 are untouched. Items 24–27 are certified against synthetic payloads
-only — they certify that the accounting works, not that any agent's spans have been accounted for.
+Almost none of this is evidence about what an agent emits. Items 24–27 are certified against
+synthetic payloads: they certify that the accounting works. The supervised Claude canary then ran
+under that accounting and balanced, which is what passed Gate 5 and certified item 8 at the
+interaction level — it is **not** an inspection of the fields that span carried. Gate 6 is
+untouched, and so are Gates 7–8, which no Codex run has approached.
 
 ---
 
@@ -674,12 +712,21 @@ MUST say so explicitly.
 
 ### Claude
 
-- **Which two spans the first canary did not export, and why.** Six accepted, four exported, zero
-  refused. Both `filter/unredactable` denying two link-carrying spans and a counter read before the
-  batch interval elapsed produce those three numbers, and the run recorded nothing that separates
-  them. See [Section 15](#15--span-accounting). **MUST NOT** be closed by picking the likelier one.
-- **Whether Claude attaches span links at all**, and to which spans. Unobserved. If it does, those
-  spans will be denied by `filter/unredactable`, and that is the configuration behaving correctly.
+- ~~Which two spans the first canary did not export, and why.~~ **Answered by measurement, not by
+  inference.** The supervised canary run under the span accounting recorded 3 accepted, 1 exported,
+  and 2 deliberately filtered by `filter/unredactable`, with the bounded diagnostic naming the
+  filtered pair as `claude_code.llm_request`. Note the scope: this attributes *that* run. The first
+  run's own counters were never accounted and are not retroactively attributable — they are
+  superseded, not explained.
+- ~~Whether Claude attaches span links at all, and to which spans.~~ **Answered: yes.** Claude Code
+  2.1.223 attaches links to `claude_code.llm_request` spans, all of which were denied by
+  `filter/unredactable` — the configuration behaving correctly. Whether it links *other* span types,
+  and whether this holds across versions, stays open under
+  [Section 10](#10--version-and-drift-policy).
+- **Whether any Collector version can attribute request-level spans safely.** Open. It requires a
+  processor that can reach and empty a span-link attribute map; Collector 0.158.0 has none. Until a
+  version with one is certified at Gate 3, request-level trace attribution stays **[BLOCKED]** and
+  **MUST NOT** be described as pending.
 - Exact subagent token attribution — whether subagent usage is nested, duplicated, or separate.
 - Retry token treatment — whether a retried request's tokens appear once or per attempt.
 - Served-model visibility.
@@ -772,12 +819,36 @@ Such a diagnostic:
 **[CERTIFIED]** — implemented as two `count` connectors, `filter/diagnostic_vocabulary`, and
 `transform/diagnostic_scrub` in `tests/otel_certification.py`.
 
-### What this does not settle
+### What the certified run settled, and what it did not
 
-The accounting explains where spans went. It says nothing about whether the ones that arrived are
-safe to keep — that is Gate 6, and it still requires inspecting **every** attribute a real agent
-emits. Nor does it make request-level trace attribution available; see
-[Section 4](#claude-correlation).
+A supervised Claude Code 2.1.223 canary has now run under this accounting and balanced:
+
+| Reading | Value |
+| --- | --- |
+| receiver accepted | 3 — `claude_code.interaction` 1, `claude_code.llm_request` 2 |
+| exporter sent | 1 — `claude_code.interaction` 1 |
+| deliberately filtered | 2 — `claude_code.llm_request` 2 |
+| receiver refused | 0 |
+| exporter send-failed | 0 |
+| **unresolved remainder** | **0** |
+| counters settled | yes |
+
+Privacy checks passed on every surface; the Collector exited 0 and Claude exited 0. That satisfies
+Gate 5 and certifies interaction-span correlation ([Section 4](#claude-correlation)).
+
+It settles nothing else:
+
+- **It is not Gate 6.** The accounting explains where spans went, not whether the one that arrived is
+  safe to keep. Gate 6 remains incomplete unless every safely exported Claude resource, span, and
+  metric field has been inspected and approved — every field, not a sample, and not "the ones we
+  expected".
+- **It does not make request-level trace attribution available.** That is **[BLOCKED]**; see
+  [Section 4](#claude-correlation).
+- **It changes no authority.** Forge persisted usage stays authoritative, native metrics stay
+  observational evidence only, and accounting, budgets, retries, and task state are untouched
+  ([Section 8](#8--token-semantics)).
+- **It enables nothing.** Native Claude telemetry remains disabled. Gate 5 approved one supervised
+  run; enabling an exporter needs Gate 6 and its own human approval.
 
 ---
 

@@ -29,11 +29,21 @@ trace-context extraction, and the Claude child-environment builder are implement
 `src/codex_forge/agent_telemetry.py`, and no production code path calls any of them — see
 [Agent correlation primitives](#agent-correlation-primitives-gate-4).
 
-**One supervised Claude canary has been run, and Gate 5 did not pass on it.** The Collector accepted
-six spans and exported four. Nothing recorded where the other two went, because the accounting that
-would have recorded it did not exist yet. It exists now — see
-[Span accounting](#span-accounting-for-a-canary) — and the discrepancy stays **unresolved** until one
-further supervised run reproduces it under that accounting.
+**The supervised Claude canary gate (contract Gate 5) has passed.** A supervised Claude Code 2.1.223
+run under the span accounting settled with a **zero unresolved remainder**: 3 spans accepted, 1
+exported, 2 deliberately filtered, 0 refused, 0 send-failed. Two consequences follow, and they point
+in opposite directions:
+
+- **Forge → Claude interaction-span correlation is certified.** The one exported span was
+  `claude_code.interaction`, correlated to the Forge phase that started it.
+- **Claude request-level trace attribution is blocked under Collector 0.158.0.** Both
+  `claude_code.llm_request` spans carried span links, which no processor at that version can redact,
+  so `filter/unredactable` dropped them whole. That is the fail-closed filter working as designed —
+  not certified, not available, and not pending.
+
+See [The certified canary outcome](#the-certified-canary-outcome). **This enables nothing**: native
+Claude telemetry stays disabled, and Gate 6 — inspecting every safely exported Claude field — has not
+started.
 
 ## What is emitted
 
@@ -372,6 +382,14 @@ Denying an unreviewable carrier is the fail-closed reading of
 [contract section 10](AGENT-TELEMETRY-CONTRACT.md#10--version-and-drift-policy); it is recorded here
 rather than left to be discovered from a gap in a trace.
 
+That warning has since been collected on. The supervised Claude canary showed every
+`claude_code.llm_request` span carrying links and being dropped whole — the reason Claude
+request-level trace attribution is blocked. **The filter stays exactly as it is.** Recovering those
+spans would mean exporting an attribute map nothing can inspect, which is the one trade this
+repository will not make for coverage. A **future Collector version may be reevaluated** if it gains
+safe span-link attribute processing — an OTTL `spanlink` context or an equivalent that can empty the
+slice — and such a version re-enters at Gate 3 like any other drift event.
+
 ## Synthetic certification (Gate 3)
 
 The certification proves redaction by running a **real** Collector, not by reading the YAML. It
@@ -519,6 +537,11 @@ The obvious way to tell them apart — printing the two spans that went missing 
 [the privacy policy](#privacy-and-redaction-guarantees) forbids, since the spans under suspicion are
 the ones carrying the one attribute map no processor can redact.
 
+A later run measured the mechanism directly and balanced
+([the certified outcome](#the-certified-canary-outcome)). That does not reach back and explain the
+table above: this run's counters were never accounted, so its two missing spans stay unattributed.
+It is superseded, not solved — which is the distinction this whole section exists to hold.
+
 ### What the accounting reports
 
 `tests/otel_canary.py` reads five counters from the Collector's own loopback telemetry endpoint
@@ -610,6 +633,60 @@ The harness builds the child environment through `agent_telemetry.build_claude_c
 and points it at its own ephemeral loopback port, so the run cannot be answered by a Collector the
 operator already has running, and no second child-environment builder exists to review.
 
+### The certified canary outcome
+
+A supervised Claude Code 2.1.223 canary has run under this accounting and balanced. **Contract Gate 5
+is passed.**
+
+| Reading | Value |
+| --- | --- |
+| receiver accepted | 3 |
+| exporter sent | 1 |
+| deliberately filtered | 2 |
+| receiver refused | 0 |
+| exporter send-failed | 0 |
+| **unresolved remainder** | **0** |
+| counters settled | yes |
+
+The bounded diagnostic named every one of them:
+
+```
+by name, accepted      claude_code.interaction=1, claude_code.llm_request=2
+by name, exported      claude_code.interaction=1
+not exported, by name  claude_code.llm_request=2
+```
+
+The privacy checks passed, the Collector exited 0, and Claude exited 0.
+
+**What this certifies.** Forge → Claude **interaction-span correlation**. One
+`claude_code.interaction` span was accepted and exported through the certified pipeline, correlated
+to the Forge phase that started it. The correlation machinery in
+[`agent_telemetry`](#agent-correlation-primitives-gate-4) has now been exercised against a real Claude
+process rather than a dictionary.
+
+**What this blocks.** Claude **request-level trace attribution**, under Collector 0.158.0. Both
+`claude_code.llm_request` spans carried span links, so `filter/unredactable` dropped them whole. The
+two numbers that were ambiguous in the first run are now separated by a counter rather than by
+argument: `otelcol_processor_filter_spans_filtered{filter="filter/unredactable"}` read 2, and the
+remainder read 0.
+
+This is a deliberate drop, and the vocabulary matters. Request-level attribution is **blocked** — it
+is not certified, not available, and **not pending**, because nothing is waiting on a queue for it. A
+future Collector version **may be reevaluated** if it gains safe span-link attribute processing; that
+version would re-enter at Gate 3, and only a passing certification could change this. The filter is
+not weakened in the meantime.
+
+**What it does not settle.** Everything else:
+
+- **Gate 6 has not started.** It remains incomplete unless **every** safely exported Claude resource,
+  span, and metric field has been inspected and approved. One span reaching an exporter is not an
+  inspection of what that span carried.
+- **Nothing is enabled.** `ops/otel/collector-config.yaml` is unchanged, native Claude and Codex
+  telemetry stay disabled, and no production path emits agent telemetry.
+- **No authority moved.** Forge persisted usage stays authoritative, native metrics stay
+  observational evidence only, and accounting, budgets, retries, and task state are unchanged.
+- **Codex is untouched.** No Codex canary has run; Gates 7–8 are where they were.
+
 ## Agent correlation primitives (Gate 4)
 
 `src/codex_forge/agent_telemetry.py` implements the correlation and child-process helpers that
@@ -622,11 +699,14 @@ operator already has running, and no second child-environment builder exists to 
   facts are asserted by tests, not merely intended.
 - **Native Claude Code and Codex telemetry remain disabled.** This slice adds no exporter, no
   agent-side setting on any process Forge starts, and no CLI override.
-- **One supervised Claude canary has run; no Codex canary has.** Nothing in this module was
-  exercised by it — the canary was run by hand, not through `build_claude_child_environment`. Claude
-  parentage under `forge.phase` is still unproven, and so is anything else about what Claude emits:
-  the run produced two counters and no attribution. See
-  [Span accounting](#span-accounting-for-a-canary).
+- **A supervised Claude canary has passed; no Codex canary has run.** The certified run went through
+  the harness, which builds its child environment with `build_claude_child_environment`, so that
+  helper and the `TRACEPARENT` it places have now been exercised against a real Claude Code 2.1.223
+  process. Claude **interaction-span** correlation under `forge.phase` is certified by it;
+  **request-level** attribution is blocked, because the `claude_code.llm_request` spans carry links
+  and are deliberately filtered. Being exercised by a test harness is not the same as being wired:
+  no production path calls this module. See
+  [The certified canary outcome](#the-certified-canary-outcome).
 - **Claude requires the certified Collector redaction before any runtime use.** Claude attaches
   `user.email`, `organization.id`, and `user.id` with **no configuration gate at all**, so no child
   environment can suppress them; the Collector's privacy processor is what removes them. Enabling a

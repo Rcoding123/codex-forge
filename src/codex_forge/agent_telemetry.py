@@ -4,10 +4,12 @@ Gate 4 of [the shared agent telemetry contract](../../docs/AGENT-TELEMETRY-CONTR
 correlation identifier, the trace-context extraction, and the child-process environment that a later
 slice would need in order to observe a Claude or Codex invocation. This module is that code.
 
-**Nothing here is wired.** No other module in this package imports it. `CodexRunner.run()` builds the
-same arguments and the same environment it built before this module existed, native Claude and Codex
-telemetry stay disabled, no canary has run, and no Codex `-c` override is implemented. Enabling an
-agent exporter is Gate 5 (Claude) and Gate 7 (Codex), and each needs its own human approval.
+**Nothing here is wired into normal Forge execution.** No production module imports it, and
+`CodexRunner.run()` still builds the same arguments and environment as before. The supervised
+Claude canary exercised these helpers only through the approval-gated canary harness. Native
+Claude and Codex telemetry remain disabled in normal execution, and no Codex `-c` override is
+implemented. Gate 5 has passed; Gate 6 field inspection remains incomplete, and Gate 7 requires
+separate human approval before any Codex canary.
 
 What the module provides:
 
