@@ -5,6 +5,22 @@ is the first telemetry slice: it is **local-only**, **off by default**, and **ob
 Enabling it does not change model execution, prompts, task states, budgets, retries, validation
 decisions, or any public JSON contract.
 
+## Scope: Forge spans only
+
+Everything on this page describes **Forge's own** spans, and that slice is **certified** — it is
+implemented, tested, and safe to enable.
+
+The native OpenTelemetry support inside Claude Code and Codex is a different thing entirely. It has
+been **audited but is not enabled**, and nothing in this repository turns it on. Both agents emit
+prompts, responses, tool content, and account identity by default, so enabling them is gated behind
+[the shared agent telemetry contract](AGENT-TELEMETRY-CONTRACT.md), which defines the trust
+boundaries, correlation identifiers, mandatory redaction, token semantics, and the ordered rollout
+gates any such slice must pass.
+
+**The next gate is Collector redaction certification** (Gate 3): synthetic hostile OTLP payloads
+must prove identity and content removal from span, event, metric, and resource attributes before any
+agent canary runs.
+
 ## What is emitted
 
 Three nested spans with fixed names:
@@ -115,8 +131,9 @@ model requests internally, and Forge cannot currently see them.** Consequences:
   request.
 - Span counts do not tell you how many model calls a task made.
 
-Per-model-request tracing is a later slice. Do not build dashboards that assume one phase span
-equals one model call.
+Per-model-request tracing is a later slice, governed by
+[the shared agent telemetry contract](AGENT-TELEMETRY-CONTRACT.md). Do not build dashboards that
+assume one phase span equals one model call.
 
 ## Privacy and redaction guarantees
 
