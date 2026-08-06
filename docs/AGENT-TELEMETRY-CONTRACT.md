@@ -199,6 +199,12 @@ sensitive. An identifier "derived from the task ID" fails this contract even if 
 - Claude interaction spans **SHOULD** then appear as descendants of `forge.phase` in one trace.
   **[AUDITED]** — inbound acceptance was observed in the audit; it has not been exercised under
   Forge.
+- **Request-level trace attribution is [UNRESOLVED], not certified.** The first supervised canary
+  had two of six accepted spans not reach the exporter, and nothing in that run recorded which two
+  or why (see [Section 15](#15--span-accounting)). Until one supervised run under the span
+  accounting shows an unresolved remainder of zero, no slice, document, or dashboard may describe
+  per-request trace attribution as available. Forge's persisted usage remains the authoritative
+  account of what a request consumed, exactly as [Section 8](#8--token-semantics) requires.
 - `forge.invocation.id` **MUST** *also* be supplied as a resource attribute, so that Claude **metric
   points**, which carry no trace context, can still be joined to the phase. Trace parentage alone is
   insufficient.
@@ -377,6 +383,12 @@ than assumed:
   redacted it MUST be refused: the span or data point carrying it is dropped whole. Passing an
   unredactable carrier through because the surface is not named above does not satisfy this
   contract. **[CERTIFIED]** — implemented as `filter/unredactable`.
+
+A drop is silent by construction, and that has a consequence this contract now requires to be
+handled rather than discovered: **a pipeline that may deny a carrier MUST be accounted for, not
+merely observed.** A canary that reports only "accepted" and "exported" cannot distinguish a
+deliberate denial from an unexplained loss, and MUST NOT be read as evidence either way. See
+[Section 15](#15--span-accounting).
 
 Redaction **MUST execute before batching and export**. A processor placed after `batch` in a
 pipeline does not satisfy this contract even if it names the right keys.
@@ -573,8 +585,13 @@ Notes that make the ordering meaningful:
 - Gates 6 and 8 require inspecting **every** attribute, not a sample. "We saw the ones we expected"
   does not pass — the risk is the attribute nobody expected.
 - Gate 9 is evidence-gathering only. It does not change authority; Gate 10 does.
+- **A canary MUST account for every span the receiver accepted.** One supervised Claude canary has
+  been run and **Gate 5 did not pass on it**: six spans were accepted, four exported, and nothing
+  recorded the fate of the other two. Gate 5 is not satisfied by a run that completes; it is
+  satisfied by a run whose spans add up. See [Section 15](#15--span-accounting).
 
-Gate 1 is the approval of this document. Everything after it is unbuilt.
+Gate 1 is the approval of this document. Gate 5 has been attempted once and did not pass. Everything
+else after Gate 4 is unbuilt.
 
 ---
 
@@ -611,6 +628,10 @@ before treating that as more than it is. Every other item remains **[REQUIRED]**
 | 21 | Task states and budgets unchanged | 9 |
 | 22 | Cancellation and retry lifecycle — a cancelled or retried invocation produces a fresh invocation ID and leaks no state | 4 |
 | 23 | Version-drift rejection — an unrecognized agent version or unrecognized attribute is denied, not passed through | 10 |
+| 24 | **Span accounting balances** — accepted equals exported plus filtered plus refused plus send-failed, with a zero unresolved remainder, and a nonzero remainder fails the canary **[CERTIFIED]** | 5 |
+| 25 | **The bounded diagnostic publishes only vocabulary names and counts** — hostile span, resource, scope, link, and event attributes cannot reach it, and it emits no identifier of any kind **[CERTIFIED]** | 5 |
+| 26 | **The diagnostic does not weaken what it measures** — linked spans and exemplars stay blocked from the export path, and every deviation from the Gate 3 configuration is enumerated **[CERTIFIED]** | 5 |
+| 27 | **The privacy check always runs and is always reported**, including on a crashed or unbalanced run, and the Collector and agent are reaped on every path **[CERTIFIED]** | 5 |
 
 ### What "certified at the helper level" means for items 1–7 and 9
 
@@ -632,7 +653,9 @@ the difference matters:
 - **Item 22 stays [REQUIRED].** A new identifier per call is proven; there is no invocation
   lifecycle to cancel or retry, so the lifecycle half of that row is untested.
 
-None of this is evidence about what an agent emits. Gates 5–8 are untouched, and no canary has run.
+None of this is evidence about what an agent emits. One supervised Claude canary has been run and
+did not pass Gate 5; Gates 6–8 are untouched. Items 24–27 are certified against synthetic payloads
+only — they certify that the accounting works, not that any agent's spans have been accounted for.
 
 ---
 
@@ -651,6 +674,12 @@ MUST say so explicitly.
 
 ### Claude
 
+- **Which two spans the first canary did not export, and why.** Six accepted, four exported, zero
+  refused. Both `filter/unredactable` denying two link-carrying spans and a counter read before the
+  batch interval elapsed produce those three numbers, and the run recorded nothing that separates
+  them. See [Section 15](#15--span-accounting). **MUST NOT** be closed by picking the likelier one.
+- **Whether Claude attaches span links at all**, and to which spans. Unobserved. If it does, those
+  spans will be denied by `filter/unredactable`, and that is the configuration behaving correctly.
 - Exact subagent token attribution — whether subagent usage is nested, duplicated, or separate.
 - Retry token treatment — whether a retried request's tokens appear once or per attempt.
 - Served-model visibility.
@@ -684,6 +713,71 @@ Explicitly excluded from this contract and from every slice that implements it:
 - **`CODEX_HOME` changes.**
 - **Logs pipelines.**
 - **Dashboards** — out of scope for this slice.
+
+---
+
+## 15 — Span accounting
+
+Added after the first supervised Claude canary. Its subject is not what the Collector exports, which
+[Section 6](#6--privacy-policy) covers, but what it *does not* export and whether anyone can say why.
+
+### The requirement
+
+A canary **MUST** account for every span the receiver accepted:
+
+```
+receiver accepted = exporter sent + deliberately filtered + refused + send-failed + unresolved
+```
+
+**A nonzero unresolved remainder fails the canary.** It **MUST NOT** be explained away, rounded off,
+or attributed to a mechanism that was not measured. "Probably the link filter" is exactly the claim
+this section exists to forbid.
+
+The deliberately-filtered figure **MUST** come from the Collector's own
+`otelcol_processor_filter_spans_filtered` counter, labelled with the filter that did the dropping.
+Inferring it from the difference between the other two numbers assumes the answer.
+
+Counters **MUST** be read after they have settled. `otelcol_exporter_sent_spans` does not exist as a
+series until the first batch flushes, so a read taken when the agent exits reports every accepted
+span as lost — the same shape a deliberate drop produces, from a run in which nothing was dropped.
+
+Where a second, independent count of the same spans exists, the two **MUST** agree, and a
+disagreement **MUST** fail the canary. A breakdown that contradicts the counter it is breaking down
+cannot be used to attribute anything.
+
+**[CERTIFIED]** — `tests/otel_canary.py`, proven by `tests/test_otel_span_accounting.py`.
+
+### The diagnostic, and its limits
+
+Totals cannot name the spans. Naming them by exporting them is forbidden, since the spans under
+suspicion are the ones carrying the carrier no processor can redact. A canary **MAY** therefore run
+a temporary certification configuration that counts spans into an **allowlisted span-name
+vocabulary** and publishes nothing but those names and their counts.
+
+Such a diagnostic:
+
+- **MUST** map every span name outside the vocabulary to a single `other` bucket. An agent-controlled
+  span name is unbounded and **MUST NOT** be published.
+- **MUST NOT** emit a trace id, span id, link, resource attribute, span attribute, span-event
+  attribute, exception, identity, session id, invocation id, model name, path, URL, or content.
+- **MUST** deny metric names outside its own vocabulary at a processor, not only by declaring the
+  right ones — a Collector upgrade that adds a default metric is the expected failure mode.
+- **MUST** empty the resource, scope, and data-point attribute maps a `count` connector inherits
+  from the spans it counted. This is load-bearing, not defence in depth.
+- **MUST NOT** relax the pipeline it measures. Span links and metric exemplars stay denied on the
+  export path; a diagnostic that admits them to make the counts balance defeats its own purpose.
+- **MUST NOT** be merged into the shipped Collector configuration while it bypasses
+  `filter/unredactable` on any pipeline, however safe the terminating component is today.
+
+**[CERTIFIED]** — implemented as two `count` connectors, `filter/diagnostic_vocabulary`, and
+`transform/diagnostic_scrub` in `tests/otel_certification.py`.
+
+### What this does not settle
+
+The accounting explains where spans went. It says nothing about whether the ones that arrived are
+safe to keep — that is Gate 6, and it still requires inspecting **every** attribute a real agent
+emits. Nor does it make request-level trace attribution available; see
+[Section 4](#claude-correlation).
 
 ---
 

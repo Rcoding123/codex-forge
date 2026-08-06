@@ -128,6 +128,283 @@ REQUIRED_PIPELINES = ("traces", "metrics")
 FORBIDDEN_PIPELINES = ("logs",)
 ALLOWED_EXPORTERS = ("debug",)
 
+# ---------------------------------------------------------------------------
+# Bounded span-name diagnostic
+# ---------------------------------------------------------------------------
+#
+# `otelcol_receiver_accepted_spans` and `otelcol_exporter_sent_spans` answer *how many* spans a run
+# lost between the receiver and the exporter. They cannot answer *which*, and the obvious way to find
+# out -- printing the spans that did not make it -- is exactly what the privacy policy forbids, since
+# the spans in question are the ones carrying a carrier no processor can redact.
+#
+# The diagnostic below answers "which" without exporting anything from the spans. Two `count`
+# connectors convert traces to metrics: one fed straight off the receiver, one attached to the end of
+# the certified traces pipeline. A `count` connector configured without an `attributes` block emits a
+# bare counter -- no trace id, no span id, no link, no attribute of any kind survives the conversion,
+# because a counter has nowhere to put one. The bucket is carried by the *metric name*, drawn from
+# the closed vocabulary below and written by this file rather than by the span.
+#
+# Everything else is stripped again downstream. See `diagnostic_configuration`.
+
+DIAGNOSTIC_SPAN_NAMES = (
+    "forge.task",
+    "forge.attempt",
+    "forge.phase",
+    "claude_code.interaction",
+    "claude_code.llm_request",
+    "claude_code.tool",
+    "claude_code.tool.execution",
+    "claude_code.subagent.spawn",
+    "claude_code.hook",
+    "claude_code.compaction",
+)
+
+# Every name outside the vocabulary lands here. A span name is agent-controlled and therefore
+# unbounded; without this bucket an unrecognized name would either be published verbatim or silently
+# vanish from the accounting, and both are worse than "one span was something we do not have a name
+# for".
+DIAGNOSTIC_OTHER_BUCKET = "other"
+DIAGNOSTIC_BUCKETS = DIAGNOSTIC_SPAN_NAMES + (DIAGNOSTIC_OTHER_BUCKET,)
+
+# `accepted` is counted before the privacy pipeline, `exported` after it. The difference, by bucket,
+# is the answer the accounting exists to produce.
+DIAGNOSTIC_STAGES = ("accepted", "exported")
+DIAGNOSTIC_METRIC_PREFIX = "forge.diagnostic.span"
+DIAGNOSTIC_CONNECTORS = {stage: f"count/diagnostic_{stage}" for stage in DIAGNOSTIC_STAGES}
+DIAGNOSTIC_ACCEPTED_PIPELINE = "traces/diagnostic_accepted"
+DIAGNOSTIC_METRICS_PIPELINE = "metrics/diagnostic"
+DIAGNOSTIC_VOCABULARY_FILTER = "filter/diagnostic_vocabulary"
+DIAGNOSTIC_SCRUB_PROCESSOR = "transform/diagnostic_scrub"
+
+# The `count` connector ships defaults for the surfaces the configuration does not mention, so a
+# configuration that names only `spans` still emits `trace.span.event.count`. That metric is outside
+# the vocabulary, so it is suppressed at the source with a condition no span event can satisfy, and
+# denied again by the vocabulary filter. Verified against 0.158.0: `spanevents: {}` and
+# `spanevents: null` both leave the default in place; only a never-true condition removes it.
+DIAGNOSTIC_NEVER = "1 == 2"
+
+
+def diagnostic_metric_name(stage: str, bucket: str) -> str:
+    """The one metric name a (stage, bucket) pair is allowed to produce."""
+    if stage not in DIAGNOSTIC_STAGES:
+        raise ValueError(f"unknown diagnostic stage: {stage}")
+    if bucket not in DIAGNOSTIC_BUCKETS:
+        raise ValueError(f"unknown diagnostic bucket: {bucket}")
+    return f"{DIAGNOSTIC_METRIC_PREFIX}.{stage}.{bucket.replace('.', '_')}"
+
+
+def diagnostic_metric_names() -> tuple[str, ...]:
+    """Every metric name the diagnostic may emit. Anything else is a defect, not a new bucket."""
+    return tuple(
+        diagnostic_metric_name(stage, bucket)
+        for stage in DIAGNOSTIC_STAGES
+        for bucket in DIAGNOSTIC_BUCKETS
+    )
+
+
+def _count_connector(stage: str) -> dict:
+    """One `count` connector: a counter per bucket, and no `attributes` block anywhere.
+
+    The absent `attributes` block is the whole privacy argument. With it, the connector would copy
+    the named span attributes onto the counter's data points; without it, the counter carries no
+    dimension at all and there is no path from a span attribute, link, or event to the output.
+    """
+    spans = {
+        diagnostic_metric_name(stage, name): {
+            "description": f"spans named {name}, counted {stage}",
+            "conditions": [f'span.name == "{name}"'],
+        }
+        for name in DIAGNOSTIC_SPAN_NAMES
+    }
+    spans[diagnostic_metric_name(stage, DIAGNOSTIC_OTHER_BUCKET)] = {
+        "description": f"spans named outside the diagnostic vocabulary, counted {stage}",
+        "conditions": [" and ".join(f'span.name != "{name}"' for name in DIAGNOSTIC_SPAN_NAMES)],
+    }
+    return {
+        "spans": spans,
+        "spanevents": {
+            f"{DIAGNOSTIC_METRIC_PREFIX}.spanevent.suppressed": {
+                "description": "never emitted; displaces the connector's default span-event metric",
+                "conditions": [DIAGNOSTIC_NEVER],
+            }
+        },
+    }
+
+
+def diagnostic_configuration(config: dict) -> dict:
+    """Return ``config`` plus the bounded span-name diagnostic. The original is not modified.
+
+    This is a **temporary certification** configuration. It is built here, in test code, from the
+    shipped file; it is never written back to `ops/otel/collector-config.yaml`, because the pipeline
+    it adds deliberately does not satisfy `certify_configuration` -- `traces/diagnostic_accepted`
+    bypasses `filter/unredactable` on purpose, which is the only way to see what that filter dropped.
+    That bypass is safe *only* because the pipeline terminates in a counter. It would not be safe
+    with any exporter that can print a span, which is why it does not live in the shipped file.
+
+    Three layers keep the diagnostic output inside the vocabulary:
+
+    1. the connectors emit only the names in `diagnostic_metric_names`, with no attribute block;
+    2. `filter/diagnostic_vocabulary` denies any metric name outside that list, so a future
+       Collector default cannot appear merely because nobody predicted it;
+    3. `transform/diagnostic_scrub` empties the resource, scope, and data-point attribute maps the
+       connector inherits from the spans it counted.
+
+    Layer 3 is load-bearing rather than belt-and-braces: a `count` connector propagates the incoming
+    resource onto the metrics it produces.
+    """
+    diagnostic = copy.deepcopy(config)
+    connectors = diagnostic.setdefault("connectors", {})
+    for stage, name in DIAGNOSTIC_CONNECTORS.items():
+        connectors[name] = _count_connector(stage)
+
+    allowed = list(diagnostic_metric_names())
+    diagnostic["processors"][DIAGNOSTIC_VOCABULARY_FILTER] = {
+        "error_mode": "propagate",
+        "metrics": {
+            # The filter processor drops what its conditions match, so the allowlist is expressed as
+            # "drop everything that is not one of these".
+            "metric": [" and ".join(f'metric.name != "{name}"' for name in allowed)]
+        },
+    }
+    diagnostic["processors"][DIAGNOSTIC_SCRUB_PROCESSOR] = {
+        "error_mode": "propagate",
+        "metric_statements": [
+            {"context": "resource", "statements": ["keep_keys(resource.attributes, [])"]},
+            {"context": "scope", "statements": ["keep_keys(scope.attributes, [])"]},
+            {"context": "datapoint", "statements": ["keep_keys(datapoint.attributes, [])"]},
+        ],
+    }
+
+    pipelines = diagnostic["service"]["pipelines"]
+    # Counted at the end of the certified pipeline, so `exported` is what the debug exporter saw and
+    # not an approximation of it.
+    pipelines["traces"]["exporters"] = ["debug", DIAGNOSTIC_CONNECTORS["exported"]]
+    pipelines[DIAGNOSTIC_ACCEPTED_PIPELINE] = {
+        "receivers": ["otlp"],
+        "processors": [MEMORY_LIMITER],
+        "exporters": [DIAGNOSTIC_CONNECTORS["accepted"]],
+    }
+    pipelines[DIAGNOSTIC_METRICS_PIPELINE] = {
+        "receivers": list(DIAGNOSTIC_CONNECTORS.values()),
+        "processors": [
+            MEMORY_LIMITER,
+            UNREDACTABLE_FILTER,
+            DIAGNOSTIC_VOCABULARY_FILTER,
+            PRIVACY_PROCESSOR,
+            DIAGNOSTIC_SCRUB_PROCESSOR,
+            BATCH_PROCESSOR,
+        ],
+        "exporters": ["debug"],
+    }
+    return diagnostic
+
+
+# The complete list of ways the diagnostic configuration is allowed to differ from a configuration
+# `certify_configuration` passes. Anything else appearing here is a real regression: the diagnostic
+# must not become a way to relax the shipped pipeline. The two "used but not declared" entries are
+# the connectors, which live under `connectors:` rather than `exporters:`/`receivers:`.
+DIAGNOSTIC_EXPECTED_DEVIATIONS = frozenset(
+    {
+        "traces: count/diagnostic_exported is used but not declared",
+        "traces: exporter other than debug: count/diagnostic_exported",
+        f"{DIAGNOSTIC_ACCEPTED_PIPELINE}: count/diagnostic_accepted is used but not declared",
+        f"{DIAGNOSTIC_ACCEPTED_PIPELINE}: exporter other than debug: count/diagnostic_accepted",
+        f"{DIAGNOSTIC_ACCEPTED_PIPELINE}: {UNREDACTABLE_FILTER} is missing",
+        f"{DIAGNOSTIC_ACCEPTED_PIPELINE}: privacy processor {PRIVACY_PROCESSOR} is missing",
+        f"{DIAGNOSTIC_METRICS_PIPELINE}: count/diagnostic_accepted is used but not declared",
+        f"{DIAGNOSTIC_METRICS_PIPELINE}: count/diagnostic_exported is used but not declared",
+    }
+)
+
+
+def certify_diagnostic_configuration(config: dict) -> list[str]:
+    """Return every way ``config`` fails the diagnostic's own privacy invariants.
+
+    `certify_configuration` certifies the shipped pipeline. This certifies the additions: that the
+    diagnostic cannot carry anything out of a span, and that adding it did not quietly weaken the
+    pipeline it is measuring.
+    """
+    problems: list[str] = []
+
+    connectors = config.get("connectors") or {}
+    unexpected = set(connectors) - set(DIAGNOSTIC_CONNECTORS.values())
+    if unexpected:
+        problems.append(f"unexpected connector: {sorted(unexpected)}")
+    allowed_names = set(diagnostic_metric_names())
+    for name, connector in connectors.items():
+        if not isinstance(connector, dict):
+            problems.append(f"{name}: connector is not a mapping")
+            continue
+        for surface, metrics in connector.items():
+            for metric, definition in (metrics or {}).items():
+                if not isinstance(definition, dict):
+                    problems.append(f"{name}/{surface}/{metric}: definition is not a mapping")
+                    continue
+                # The one field that would let a span attribute become a metric dimension.
+                if "attributes" in definition:
+                    problems.append(f"{name}/{surface}/{metric}: declares span attributes")
+                if surface == "spans" and metric not in allowed_names:
+                    problems.append(f"{name}: metric outside the vocabulary: {metric}")
+                if surface != "spans" and definition.get("conditions") != [DIAGNOSTIC_NEVER]:
+                    problems.append(f"{name}/{surface}/{metric}: not suppressed")
+
+    vocabulary = (config.get("processors") or {}).get(DIAGNOSTIC_VOCABULARY_FILTER)
+    if not isinstance(vocabulary, dict):
+        problems.append(f"{DIAGNOSTIC_VOCABULARY_FILTER} is not declared")
+    else:
+        if vocabulary.get("error_mode") != "propagate":
+            problems.append(f"{DIAGNOSTIC_VOCABULARY_FILTER}: error_mode must be 'propagate'")
+        conditions = " ".join(str(item) for item in (vocabulary.get("metrics") or {}).get("metric") or [])
+        for name in sorted(allowed_names):
+            if f'metric.name != "{name}"' not in conditions:
+                problems.append(f"{DIAGNOSTIC_VOCABULARY_FILTER}: does not admit {name}")
+
+    scrub = (config.get("processors") or {}).get(DIAGNOSTIC_SCRUB_PROCESSOR)
+    if not isinstance(scrub, dict):
+        problems.append(f"{DIAGNOSTIC_SCRUB_PROCESSOR} is not declared")
+    else:
+        if scrub.get("error_mode") != "propagate":
+            problems.append(f"{DIAGNOSTIC_SCRUB_PROCESSOR}: error_mode must be 'propagate'")
+        emptied = {
+            group.get("context")
+            for group in scrub.get("metric_statements") or []
+            if isinstance(group, dict)
+            and any(re.fullmatch(r"keep_keys\(\s*\w+\.attributes\s*,\s*\[\s*\]\s*\)", str(s)) for s in group.get("statements") or [])
+        }
+        for surface in REQUIRED_METRIC_SURFACES:
+            if surface not in emptied:
+                problems.append(f"{DIAGNOSTIC_SCRUB_PROCESSOR}: {surface} attributes are not emptied")
+
+    pipelines = (config.get("service") or {}).get("pipelines") or {}
+    # The measured pipeline must still be the certified one, whatever the diagnostic added to it.
+    certified_processors = [MEMORY_LIMITER, UNREDACTABLE_FILTER, PRIVACY_PROCESSOR, BATCH_PROCESSOR]
+    for name in REQUIRED_PIPELINES:
+        pipeline = pipelines.get(name) or {}
+        if list(pipeline.get("processors") or []) != certified_processors:
+            problems.append(f"{name}: the certified processor chain was modified")
+        if "debug" not in (pipeline.get("exporters") or []):
+            problems.append(f"{name}: no longer exports to debug")
+    diagnostic_metrics = pipelines.get(DIAGNOSTIC_METRICS_PIPELINE) or {}
+    processors = list(diagnostic_metrics.get("processors") or [])
+    for required in (DIAGNOSTIC_VOCABULARY_FILTER, DIAGNOSTIC_SCRUB_PROCESSOR, PRIVACY_PROCESSOR):
+        if required not in processors:
+            problems.append(f"{DIAGNOSTIC_METRICS_PIPELINE}: {required} is missing")
+    if DIAGNOSTIC_SCRUB_PROCESSOR in processors and BATCH_PROCESSOR in processors:
+        if processors.index(DIAGNOSTIC_SCRUB_PROCESSOR) > processors.index(BATCH_PROCESSOR):
+            problems.append(f"{DIAGNOSTIC_METRICS_PIPELINE}: the scrub runs after {BATCH_PROCESSOR}")
+    for pipeline_name, pipeline in pipelines.items():
+        for exporter in pipeline.get("exporters") or []:
+            if exporter not in ALLOWED_EXPORTERS and exporter not in DIAGNOSTIC_CONNECTORS.values():
+                problems.append(f"{pipeline_name}: exporter other than debug: {exporter}")
+    for forbidden in FORBIDDEN_PIPELINES:
+        if forbidden in pipelines:
+            problems.append(f"forbidden pipeline present: {forbidden}")
+    extra_exporters = set(config.get("exporters") or {}) - set(ALLOWED_EXPORTERS)
+    if extra_exporters:
+        problems.append(f"exporter other than debug: {sorted(extra_exporters)}")
+
+    return problems
+
 
 # ---------------------------------------------------------------------------
 # Structural certification
@@ -586,6 +863,91 @@ def hostile_trace_payload() -> dict:
     }
 
 
+# The span names the diagnostic payload below emits, and whether each carries a link. This is
+# deliberately shaped like the reported canary -- six spans in, two of them carrying a link -- so the
+# accounting is exercised against the arithmetic it has to explain, and so a bucket the vocabulary
+# does not know about (`some.unknown.vendor.span`) is present to land in `other`.
+DIAGNOSTIC_PAYLOAD_SPANS = (
+    ("forge.phase", False),
+    ("claude_code.interaction", False),
+    ("claude_code.llm_request", True),
+    ("claude_code.llm_request", False),
+    ("claude_code.tool", True),
+    ("some.unknown.vendor.span", False),
+)
+
+
+def diagnostic_trace_payload() -> dict:
+    """Vocabulary-covering spans, every surface hostile, and links on two of them.
+
+    Every span carries the full hostile attribute set on itself and on an event, the resource and
+    scope are hostile, and each link carries the hostile set as well. A diagnostic that emits
+    anything but a name from its own vocabulary and a count will show it against this payload.
+    """
+    link = [
+        {
+            "traceId": "5b8efff798038103d269b633813fc60c",
+            "spanId": "eee19b7ec3c1b174",
+            "attributes": hostile_attributes("span-link"),
+        }
+    ]
+    spans = []
+    for index, (name, linked) in enumerate(DIAGNOSTIC_PAYLOAD_SPANS):
+        span = {
+            "traceId": "5b8efff798038103d269b633813fc60c",
+            "spanId": f"{index + 1:016x}",
+            "name": name,
+            "kind": 1,
+            "startTimeUnixNano": "1700000000000000000",
+            "endTimeUnixNano": "1700000012345000000",
+            # A link-carrying span gets its own surface tag, so the certification can tell a value
+            # that leaked from a dropped span apart from one that leaked from a surviving sibling.
+            "attributes": hostile_attributes("linked-span" if linked else "span"),
+            "events": [
+                {
+                    "timeUnixNano": "1700000005000000000",
+                    "name": "forge.certification.event",
+                    "attributes": hostile_attributes("span-event"),
+                }
+            ],
+        }
+        if linked:
+            span["links"] = link
+        spans.append(span)
+    return {
+        "resourceSpans": [
+            {
+                "resource": {"attributes": hostile_attributes("trace-resource")},
+                "scopeSpans": [
+                    {
+                        "scope": {
+                            "name": "forge.certification",
+                            "version": "1.0",
+                            "attributes": hostile_attributes("trace-scope"),
+                        },
+                        "spans": spans,
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def diagnostic_expected_counts() -> tuple[dict[str, int], dict[str, int]]:
+    """What the diagnostic must report for :func:`diagnostic_trace_payload`, by bucket.
+
+    Derived from the payload rather than written out, so the two cannot drift apart.
+    """
+    accepted: dict[str, int] = {}
+    exported: dict[str, int] = {}
+    for name, linked in DIAGNOSTIC_PAYLOAD_SPANS:
+        bucket = name if name in DIAGNOSTIC_SPAN_NAMES else DIAGNOSTIC_OTHER_BUCKET
+        accepted[bucket] = accepted.get(bucket, 0) + 1
+        if not linked:
+            exported[bucket] = exported.get(bucket, 0) + 1
+    return accepted, exported
+
+
 def hostile_metric_payload() -> dict:
     """An OTLP/HTTP JSON metric export with hostile values on resource, scope, and data points."""
     return {
@@ -818,7 +1180,7 @@ def _post(port: int, path: str, body: dict) -> tuple[str, int, str]:
         return path, error.code, error.read().decode("utf-8", "replace")
 
 
-def _wait_for(log_path: Path, needle: str, process: subprocess.Popen, timeout: float) -> bool:
+def wait_for_marker(log_path: Path, needle: str, process: subprocess.Popen, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         text = log_path.read_text(encoding="utf-8", errors="replace")
@@ -860,7 +1222,7 @@ def run_collector(
         )
         responses: list[tuple[str, int, str]] = []
         try:
-            if not _wait_for(log_path, "Everything is ready", process, timeout=60):
+            if not wait_for_marker(log_path, "Everything is ready", process, timeout=60):
                 raise CollectorFailed(
                     "Collector never reported readiness (exit "
                     f"{process.poll()}):\n{log_path.read_text(encoding='utf-8', errors='replace')}"
@@ -874,7 +1236,7 @@ def run_collector(
                 responses.append(_post(ports["http"], path, body))
             for marker in expect_markers:
                 # The batch processor holds for its own `timeout` before the exporter sees anything.
-                if not _wait_for(log_path, marker, process, timeout=settle_seconds + 30):
+                if not wait_for_marker(log_path, marker, process, timeout=settle_seconds + 30):
                     raise CollectorFailed(
                         f"the exporter never printed {marker!r}, so there is nothing to certify:\n"
                         f"{log_path.read_text(encoding='utf-8', errors='replace')}"
@@ -887,7 +1249,7 @@ def run_collector(
                     f"{log_path.read_text(encoding='utf-8', errors='replace')}"
                 )
         finally:
-            returncode = _stop(process)
+            returncode = stop_collector(process)
 
     return CollectorRun(
         returncode=returncode,
@@ -897,7 +1259,7 @@ def run_collector(
     )
 
 
-def _stop(process: subprocess.Popen) -> int:
+def stop_collector(process: subprocess.Popen) -> int:
     """Stop the Collector, preferring a clean shutdown, and never leave the process behind."""
     if process.poll() is not None:
         return process.returncode
@@ -919,3 +1281,107 @@ def _stop(process: subprocess.Popen) -> int:
     except subprocess.TimeoutExpired:
         process.kill()
         return process.wait(timeout=15)
+
+
+# ---------------------------------------------------------------------------
+# Reading counts back out
+# ---------------------------------------------------------------------------
+
+# What the Collector's own Prometheus endpoint is read for. All five are present at the shipped
+# `service.telemetry.metrics.level: basic`, verified against 0.158.0 -- the accounting needs no
+# change to the shipped internal-telemetry configuration.
+COUNTER_ACCEPTED = "otelcol_receiver_accepted_spans"
+COUNTER_REFUSED = "otelcol_receiver_refused_spans"
+COUNTER_SENT = "otelcol_exporter_sent_spans"
+COUNTER_SEND_FAILED = "otelcol_exporter_send_failed_spans"
+COUNTER_FILTERED = "otelcol_processor_filter_spans_filtered"
+
+_SERIES = re.compile(r"^(?P<name>[a-zA-Z_:][\w:]*)(?:\{(?P<labels>[^}]*)\})?\s+(?P<value>\S+)$")
+_LABEL = re.compile(r'(\w+)="((?:[^"\\]|\\.)*)"')
+
+
+def parse_internal_metrics(body: str) -> list[tuple[str, dict[str, str], float]]:
+    """Parse a Prometheus exposition body into ``(name, labels, value)`` triples."""
+    series: list[tuple[str, dict[str, str], float]] = []
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        matched = _SERIES.match(line)
+        if not matched:
+            continue
+        try:
+            value = float(matched.group("value"))
+        except ValueError:
+            continue
+        labels = dict(_LABEL.findall(matched.group("labels") or ""))
+        series.append((matched.group("name"), labels, value))
+    return series
+
+
+def scrape_internal_metrics(port: int, *, timeout: float = 10.0) -> list[tuple[str, dict[str, str], float]]:
+    """Read the Collector's loopback-bound internal telemetry endpoint. Never leaves the host."""
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=timeout) as response:
+        return parse_internal_metrics(response.read().decode("utf-8", "replace"))
+
+
+def counter_total(
+    series: list[tuple[str, dict[str, str], float]], name: str, **labels: str
+) -> int:
+    """Sum one counter across every label set that matches ``labels``.
+
+    A counter with no series yet reads as 0. That is the state the *timing* hypothesis produces and
+    it is why the accounting waits for the counts to settle instead of reading once.
+    """
+    total = 0.0
+    for series_name, series_labels, value in series:
+        if series_name != name:
+            continue
+        if all(series_labels.get(key) == value_ for key, value_ in labels.items()):
+            total += value
+    return int(total)
+
+
+_METRIC_NAME_LINE = re.compile(r"^\s*->\s*Name:\s*(\S+)\s*$")
+_VALUE_LINE = re.compile(r"^\s*Value:\s*(-?\d+)")
+
+
+def parse_diagnostic_counts(output: str) -> dict[str, dict[str, int]]:
+    """Total the diagnostic counters printed by the debug exporter, by stage and bucket.
+
+    The debug exporter prints each metric as a descriptor followed by its data points, and the
+    diagnostic emits delta sums, so a run that flushed several batches contributes several blocks
+    for the same bucket. They are summed.
+    """
+    totals: dict[str, dict[str, int]] = {stage: {} for stage in DIAGNOSTIC_STAGES}
+    names = {
+        diagnostic_metric_name(stage, bucket): (stage, bucket)
+        for stage in DIAGNOSTIC_STAGES
+        for bucket in DIAGNOSTIC_BUCKETS
+    }
+    lines = output.splitlines()
+    for index, line in enumerate(lines):
+        matched = _METRIC_NAME_LINE.match(line)
+        if not matched or matched.group(1) not in names:
+            continue
+        stage, bucket = names[matched.group(1)]
+        for following in lines[index + 1 : index + 16]:
+            if _METRIC_NAME_LINE.match(following):
+                break
+            value = _VALUE_LINE.match(following)
+            if value:
+                totals[stage][bucket] = totals[stage].get(bucket, 0) + int(value.group(1))
+                break
+    return totals
+
+
+def unknown_diagnostic_metric_names(output: str) -> list[str]:
+    """Every ``forge.diagnostic.*`` name the exporter printed that the vocabulary does not define."""
+    allowed = set(diagnostic_metric_names())
+    found = []
+    for line in output.splitlines():
+        matched = _METRIC_NAME_LINE.match(line)
+        if matched and matched.group(1).startswith(DIAGNOSTIC_METRIC_PREFIX):
+            if matched.group(1) not in allowed:
+                found.append(matched.group(1))
+    return sorted(set(found))

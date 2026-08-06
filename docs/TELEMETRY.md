@@ -27,7 +27,13 @@ Codex telemetry remain disabled.
 **The Gate 4 primitives now exist too, and they are not wired.** The correlation identifier, the
 trace-context extraction, and the Claude child-environment builder are implemented and tested in
 `src/codex_forge/agent_telemetry.py`, and no production code path calls any of them — see
-[Agent correlation primitives](#agent-correlation-primitives-gate-4). No canary has run.
+[Agent correlation primitives](#agent-correlation-primitives-gate-4).
+
+**One supervised Claude canary has been run, and Gate 5 did not pass on it.** The Collector accepted
+six spans and exported four. Nothing recorded where the other two went, because the accounting that
+would have recorded it did not exist yet. It exists now — see
+[Span accounting](#span-accounting-for-a-canary) — and the discrepancy stays **unresolved** until one
+further supervised run reproduces it under that accounting.
 
 ## What is emitted
 
@@ -486,6 +492,124 @@ while native Claude and Codex telemetry stay disabled**, which is the state this
 Do not revert it as a prerequisite for enabling an agent exporter; the privacy processor is the
 reason those gates can be approached at all.
 
+## Span accounting for a canary
+
+### The problem this solves
+
+The first supervised Claude Code 2.1.223 canary returned a clean-looking result — Claude exited 0,
+the response marker was exact, there were no telemetry warnings, twelve metric points were accepted
+and twelve exported — and one number that was not clean:
+
+| Reading | Value |
+| --- | --- |
+| spans accepted by the OTLP receiver | 6 |
+| spans exported by the debug exporter | 4 |
+| spans refused by the receiver | 0 |
+
+Two spans were accepted and did not come out the other end. **Which two, and why, is not recoverable
+from that run**, because at least two different mechanisms produce exactly those three numbers:
+
+- `filter/unredactable` dropping two spans that carried links, which is the configuration working as
+  designed; and
+- reading `otelcol_exporter_sent_spans` before the `batch` processor's five-second interval elapsed,
+  which is a measurement error and not a drop at all.
+
+Both are reproducible on this machine, and both are indistinguishable from the three numbers above.
+The obvious way to tell them apart — printing the two spans that went missing — is precisely what
+[the privacy policy](#privacy-and-redaction-guarantees) forbids, since the spans under suspicion are
+the ones carrying the one attribute map no processor can redact.
+
+### What the accounting reports
+
+`tests/otel_canary.py` reads five counters from the Collector's own loopback telemetry endpoint
+instead of two, and requires them to add up:
+
+```
+receiver accepted = exporter sent + deliberately filtered + refused + send-failed + unresolved
+```
+
+A nonzero **unresolved remainder** fails the canary. So does a set of counters that never settled, a
+Collector that did not exit cleanly, and any finding from the privacy check — which runs on every
+path, including the failing ones, and is always included in the report.
+
+The counters are read from the shipped `service.telemetry.metrics.level: basic`; the accounting needs
+no change to the Collector's internal telemetry configuration. `otelcol_receiver_accepted_spans`,
+`otelcol_receiver_refused_spans`, `otelcol_exporter_sent_spans`, and
+`otelcol_processor_filter_spans_filtered` are asserted present by the test suite at that level. The
+send-failure counter has no series until something fails, so an absent one is read as zero.
+
+`otelcol_processor_filter_spans_filtered{filter="filter/unredactable"}` is the reading that was
+missing from the first canary. It is what separates a deliberate drop from an unexplained one, and
+it was available all along.
+
+### The bounded span-name diagnostic
+
+Totals still cannot say *which* spans went missing. A temporary certification configuration adds two
+`count` connectors that convert spans to bare counters — one fed straight off the receiver, one at
+the end of the certified traces pipeline — so a run can report:
+
+```
+by name, accepted      claude_code.interaction=1, claude_code.llm_request=2, claude_code.tool=1, ...
+by name, exported      claude_code.interaction=1, claude_code.llm_request=1, ...
+not exported, by name  claude_code.llm_request=1, claude_code.tool=1
+```
+
+The bucket is carried by the **metric name**, drawn from a closed vocabulary written in
+`tests/otel_certification.py` — `forge.task`, `forge.attempt`, `forge.phase`,
+`claude_code.interaction`, `claude_code.llm_request`, `claude_code.tool`,
+`claude_code.tool.execution`, `claude_code.subagent.spawn`, `claude_code.hook`,
+`claude_code.compaction`, and `other`. **Any name outside that list is counted as `other`**, so an
+agent-controlled span name is never published.
+
+Nothing from the span itself survives the conversion. Three independent layers enforce that:
+
+| Layer | What it denies |
+| --- | --- |
+| the connectors declare **no `attributes` block** | a counter with no dimensions cannot carry a span attribute, link, or event |
+| `filter/diagnostic_vocabulary` | any metric name outside the closed vocabulary, including defaults a future Collector adds |
+| `transform/diagnostic_scrub` | the resource, scope, and data-point attribute maps a `count` connector inherits from the spans it counted |
+
+Layer 3 is load-bearing rather than belt-and-braces, and
+`tests/test_otel_span_accounting.py` proves it by removing it and showing the attributes reappear.
+The diagnostic emits metric names, counts, and the span timestamps a counter carries — no trace id,
+span id, link, attribute, event, exception, identity, session, invocation id, model name, path, URL,
+or content.
+
+The breakdown and the Collector's own counters are two independent measurements of the same two
+numbers, so the report **requires them to agree**. A run whose buckets do not sum to
+`otelcol_receiver_accepted_spans` and `otelcol_exporter_sent_spans` fails, because a breakdown that
+disagrees with the counter cannot be used to attribute a remainder.
+
+### Why it is not in the shipped Collector configuration
+
+The `traces/diagnostic_accepted` pipeline **deliberately omits `filter/unredactable`** — a pipeline
+that drops the spans is a pipeline that cannot count them. That bypass is safe only because the
+pipeline terminates in a counter, and it would not be safe with any exporter that can print a span.
+So it is built in test code from the shipped file, run for one supervised canary, and never written
+back. `ops/otel/collector-config.yaml` is unchanged.
+
+`test_the_diagnostic_deviates_from_the_certified_pipeline_in_exactly_the_known_ways` enumerates every
+difference between the diagnostic configuration and one that passes Gate 3. An edit that relaxes the
+*measured* pipeline, or points the bypass at a real exporter, fails that test.
+
+### Running it
+
+The harness starts a Collector and then calls an agent. It **refuses to launch an agent without a
+named human approval**, and the test suite never gives it one — every test drives it with synthetic
+OTLP instead.
+
+```powershell
+$env:OTELCOL_PATH = 'C:\Tools\OpenTelemetry\otelcol-contrib\0.158.0\otelcol-contrib.exe'
+.\.venv\Scripts\python.exe tests\otel_canary.py `
+    --workdir C:\CodexData\canary\run2 `
+    --approved-by '<the human approving this run>' `
+    --agent-command 'claude -p "Reply with exactly CANARY_OK and nothing else." --allowed-tools ""'
+```
+
+The harness builds the child environment through `agent_telemetry.build_claude_child_environment`
+and points it at its own ephemeral loopback port, so the run cannot be answered by a Collector the
+operator already has running, and no second child-environment builder exists to review.
+
 ## Agent correlation primitives (Gate 4)
 
 `src/codex_forge/agent_telemetry.py` implements the correlation and child-process helpers that
@@ -498,9 +622,11 @@ reason those gates can be approached at all.
   facts are asserted by tests, not merely intended.
 - **Native Claude Code and Codex telemetry remain disabled.** This slice adds no exporter, no
   agent-side setting on any process Forge starts, and no CLI override.
-- **No canary has run.** Nothing here has been exercised against a real Claude or Codex process.
-  Claude parentage under `forge.phase` is still unproven — inbound `TRACEPARENT` acceptance was
-  observed during the audit and nothing more.
+- **One supervised Claude canary has run; no Codex canary has.** Nothing in this module was
+  exercised by it — the canary was run by hand, not through `build_claude_child_environment`. Claude
+  parentage under `forge.phase` is still unproven, and so is anything else about what Claude emits:
+  the run produced two counters and no attribution. See
+  [Span accounting](#span-accounting-for-a-canary).
 - **Claude requires the certified Collector redaction before any runtime use.** Claude attaches
   `user.email`, `organization.id`, and `user.id` with **no configuration gate at all**, so no child
   environment can suppress them; the Collector's privacy processor is what removes them. Enabling a
