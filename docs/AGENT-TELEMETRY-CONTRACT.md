@@ -240,7 +240,9 @@ because the other is present:
 1. **Agent-side exporter disabled.** `OTEL_LOGS_EXPORTER` MUST be `none` for Claude. The Codex logs
    exporter MUST remain disabled.
 2. **No Collector logs pipeline.** `ops/otel/collector-config.yaml` MUST NOT declare a `logs`
-   pipeline. **[CERTIFIED]** — the current configuration declares only `traces`.
+   pipeline. **[CERTIFIED]** — the current configuration declares `traces` and `metrics` only, and
+   a certification test confirms the receiver answers `/v1/logs` with 404 rather than accepting the
+   record.
 
 Barrier 1 fails open if a future agent version changes its default or reads a variable Forge does
 not neutralize. Barrier 2 fails closed: with no logs pipeline, a log record that reaches the
@@ -354,6 +356,22 @@ satisfy this contract:
 - **resource attributes** — this is where Claude's ungated identity attributes live, and it is the
   surface most often forgotten
 
+Two facts established while implementing this section, both verified against a real Collector rather
+than assumed:
+
+- **"Resource attributes" is two surfaces, not one.** A resource context declared for traces does
+  **not** apply to metric resources. An implementation MUST declare the resource surface separately
+  for every enabled signal; a traces-only declaration lets identity attributes ride out untouched on
+  a metric resource.
+- **Instrumentation-scope attributes are a fifth carrier** that none of the four names above covers.
+  They MUST be redacted on the same terms.
+- **Span links and metric exemplars carry attribute maps that no Collector 0.158.0 processor can
+  reach.** OTTL exposes no `spanlink` or `exemplar` context, and hostile values placed there were
+  observed surviving both the `transform` and the `redaction` processor. Where a carrier cannot be
+  redacted it MUST be refused: the span or data point carrying it is dropped whole. Passing an
+  unredactable carrier through because the surface is not named above does not satisfy this
+  contract. **[CERTIFIED]** — implemented as `filter/unredactable`.
+
 Redaction **MUST execute before batching and export**. A processor placed after `batch` in a
 pipeline does not satisfy this contract even if it names the right keys.
 
@@ -464,9 +482,9 @@ exact cause of context growth. Do not build any consumer that implies otherwise.
 | `debug` exporter during certification | **[CERTIFIED]** |
 | `memory_limiter` processor, ahead of batching | **[CERTIFIED]** |
 | `batch` processor | **[CERTIFIED]** |
-| **Mandatory privacy processor, before `batch`**, on every enabled agent pipeline | **[REQUIRED]** |
+| **Mandatory privacy processor, before `batch`**, on every enabled agent pipeline | **[CERTIFIED]** |
 | `traces` pipeline | **[CERTIFIED]** |
-| `metrics` pipeline **only when explicitly needed** | **[REQUIRED]** |
+| `metrics` pipeline **only when explicitly needed** | **[CERTIFIED]** |
 | **No `logs` pipeline** | **[CERTIFIED]** |
 
 ### Fail closed
@@ -478,6 +496,12 @@ and by the test matrix item "missing privacy processor fails certification".
 
 A `metrics` pipeline MUST NOT be added speculatively. It is added when a specific, approved consumer
 needs it, and it carries the same mandatory privacy processor as `traces`.
+
+The `metrics` pipeline now present exists for one named reason: metric points carry no trace context
+and can only be joined to a phase by `forge.invocation.id` ([Section 4](#4--correlation-contract)),
+so the metric surface must exist before Gate 3 can prove that join is safe. Receiving the signal is
+not authorization to consume it — [Section 5](#5--signal-policy) still governs which producer's
+metrics may be enabled, and none are.
 
 ---
 
@@ -544,7 +568,10 @@ Gate 1 is the approval of this document. Everything after it is unbuilt.
 
 ## 12 — Required test matrix
 
-Every item below is **[REQUIRED]** and unbuilt. Each maps to the gate that cannot pass without it.
+Each item maps to the gate that cannot pass without it. Items 12–18 are **[CERTIFIED]** — they are
+implemented in `tests/test_otel_collector.py` and `tests/test_otel_redaction_certification.py`, the
+latter running a real Collector against synthetic hostile payloads. Every other item remains
+**[REQUIRED]** and unbuilt.
 
 | # | Test | Gate |
 | --- | --- | --- |
@@ -559,13 +586,13 @@ Every item below is **[REQUIRED]** and unbuilt. Each maps to the gate that canno
 | 9 | **No traceparent propagation to Anthropic** — `CLAUDE_CODE_PROPAGATE_TRACEPARENT` is never enabled | 4 |
 | 10 | Codex `-c` strict-config acceptance — the override is accepted and does not fail the invocation | 7 |
 | 11 | Windows shim quoting — the override survives the shim without splitting or mangling | 7 |
-| 12 | Collector redaction of **span attributes** | 3 |
-| 13 | Collector redaction of **span events** | 3 |
-| 14 | Collector redaction of **metric attributes** | 3 |
-| 15 | Collector redaction of **resource attributes** | 3 |
-| 16 | Missing privacy processor **fails certification** — an enabled agent pipeline without it does not start | 3 |
-| 17 | No logs pipeline | 3 |
-| 18 | No external exporter | 3 |
+| 12 | Collector redaction of **span attributes** **[CERTIFIED]** | 3 |
+| 13 | Collector redaction of **span events** **[CERTIFIED]** | 3 |
+| 14 | Collector redaction of **metric attributes** **[CERTIFIED]** | 3 |
+| 15 | Collector redaction of **resource attributes**, separately for each enabled signal, plus scope attributes **[CERTIFIED]** | 3 |
+| 16 | Missing privacy processor **fails certification** — an enabled agent pipeline without it does not start **[CERTIFIED]** | 3 |
+| 17 | No logs pipeline **[CERTIFIED]** | 3 |
+| 18 | No external exporter **[CERTIFIED]** | 3 |
 | 19 | No token double-counting — request, turn, metric, and persisted values are not summed | 9 |
 | 20 | Existing Forge accounting unchanged | 9 |
 | 21 | Task states and budgets unchanged | 9 |

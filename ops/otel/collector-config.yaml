@@ -1,12 +1,17 @@
 # Local-only OpenTelemetry Collector configuration for Codex Forge.
 #
-# This pipeline terminates on this machine. It listens on the loopback interface, prints spans to
+# This pipeline terminates on this machine. It listens on the loopback interface, prints signals to
 # the Collector's own console through the debug exporter, and has no exporter that opens an
-# outbound connection. Adding one would send Forge trace data off the host, which this slice does
+# outbound connection. Adding one would send Forge telemetry off the host, which this slice does
 # not do.
 #
 # Start it with ops/otel/Start-OtelCollector.ps1. Nothing in this repository downloads or installs
 # the Collector binary.
+#
+# This file is the enforcement point named in docs/AGENT-TELEMETRY-CONTRACT.md section 9. Claude
+# Code and Codex native telemetry remain DISABLED — nothing here turns either on. What this
+# configuration does is guarantee that if such a signal ever arrives, identity and content are
+# removed before anything is batched or printed.
 
 receivers:
   otlp:
@@ -20,19 +25,99 @@ receivers:
 
 processors:
   # Sheds load before the Collector can grow without bound. Declared first in the pipeline so it
-  # applies before batching accumulates spans.
+  # applies before batching accumulates data.
   memory_limiter:
     check_interval: 1s
     limit_mib: 256
     spike_limit_mib: 64
+
+  # Two attribute carriers cannot be reached by any redaction processor in Collector 0.158.0:
+  # span *links* and metric *exemplars* both carry their own attribute maps, and OTTL exposes no
+  # `spanlink` or `exemplar` context and no way to empty either slice. Certification confirmed that
+  # hostile values placed there survive both the `transform` and the `redaction` processor.
+  #
+  # Since they cannot be redacted, they are refused. A span that carries a link is dropped whole,
+  # and so is a data point that carries an exemplar; siblings without them are unaffected. Forge
+  # emits neither, so nothing is lost today -- but an agent slice enabled later must know that a
+  # span carrying a link will not be exported at all. Denying the carrier is the fail-closed choice
+  # that contract section 10 asks for when something cannot be reviewed.
+  filter/unredactable:
+    error_mode: propagate
+    traces:
+      span:
+        - Len(span.links) > 0
+    metrics:
+      datapoint:
+        - Len(datapoint.exemplars) > 0
+
+  # The mandatory privacy processor (contract section 6). It runs on every pipeline, before `batch`
+  # and before the exporter, so nothing is retained or printed until it has been through here.
+  #
+  # Two layers, in this order, on each of seven contexts -- four for traces, three for metrics:
+  #
+  #   1. `delete_matching_keys` — the contract's minimum deletion set, anchored so that only these
+  #      exact keys match. `error` is deleted; `error.type` and `error.code` are not, because the
+  #      pattern is anchored at both ends.
+  #   2. `keep_keys` — the allowlist. This is the layer that survives a vendor adding a field:
+  #      anything that is not an explicitly approved key is dropped, whether or not this file has
+  #      ever heard of it. Layer 1 is defence in depth beneath it and holds even if the allowlist
+  #      is later widened by mistake.
+  #
+  # Every surface needs its own context per signal. This is not redundancy: a `resource` context
+  # declared under `trace_statements` does NOT apply to metric resources, so identity attributes on
+  # a metric resource would survive a traces-only configuration. Both signals list `resource`
+  # deliberately. `scope` is included because scope attributes are a fifth carrier that the four
+  # named surfaces do not cover.
+  #
+  # `error_mode: propagate` makes the processor fail closed. If a statement errors, the batch is
+  # rejected rather than passed downstream unredacted.
+  #
+  # One shared vocabulary is applied to all seven contexts, rather than a per-surface allowlist,
+  # so that no surface can be protected less than another by an editing slip.
+  transform/privacy:
+    error_mode: propagate
+    trace_statements:
+      - context: resource
+        statements:
+          - delete_matching_keys(resource.attributes, "^(user[.]email|organization[.]id|user[.]id|user[.]account_uuid|user[.]account_id|session[.]id|ccr[.]session[.]id|workspace[.]host_paths|user_prompt|system_prompt|system_prompt_preview|user_system_prompt|assistant_response|response|tool_input|tool_parameters|tool_output|payload|content|error|error[.]message|url[.]full|url[.]query)$")
+          - keep_keys(resource.attributes, ["service.name", "service.version", "deployment.environment", "forge.telemetry.contract.version", "forge.invocation.id", "forge.task.id", "forge.project.id", "forge.task.risk", "forge.task.max_attempts", "forge.task.outcome", "forge.attempt.number", "forge.attempt.kind", "forge.attempt.outcome", "forge.attempt.terminated_by", "forge.retry.bucket", "forge.phase.name", "forge.phase.cycle", "forge.phase.outcome", "forge.phase.duration_ms", "forge.agent.role", "gen_ai.request.model", "gen_ai.request.reasoning_effort", "gen_ai.usage.input_tokens", "gen_ai.usage.cached_input_tokens", "gen_ai.usage.output_tokens", "gen_ai.usage.reasoning_tokens", "gen_ai.token.type", "forge.usage.fresh_input_tokens", "forge.usage.raw_total_tokens", "forge.usage.cache_hit_ratio", "forge.usage.accounting_basis", "forge.usage.budget_basis", "forge.usage.token_type", "error.type", "error.code"])
+      - context: scope
+        statements:
+          - delete_matching_keys(scope.attributes, "^(user[.]email|organization[.]id|user[.]id|user[.]account_uuid|user[.]account_id|session[.]id|ccr[.]session[.]id|workspace[.]host_paths|user_prompt|system_prompt|system_prompt_preview|user_system_prompt|assistant_response|response|tool_input|tool_parameters|tool_output|payload|content|error|error[.]message|url[.]full|url[.]query)$")
+          - keep_keys(scope.attributes, ["service.name", "service.version", "deployment.environment", "forge.telemetry.contract.version", "forge.invocation.id", "forge.task.id", "forge.project.id", "forge.task.risk", "forge.task.max_attempts", "forge.task.outcome", "forge.attempt.number", "forge.attempt.kind", "forge.attempt.outcome", "forge.attempt.terminated_by", "forge.retry.bucket", "forge.phase.name", "forge.phase.cycle", "forge.phase.outcome", "forge.phase.duration_ms", "forge.agent.role", "gen_ai.request.model", "gen_ai.request.reasoning_effort", "gen_ai.usage.input_tokens", "gen_ai.usage.cached_input_tokens", "gen_ai.usage.output_tokens", "gen_ai.usage.reasoning_tokens", "gen_ai.token.type", "forge.usage.fresh_input_tokens", "forge.usage.raw_total_tokens", "forge.usage.cache_hit_ratio", "forge.usage.accounting_basis", "forge.usage.budget_basis", "forge.usage.token_type", "error.type", "error.code"])
+      - context: span
+        statements:
+          - delete_matching_keys(span.attributes, "^(user[.]email|organization[.]id|user[.]id|user[.]account_uuid|user[.]account_id|session[.]id|ccr[.]session[.]id|workspace[.]host_paths|user_prompt|system_prompt|system_prompt_preview|user_system_prompt|assistant_response|response|tool_input|tool_parameters|tool_output|payload|content|error|error[.]message|url[.]full|url[.]query)$")
+          - keep_keys(span.attributes, ["service.name", "service.version", "deployment.environment", "forge.telemetry.contract.version", "forge.invocation.id", "forge.task.id", "forge.project.id", "forge.task.risk", "forge.task.max_attempts", "forge.task.outcome", "forge.attempt.number", "forge.attempt.kind", "forge.attempt.outcome", "forge.attempt.terminated_by", "forge.retry.bucket", "forge.phase.name", "forge.phase.cycle", "forge.phase.outcome", "forge.phase.duration_ms", "forge.agent.role", "gen_ai.request.model", "gen_ai.request.reasoning_effort", "gen_ai.usage.input_tokens", "gen_ai.usage.cached_input_tokens", "gen_ai.usage.output_tokens", "gen_ai.usage.reasoning_tokens", "gen_ai.token.type", "forge.usage.fresh_input_tokens", "forge.usage.raw_total_tokens", "forge.usage.cache_hit_ratio", "forge.usage.accounting_basis", "forge.usage.budget_basis", "forge.usage.token_type", "error.type", "error.code"])
+      - context: spanevent
+        statements:
+          - delete_matching_keys(spanevent.attributes, "^(user[.]email|organization[.]id|user[.]id|user[.]account_uuid|user[.]account_id|session[.]id|ccr[.]session[.]id|workspace[.]host_paths|user_prompt|system_prompt|system_prompt_preview|user_system_prompt|assistant_response|response|tool_input|tool_parameters|tool_output|payload|content|error|error[.]message|url[.]full|url[.]query)$")
+          - keep_keys(spanevent.attributes, ["service.name", "service.version", "deployment.environment", "forge.telemetry.contract.version", "forge.invocation.id", "forge.task.id", "forge.project.id", "forge.task.risk", "forge.task.max_attempts", "forge.task.outcome", "forge.attempt.number", "forge.attempt.kind", "forge.attempt.outcome", "forge.attempt.terminated_by", "forge.retry.bucket", "forge.phase.name", "forge.phase.cycle", "forge.phase.outcome", "forge.phase.duration_ms", "forge.agent.role", "gen_ai.request.model", "gen_ai.request.reasoning_effort", "gen_ai.usage.input_tokens", "gen_ai.usage.cached_input_tokens", "gen_ai.usage.output_tokens", "gen_ai.usage.reasoning_tokens", "gen_ai.token.type", "forge.usage.fresh_input_tokens", "forge.usage.raw_total_tokens", "forge.usage.cache_hit_ratio", "forge.usage.accounting_basis", "forge.usage.budget_basis", "forge.usage.token_type", "error.type", "error.code"])
+    metric_statements:
+      - context: resource
+        statements:
+          - delete_matching_keys(resource.attributes, "^(user[.]email|organization[.]id|user[.]id|user[.]account_uuid|user[.]account_id|session[.]id|ccr[.]session[.]id|workspace[.]host_paths|user_prompt|system_prompt|system_prompt_preview|user_system_prompt|assistant_response|response|tool_input|tool_parameters|tool_output|payload|content|error|error[.]message|url[.]full|url[.]query)$")
+          - keep_keys(resource.attributes, ["service.name", "service.version", "deployment.environment", "forge.telemetry.contract.version", "forge.invocation.id", "forge.task.id", "forge.project.id", "forge.task.risk", "forge.task.max_attempts", "forge.task.outcome", "forge.attempt.number", "forge.attempt.kind", "forge.attempt.outcome", "forge.attempt.terminated_by", "forge.retry.bucket", "forge.phase.name", "forge.phase.cycle", "forge.phase.outcome", "forge.phase.duration_ms", "forge.agent.role", "gen_ai.request.model", "gen_ai.request.reasoning_effort", "gen_ai.usage.input_tokens", "gen_ai.usage.cached_input_tokens", "gen_ai.usage.output_tokens", "gen_ai.usage.reasoning_tokens", "gen_ai.token.type", "forge.usage.fresh_input_tokens", "forge.usage.raw_total_tokens", "forge.usage.cache_hit_ratio", "forge.usage.accounting_basis", "forge.usage.budget_basis", "forge.usage.token_type", "error.type", "error.code"])
+      - context: scope
+        statements:
+          - delete_matching_keys(scope.attributes, "^(user[.]email|organization[.]id|user[.]id|user[.]account_uuid|user[.]account_id|session[.]id|ccr[.]session[.]id|workspace[.]host_paths|user_prompt|system_prompt|system_prompt_preview|user_system_prompt|assistant_response|response|tool_input|tool_parameters|tool_output|payload|content|error|error[.]message|url[.]full|url[.]query)$")
+          - keep_keys(scope.attributes, ["service.name", "service.version", "deployment.environment", "forge.telemetry.contract.version", "forge.invocation.id", "forge.task.id", "forge.project.id", "forge.task.risk", "forge.task.max_attempts", "forge.task.outcome", "forge.attempt.number", "forge.attempt.kind", "forge.attempt.outcome", "forge.attempt.terminated_by", "forge.retry.bucket", "forge.phase.name", "forge.phase.cycle", "forge.phase.outcome", "forge.phase.duration_ms", "forge.agent.role", "gen_ai.request.model", "gen_ai.request.reasoning_effort", "gen_ai.usage.input_tokens", "gen_ai.usage.cached_input_tokens", "gen_ai.usage.output_tokens", "gen_ai.usage.reasoning_tokens", "gen_ai.token.type", "forge.usage.fresh_input_tokens", "forge.usage.raw_total_tokens", "forge.usage.cache_hit_ratio", "forge.usage.accounting_basis", "forge.usage.budget_basis", "forge.usage.token_type", "error.type", "error.code"])
+      - context: datapoint
+        statements:
+          - delete_matching_keys(datapoint.attributes, "^(user[.]email|organization[.]id|user[.]id|user[.]account_uuid|user[.]account_id|session[.]id|ccr[.]session[.]id|workspace[.]host_paths|user_prompt|system_prompt|system_prompt_preview|user_system_prompt|assistant_response|response|tool_input|tool_parameters|tool_output|payload|content|error|error[.]message|url[.]full|url[.]query)$")
+          - keep_keys(datapoint.attributes, ["service.name", "service.version", "deployment.environment", "forge.telemetry.contract.version", "forge.invocation.id", "forge.task.id", "forge.project.id", "forge.task.risk", "forge.task.max_attempts", "forge.task.outcome", "forge.attempt.number", "forge.attempt.kind", "forge.attempt.outcome", "forge.attempt.terminated_by", "forge.retry.bucket", "forge.phase.name", "forge.phase.cycle", "forge.phase.outcome", "forge.phase.duration_ms", "forge.agent.role", "gen_ai.request.model", "gen_ai.request.reasoning_effort", "gen_ai.usage.input_tokens", "gen_ai.usage.cached_input_tokens", "gen_ai.usage.output_tokens", "gen_ai.usage.reasoning_tokens", "gen_ai.token.type", "forge.usage.fresh_input_tokens", "forge.usage.raw_total_tokens", "forge.usage.cache_hit_ratio", "forge.usage.accounting_basis", "forge.usage.budget_basis", "forge.usage.token_type", "error.type", "error.code"])
+
+  # Declared after the privacy processor because every pipeline must list it after the privacy
+  # processor. Batching an unredacted record and redacting later is not the same guarantee.
   batch:
     timeout: 5s
     send_batch_size: 512
     send_batch_max_size: 1024
 
 exporters:
-  # The only exporter. `detailed` prints span names, attributes, and parentage to the Collector
-  # console, which is what `verify spans` in docs/TELEMETRY.md reads.
+  # The only exporter. `detailed` prints names, attributes, and parentage to the Collector console,
+  # which is what `verify spans` in docs/TELEMETRY.md reads and what the synthetic certification in
+  # tests/test_otel_collector.py asserts against.
   debug:
     verbosity: detailed
     sampling_initial: 5
@@ -55,5 +140,16 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
+      processors: [memory_limiter, filter/unredactable, transform/privacy, batch]
       exporters: [debug]
+    # Metrics are received because agent token counters carry no trace context and can only be
+    # joined to a phase by `forge.invocation.id` (contract sections 3 and 4). Certifying that join
+    # is safe requires the metric surface to exist. It carries the same mandatory privacy
+    # processor as traces, in the same position.
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/unredactable, transform/privacy, batch]
+      exporters: [debug]
+    # There is deliberately no `logs` pipeline. It is the second of the two independent barriers in
+    # contract section 5, and the one that fails closed: with no logs pipeline, a log record that
+    # reaches the receiver has nowhere to go.

@@ -1,12 +1,18 @@
 """Structural checks on the local Collector configuration and its PowerShell helpers.
 
-These run without downloading, installing, or launching a Collector. They assert the two
-properties that matter for this slice: the pipeline stays on the loopback interface, and it has no
-exporter that would send Forge trace data anywhere.
+These run without downloading, installing, or launching a Collector. They assert the properties
+that matter for this slice: the pipeline stays on the loopback interface, it has no exporter that
+would send Forge telemetry anywhere, and the mandatory privacy processor of
+docs/AGENT-TELEMETRY-CONTRACT.md covers every surface on every pipeline before batching.
+
+The end-to-end proof that redaction actually happens lives in
+tests/test_otel_redaction_certification.py, which runs a real Collector. These tests are the part
+that stays active on a machine that has no Collector installed.
 """
 
 from __future__ import annotations
 
+import copy
 import ipaddress
 import json
 import os
@@ -19,16 +25,27 @@ import pytest
 
 yaml = pytest.importorskip("yaml")
 
+import otel_certification as certification  # noqa: E402 - needs the yaml import guard above
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OPS_ROOT = REPO_ROOT / "ops" / "otel"
 CONFIG_PATH = OPS_ROOT / "collector-config.yaml"
 START_SCRIPT = OPS_ROOT / "Start-OtelCollector.ps1"
 RESOLVE_SCRIPT = OPS_ROOT / "Resolve-OtelCollector.ps1"
 
+PRIVACY = certification.PRIVACY_PROCESSOR
+FILTER = certification.UNREDACTABLE_FILTER
+
 
 @pytest.fixture(scope="module")
 def collector_config() -> dict:
     return yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def mutable_config(collector_config) -> dict:
+    """A throwaway copy for the fail-closed tests to damage."""
+    return copy.deepcopy(collector_config)
 
 
 def _powershell_code(path: Path) -> str:
@@ -104,16 +121,18 @@ def test_memory_limiter_and_batch_processors_are_configured(collector_config):
 
 
 def test_debug_is_the_only_exporter(collector_config):
-    """Any other exporter would be network egress for Forge trace data."""
+    """Any other exporter would be network egress for Forge telemetry."""
     assert set(collector_config["exporters"]) == {"debug"}
     assert collector_config["exporters"]["debug"]["verbosity"] == "detailed"
 
 
-def test_traces_pipeline_limits_then_batches_then_prints(collector_config):
-    pipeline = collector_config["service"]["pipelines"]["traces"]
+@pytest.mark.parametrize("signal", ["traces", "metrics"])
+def test_each_pipeline_limits_then_redacts_then_batches_then_prints(collector_config, signal):
+    pipeline = collector_config["service"]["pipelines"][signal]
     assert pipeline["receivers"] == ["otlp"]
-    # memory_limiter must precede batch so it sheds load before spans accumulate.
-    assert pipeline["processors"] == ["memory_limiter", "batch"]
+    # memory_limiter sheds load first; carriers that cannot be redacted are refused; the privacy
+    # processor runs before anything is retained by batch or seen by an exporter.
+    assert pipeline["processors"] == ["memory_limiter", FILTER, PRIVACY, "batch"]
     assert pipeline["exporters"] == ["debug"]
 
 
@@ -124,8 +143,280 @@ def test_no_pipeline_references_an_undeclared_component(collector_config):
                 assert name in collector_config[section], f"{name} is used but not declared"
 
 
-def test_traces_are_the_only_pipeline(collector_config):
-    assert set(collector_config["service"]["pipelines"]) == {"traces"}
+def test_traces_and_metrics_are_the_only_pipelines(collector_config):
+    """Metrics are received deliberately; logs are the signal that must never have a pipeline."""
+    assert set(collector_config["service"]["pipelines"]) == {"traces", "metrics"}
+
+
+# ---------------------------------------------------------------------------
+# The mandatory privacy processor (contract section 6).
+# ---------------------------------------------------------------------------
+
+
+def test_the_shipped_configuration_passes_certification(collector_config):
+    assert certification.certify_configuration(collector_config) == []
+
+
+def test_the_privacy_processor_fails_closed_on_a_statement_error(collector_config):
+    """`propagate` drops the batch. `ignore`/`silent` would export it unredacted."""
+    assert collector_config["processors"][PRIVACY]["error_mode"] == "propagate"
+
+
+@pytest.mark.parametrize(
+    ("signal", "surface"),
+    [("traces", s) for s in certification.REQUIRED_TRACE_SURFACES]
+    + [("metrics", s) for s in certification.REQUIRED_METRIC_SURFACES],
+)
+def test_every_surface_is_covered_on_both_signals(collector_config, signal, surface):
+    """A `resource` context under `trace_statements` does not reach metric resources.
+
+    This is the trap contract section 6 warns about: one processor type does not automatically
+    cover all four surfaces, so both signals must name `resource` for themselves.
+    """
+    policies = certification.privacy_policies(collector_config)
+    policy = policies.get((signal, surface))
+    assert policy is not None, f"{signal} has no statements for the {surface} surface"
+    assert policy.allowed_keys, f"{signal}/{surface} has no keep_keys allowlist"
+
+
+@pytest.mark.parametrize("key", certification.FORBIDDEN_ATTRIBUTE_KEYS)
+def test_every_forbidden_key_is_deleted_on_every_surface(collector_config, key):
+    for (signal, surface), policy in certification.privacy_policies(collector_config).items():
+        assert policy.deletes(key), f"{signal}/{surface} does not delete {key}"
+        assert key not in (policy.allowed_keys or set()), f"{signal}/{surface} allows {key}"
+
+
+@pytest.mark.parametrize("key", certification.REQUIRED_ALLOWED_ATTRIBUTE_KEYS)
+def test_every_bounded_operational_field_is_preserved(collector_config, key):
+    """Redaction must not quietly break the certified Forge span contract."""
+    for (signal, surface), policy in certification.privacy_policies(collector_config).items():
+        assert key in policy.allowed_keys, f"{signal}/{surface} drops {key}"
+        assert not policy.deletes(key), f"{signal}/{surface} deletes {key}"
+
+
+def test_the_allowlist_admits_nothing_beyond_the_approved_vocabulary(collector_config):
+    """An unknown attribute is denied by default, not exported because nobody forbade it."""
+    approved = set(certification.REQUIRED_ALLOWED_ATTRIBUTE_KEYS)
+    for (signal, surface), policy in certification.privacy_policies(collector_config).items():
+        extra = sorted(policy.allowed_keys - approved)
+        assert extra == [], f"{signal}/{surface} allows unreviewed keys: {extra}"
+
+
+def test_no_surface_uses_a_deprecated_unqualified_ottl_path(collector_config):
+    """0.158.0 still accepts `attributes` but logs "please rewrite them accordingly"."""
+    for (signal, surface), policy in certification.privacy_policies(collector_config).items():
+        assert policy.unqualified_paths == 0, f"{signal}/{surface} uses an unqualified path"
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed: each of these mutations must be rejected by certification.
+#
+# Without these, a later edit could quietly delete a protection and every other test here would
+# still pass, because every other test describes the configuration as it is.
+# ---------------------------------------------------------------------------
+
+
+def _pattern_alternative(key: str) -> str:
+    """How `key` appears inside a `delete_matching_keys` alternation in the shipped file."""
+    return key.replace(".", "[.]")
+
+
+def _drop_from_deletion_set(config: dict, key: str) -> None:
+    alternative = _pattern_alternative(key)
+    processor = config["processors"][PRIVACY]
+    for block in ("trace_statements", "metric_statements"):
+        for group in processor[block]:
+            group["statements"] = [
+                statement.replace(f"|{alternative}", "").replace(f"({alternative}|", "(")
+                for statement in group["statements"]
+            ]
+
+
+def test_removing_the_privacy_processor_fails_certification(mutable_config):
+    del mutable_config["processors"][PRIVACY]
+    for pipeline in mutable_config["service"]["pipelines"].values():
+        pipeline["processors"] = [name for name in pipeline["processors"] if name != PRIVACY]
+
+    problems = certification.certify_configuration(mutable_config)
+
+    assert any("privacy processor" in problem and "missing" in problem for problem in problems)
+
+
+@pytest.mark.parametrize("signal", ["traces", "metrics"])
+def test_ordering_the_privacy_processor_after_batch_fails_certification(mutable_config, signal):
+    """Redacting after batching is not the same guarantee, even with the right keys."""
+    processors = mutable_config["service"]["pipelines"][signal]["processors"]
+    processors.remove(PRIVACY)
+    processors.append(PRIVACY)
+
+    problems = certification.certify_configuration(mutable_config)
+
+    assert f"{signal}: privacy processor runs after batch" in problems
+
+
+@pytest.mark.parametrize("signal", ["traces", "metrics"])
+def test_dropping_the_privacy_processor_from_one_pipeline_fails_certification(mutable_config, signal):
+    pipeline = mutable_config["service"]["pipelines"][signal]
+    pipeline["processors"] = [name for name in pipeline["processors"] if name != PRIVACY]
+
+    problems = certification.certify_configuration(mutable_config)
+
+    assert f"{signal}: privacy processor {PRIVACY} is missing" in problems
+
+
+def test_adding_a_logs_pipeline_fails_certification(mutable_config):
+    mutable_config["service"]["pipelines"]["logs"] = {
+        "receivers": ["otlp"],
+        "processors": ["memory_limiter", PRIVACY, "batch"],
+        "exporters": ["debug"],
+    }
+
+    problems = certification.certify_configuration(mutable_config)
+
+    assert "forbidden pipeline present: logs" in problems
+
+
+def test_removing_the_metrics_pipeline_fails_certification(mutable_config):
+    del mutable_config["service"]["pipelines"]["metrics"]
+
+    problems = certification.certify_configuration(mutable_config)
+
+    assert "required pipeline missing: metrics" in problems
+
+
+def test_adding_an_external_exporter_fails_certification(mutable_config):
+    mutable_config["exporters"]["otlphttp"] = {"endpoint": "https://telemetry.example.invalid"}
+    mutable_config["service"]["pipelines"]["traces"]["exporters"] = ["debug", "otlphttp"]
+
+    problems = certification.certify_configuration(mutable_config)
+
+    assert "exporter other than debug: ['otlphttp']" in problems
+    assert "traces: exporter other than debug: otlphttp" in problems
+
+
+def test_an_unused_external_exporter_still_fails_certification(mutable_config):
+    """Declared but unwired today is one edit away from wired tomorrow."""
+    mutable_config["exporters"]["otlp/remote"] = {"endpoint": "collector.example.invalid:4317"}
+
+    assert "exporter other than debug: ['otlp/remote']" in certification.certify_configuration(mutable_config)
+
+
+@pytest.mark.parametrize("endpoint", ["0.0.0.0:4317", "10.11.12.13:4317", "[::]:4317"])
+def test_a_non_loopback_receiver_fails_certification(mutable_config, endpoint):
+    mutable_config["receivers"]["otlp"]["protocols"]["grpc"]["endpoint"] = endpoint
+
+    problems = certification.certify_configuration(mutable_config)
+
+    assert f"non-loopback endpoint: {endpoint}" in problems
+
+
+def test_a_non_loopback_internal_metrics_host_fails_certification(mutable_config):
+    reader = mutable_config["service"]["telemetry"]["metrics"]["readers"][0]
+    reader["pull"]["exporter"]["prometheus"]["host"] = "0.0.0.0"
+
+    assert "non-loopback endpoint: 0.0.0.0:0" in certification.certify_configuration(mutable_config)
+
+
+@pytest.mark.parametrize("key", certification.FORBIDDEN_ATTRIBUTE_KEYS)
+def test_removing_one_forbidden_field_from_the_protection_set_fails_certification(mutable_config, key):
+    """Every entry in the minimum deletion set is load-bearing, individually."""
+    _drop_from_deletion_set(mutable_config, key)
+
+    problems = certification.certify_configuration(mutable_config)
+
+    assert any(problem.endswith(f"forbidden key not deleted: {key}") for problem in problems)
+
+
+def test_widening_the_allowlist_to_admit_a_forbidden_key_fails_certification(mutable_config):
+    group = mutable_config["processors"][PRIVACY]["trace_statements"][2]
+    group["statements"][-1] = group["statements"][-1].replace(
+        '"error.code"])', '"error.code", "user.email"])'
+    )
+
+    problems = certification.certify_configuration(mutable_config)
+
+    assert "traces/span: allowlist admits forbidden keys: ['user.email']" in problems
+
+
+def test_narrowing_the_allowlist_below_the_forge_span_contract_fails_certification(mutable_config):
+    group = mutable_config["processors"][PRIVACY]["trace_statements"][2]
+    group["statements"][-1] = group["statements"][-1].replace('"forge.invocation.id", ', "")
+
+    problems = certification.certify_configuration(mutable_config)
+
+    assert any("drops required safe keys" in problem and "forge.invocation.id" in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    ("block", "index"),
+    [("trace_statements", 0), ("trace_statements", 2), ("trace_statements", 3), ("metric_statements", 0), ("metric_statements", 2)],
+)
+def test_removing_one_surface_fails_certification(mutable_config, block, index):
+    del mutable_config["processors"][PRIVACY][block][index]
+
+    assert certification.certify_configuration(mutable_config) != []
+
+
+def test_weakening_the_error_mode_fails_certification(mutable_config):
+    """`ignore` would let a statement failure export the record unredacted."""
+    mutable_config["processors"][PRIVACY]["error_mode"] = "ignore"
+
+    problems = certification.certify_configuration(mutable_config)
+
+    assert any("error_mode must be 'propagate'" in problem for problem in problems)
+
+
+def test_dropping_the_memory_limiter_ahead_of_redaction_fails_certification(mutable_config):
+    processors = mutable_config["service"]["pipelines"]["traces"]["processors"]
+    processors.remove("memory_limiter")
+
+    assert "traces: memory_limiter is missing" in certification.certify_configuration(mutable_config)
+
+
+# ---------------------------------------------------------------------------
+# Carriers that no 0.158.0 processor can redact are refused instead.
+# ---------------------------------------------------------------------------
+
+
+def test_the_unredactable_carrier_filter_runs_on_both_pipelines(collector_config):
+    for signal in ("traces", "metrics"):
+        processors = collector_config["service"]["pipelines"][signal]["processors"]
+        assert FILTER in processors
+        assert processors.index(FILTER) < processors.index("batch")
+
+
+@pytest.mark.parametrize(
+    ("signal", "surface", "condition"),
+    [(signal, surface, condition) for (signal, surface), condition in certification.UNREDACTABLE_CONDITIONS.items()],
+)
+def test_link_and_exemplar_carriers_are_dropped(collector_config, signal, surface, condition):
+    """OTTL exposes no `spanlink` or `exemplar` context, so the carrier itself is denied."""
+    assert condition in collector_config["processors"][FILTER][signal][surface]
+
+
+@pytest.mark.parametrize("signal", ["traces", "metrics"])
+def test_dropping_the_unredactable_filter_from_a_pipeline_fails_certification(mutable_config, signal):
+    pipeline = mutable_config["service"]["pipelines"][signal]
+    pipeline["processors"] = [name for name in pipeline["processors"] if name != FILTER]
+
+    assert f"{signal}: {FILTER} is missing" in certification.certify_configuration(mutable_config)
+
+
+@pytest.mark.parametrize(("signal", "surface"), sorted(certification.UNREDACTABLE_CONDITIONS))
+def test_removing_a_carrier_condition_fails_certification(mutable_config, signal, surface):
+    mutable_config["processors"][FILTER][signal][surface] = []
+
+    problems = certification.certify_configuration(mutable_config)
+
+    assert any(f"{signal}/{surface} no longer drops" in problem for problem in problems)
+
+
+def test_weakening_the_carrier_filter_error_mode_fails_certification(mutable_config):
+    mutable_config["processors"][FILTER]["error_mode"] = "ignore"
+
+    problems = certification.certify_configuration(mutable_config)
+
+    assert f"{FILTER}: error_mode must be 'propagate'" in problems
 
 
 def test_helper_resolves_the_binary_without_downloading_it():

@@ -17,9 +17,13 @@ prompts, responses, tool content, and account identity by default, so enabling t
 boundaries, correlation identifiers, mandatory redaction, token semantics, and the ordered rollout
 gates any such slice must pass.
 
-**The next gate is Collector redaction certification** (Gate 3): synthetic hostile OTLP payloads
-must prove identity and content removal from span, event, metric, and resource attributes before any
-agent canary runs.
+**Collector redaction is now implemented and certified** (contract Gates 2 and 3). The Collector
+deletes identity and content from every telemetry surface and keeps only an explicitly approved
+vocabulary — see [Collector redaction](#collector-redaction) and
+[Synthetic certification](#synthetic-certification-gate-3) below. That work changes what the
+Collector would do *if* an agent signal ever arrived. **It enables nothing**: native Claude Code and
+Codex telemetry remain disabled, and the next gate (Gate 4, child-process environment and
+correlation helpers, off by default) is still unbuilt.
 
 ## What is emitted
 
@@ -247,9 +251,25 @@ planted earlier on `PATH` run as a script under your identity. More than one `ot
 want with `-CollectorPath` or `OTELCOL_PATH`.
 
 `ops/otel/collector-config.yaml` listens on `127.0.0.1:4317` (gRPC) and `127.0.0.1:4318` (HTTP),
-applies a memory limiter and a batch processor, and exports **only** through the `debug` exporter.
-There is no external backend and no network egress. Adding an exporter would send Forge trace data
-off the host.
+exposes the Collector's own metrics on `127.0.0.1:8888`, and exports **only** through the `debug`
+exporter. There is no external backend and no network egress. Adding an exporter would send Forge
+telemetry off the host.
+
+Two pipelines are declared, and they are identical in shape:
+
+| Pipeline | Receivers | Processors | Exporters |
+| --- | --- | --- | --- |
+| `traces` | `otlp` | `memory_limiter` → `filter/unredactable` → `transform/privacy` → `batch` | `debug` |
+| `metrics` | `otlp` | `memory_limiter` → `filter/unredactable` → `transform/privacy` → `batch` | `debug` |
+
+There is **no `logs` pipeline**, deliberately. It is the second of the two independent barriers in
+[contract section 5](AGENT-TELEMETRY-CONTRACT.md#5--signal-policy), and the one that fails closed:
+with no logs pipeline the OTLP receiver never registers `/v1/logs` at all, so a log record is
+refused at the door rather than accepted and then redacted.
+
+The `metrics` pipeline exists because agent token counters carry no trace context and can only be
+joined to a phase by `forge.invocation.id`. Forge itself emits no metrics today; receiving the
+signal is a prerequisite for certifying that the join is safe, not an invitation to build on it.
 
 Check the configuration with the installed binary:
 
@@ -262,6 +282,205 @@ The repository's own test suite checks the same file structurally without a Coll
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/test_otel_collector.py
 ```
+
+## Collector redaction
+
+Forge's own spans never contain anything sensitive, because Forge never constructs the value. That
+is not true of agent telemetry: both agents emit prompts, responses, tool content, and account
+identity by default, and Claude attaches `user.email`, `organization.id`, and `user.id` with **no
+configuration gate at all**. For those signals the Collector is the enforcement point, so
+`ops/otel/collector-config.yaml` declares a mandatory privacy processor that runs on every pipeline,
+**before `batch` and before any exporter**.
+
+### Two layers
+
+`transform/privacy` applies two OTTL layers, in this order:
+
+1. **Deletion floor.** `delete_matching_keys` with an anchored alternation covering the contract's
+   minimum deletion set verbatim: `user.email`, `organization.id`, `user.id`, `user.account_uuid`,
+   `user.account_id`, `session.id`, `ccr.session.id`, `workspace.host_paths`, `user_prompt`,
+   `system_prompt`, `system_prompt_preview`, `user_system_prompt`, `assistant_response`, `response`,
+   `tool_input`, `tool_parameters`, `tool_output`, `payload`, `content`, `error`, `error.message`,
+   `url.full`, `url.query`. The pattern is anchored at both ends, so `error` is deleted while
+   `error.type` and `error.code` survive.
+2. **Allowlist.** `keep_keys` with the approved vocabulary — the three resource attributes, the
+   whole certified Forge span contract, `gen_ai.request.*`, the `gen_ai.usage.*` and `forge.usage.*`
+   token counts, `gen_ai.token.type`, `forge.phase.duration_ms`, the `*.outcome` fields that carry
+   success status, `error.type`, `error.code`, and the two correlation attributes
+   `forge.invocation.id` and `forge.telemetry.contract.version`. Anything else is dropped whether or
+   not this file has ever heard of it.
+
+Layer 2 is what survives a vendor upgrade that adds a field carrying content: a new attribute is
+denied because it is unreviewed, not exported because nobody forbade it. Layer 1 is defence in depth
+beneath it, and holds even if the allowlist is later widened by mistake.
+
+`error_mode: propagate` makes the processor **fail closed**. If a statement errors, the batch is
+rejected rather than passed downstream unredacted.
+
+### Exact redaction surfaces
+
+Redaction is configured per signal *and* per context. This is not redundancy — a `resource` context
+declared under `trace_statements` does **not** apply to metric resources, so a traces-only
+configuration lets identity attributes ride out on a metric resource untouched. That was verified
+against the real Collector, not assumed.
+
+| Signal | Context | Covers |
+| --- | --- | --- |
+| `traces` | `resource` | Trace resource attributes — where Claude's ungated identity attributes live |
+| `traces` | `scope` | Instrumentation-scope attributes |
+| `traces` | `span` | Span attributes |
+| `traces` | `spanevent` | Span-event attributes |
+| `metrics` | `resource` | Metric resource attributes — a separate surface from the trace resource |
+| `metrics` | `scope` | Instrumentation-scope attributes |
+| `metrics` | `datapoint` | Metric data-point attributes, for every data-point type |
+
+The contract names four surfaces (span, span event, metric, resource). `scope` is a fifth carrier
+that none of those four names covers, so it is protected here as well.
+
+One shared vocabulary is applied to all seven contexts rather than a per-surface allowlist, so no
+surface can end up protected less than another by an editing slip.
+
+### Two carriers that cannot be redacted, and are refused instead
+
+Span **links** and metric **exemplars** each carry their own attribute map. Collector 0.158.0
+exposes no OTTL `spanlink` or `exemplar` context and no way to empty either slice, so no redaction
+processor can reach them — certification confirmed hostile values placed there survive both
+`transform` and the `redaction` processor untouched.
+
+Since they cannot be redacted, `filter/unredactable` denies the carrier:
+
+| Signal | Condition | Effect |
+| --- | --- | --- |
+| `traces` | `Len(span.links) > 0` | A span carrying any link is dropped whole |
+| `metrics` | `Len(datapoint.exemplars) > 0` | A data point carrying any exemplar is dropped whole |
+
+The filter is selective, not a blanket drop: sibling spans and data points without links or
+exemplars pass through and are redacted normally. Forge emits neither, so nothing is lost today.
+
+**An agent slice enabled later must know that a span carrying a link will not be exported at all.**
+Denying an unreviewable carrier is the fail-closed reading of
+[contract section 10](AGENT-TELEMETRY-CONTRACT.md#10--version-and-drift-policy); it is recorded here
+rather than left to be discovered from a gap in a trace.
+
+## Synthetic certification (Gate 3)
+
+The certification proves redaction by running a **real** Collector, not by reading the YAML. It
+starts the installed binary on temporary loopback ports with the repository's own configuration,
+pushes OTLP payloads carrying deliberately hostile values on every surface, and asserts on what the
+debug exporter printed *after* processing.
+
+The payloads are entirely synthetic. Nothing in the certification calls Claude, Codex, a Forge task,
+`C:\CodexData\forge.db`, or any service off the loopback interface, and nothing downloads a
+Collector. That is the point of Gate 3: redaction is proven *before* any real agent identity data
+has ever been received.
+
+**Certified against OpenTelemetry Collector Contrib `0.158.0`.** A Collector upgrade is a drift
+event under [contract section 10](AGENT-TELEMETRY-CONTRACT.md#10--version-and-drift-policy); the
+version check is a test, and it fails rather than warns.
+
+### Run it
+
+```powershell
+$env:OTELCOL_PATH = 'C:\Tools\OpenTelemetry\otelcol-contrib\0.158.0\otelcol-contrib.exe'
+.\.venv\Scripts\python.exe -m pytest tests/test_otel_redaction_certification.py
+```
+
+The binary is located through `OTELCOL_PATH` (or `FORGE_OTELCOL_PATH`) only — `PATH` is deliberately
+not searched, because a certification run must name the binary it certifies. Without one, these
+tests **skip with that message** and the structural certification in `tests/test_otel_collector.py`
+still runs in full.
+
+The harness never binds a non-loopback interface, never uses the production ports (4317/4318/8888),
+and always stops and reaps the Collector, including when an assertion fails part-way through.
+
+### What the hostile payload contains
+
+Injected on all seven contexts above — trace resource, trace scope, span, span event, metric
+resource, metric scope, and both a sum and a histogram data point — plus a span link and a metric
+exemplar on their own carriers:
+
+- every key on the minimum deletion set, each carrying a distinct sentinel value;
+- sixteen keys that are **not** on any deletion set (`claude.prompt.v3`,
+  `gen_ai.completion.0.content`, `vcs.repository.url`, `process.command_line`,
+  `http.request.header.authorization`, `exception.message`, and so on), carrying the same class of
+  content — these prove the allowlist, not the denylist;
+- sentinel values covering a fake email address, fake account and organization IDs, absolute Windows
+  and Unix paths, a repository URL, branch and commit values, prompt text, system-prompt text,
+  assistant response text, source code, a tool command with an embedded token, tool output,
+  validation output, review prose, an environment-variable value, credential-like text, an error
+  string, and a URL query string;
+- alongside them, the bounded fields that must survive, so the run proves the configuration is not
+  simply deleting everything.
+
+Each sentinel is tagged with the surface it was injected on, so a leak names the surface that leaked
+it rather than merely "somewhere in the payload".
+
+### How to interpret a pass
+
+A pass means, for that Collector version and that configuration:
+
+- no sentinel value appears anywhere in the processed output, on any of the twelve injected
+  surfaces;
+- the linked span and the exemplar-bearing data point are absent entirely, while their unlinked
+  siblings survive with their approved attributes intact;
+- no forbidden attribute key appears;
+- no unknown attribute key appears — unreviewed fields were dropped, not passed through;
+- `forge.invocation.id` survives on every surface, so the phase-to-metric join still works;
+- the approved token, phase, duration, outcome, and `error.type`/`error.code` attributes survive,
+  and so do span status and metric values;
+- `/v1/logs` returns **404** — there is no logs pipeline to accept it;
+- the Collector started, accepted both payloads with HTTP 200, and exited **0**.
+
+Two results make the pass meaningful rather than vacuous:
+
+- **The negative control.** The same binary, payloads, and harness, with only the privacy processor
+  removed, leaks every sentinel on every surface. A harness that cannot see a leak proves nothing by
+  not seeing one.
+- **The fail-closed matrix** in `tests/test_otel_collector.py`. Certification fails if the privacy
+  processor is removed, ordered after `batch`, or missing from either pipeline; if a `logs` pipeline
+  appears; if any exporter other than `debug` is declared, wired or not; if any receiver or the
+  internal metrics endpoint moves off loopback; if any **single** entry is removed from the deletion
+  set; if the allowlist is widened to admit a forbidden key or narrowed below the Forge span
+  contract; if any surface's statements are deleted; if `filter/unredactable` is dropped from a
+  pipeline or either of its conditions removed; or if either processor's `error_mode` is weakened. A
+  configuration that references a privacy processor it does not declare is rejected by the Collector
+  itself.
+
+A failure is not a flaky test. Read which surface and which key it names.
+
+### What a pass does not prove
+
+- **It is bound to Collector 0.158.0.** Another version is drift, and the version check fails rather
+  than warns.
+- **The allowlist is not yet the real agent vocabulary.** The approved token-type dimension is
+  `gen_ai.token.type`; the dimension names Claude and Codex actually emit have not been observed
+  under Forge. Whatever they turn out to be will arrive **dropped**, which is the intended default,
+  and adding them is a reviewed change at Gate 6 or Gate 8 — not a convenience edit.
+- **"Fails closed" is enforced in two different places.** The Collector itself refuses to start only
+  when a pipeline references a processor that is not declared. A hand-edited configuration that
+  removes the privacy processor *and* its pipeline references would start and export unredacted;
+  what catches that is this test suite plus the `MANIFEST.sha256` hash of the file. Run the tests
+  after editing the Collector configuration, not only after editing Python.
+- **It says nothing about what an agent emits.** Gate 3 proves the Collector removes what it is
+  shown. Gates 6 and 8 still require inspecting **every** attribute a real agent emits, because the
+  risk is the attribute nobody expected.
+
+### Rolling the Collector changes back
+
+The Collector configuration is a plain file with no state behind it.
+
+```powershell
+git checkout 668767b -- ops/otel/collector-config.yaml MANIFEST.sha256
+```
+
+Then restart the Collector (Ctrl+C and re-run `.\ops\otel\Start-OtelCollector.ps1`). Forge is
+unaffected either way: nothing in the controller reads this file, and telemetry failure never fails
+a task.
+
+Reverting removes the `metrics` pipeline and the privacy processor together. That is safe **only
+while native Claude and Codex telemetry stay disabled**, which is the state this repository ships in.
+Do not revert it as a prerequisite for enabling an agent exporter; the privacy processor is the
+reason those gates can be approached at all.
 
 ## Verify spans
 
