@@ -838,8 +838,12 @@ every safely exported resource, scope, span, event, and metric, individually ins
 `ops/otel/claude-field-approvals.yaml` is where the approvals are recorded. They are deliberately two
 files.
 
-**Gate 6 has not passed.** This slice builds the harness. The supervised run that feeds it has not
-been made, nothing has been approved, and the shipped manifest approves nothing.
+**Gate 6 has not returned a PASS verdict yet.** The harness exists, the supervised run has been made
+(`claude-inventory-20260806-165526`, 29 fields observed), and on 2026-08-06 `human-operator` reviewed
+those 29 fields and approved them in the manifest — which now carries a name, an `approved` review
+state, and 29 APPROVED entries. What is outstanding is the confirming run: a verdict is a property of
+an inventory run against the approved manifest, and the run that produced the evidence was judged
+against the candidate one. Nothing outside those 29 fields was approved.
 
 ### Observed fields are not approved fields
 
@@ -1013,8 +1017,9 @@ unresolved remainder; **every observed identifier printable**; zero span links a
 reaching the inventory; a clean forbidden-output scan; a balanced span accounting; a passing canary;
 and a clean exit from both the Collector and the child.
 
-The shipped manifest has an empty `approved_by` and a `candidate` review state, so **no run can
-currently return PASS**. That is the intended state until a human reviews a real inventory.
+The shipped manifest carries `approved_by: human-operator` and an `approved` review state as of
+2026-08-06, so the human-approval condition is met. Every other condition is still decided by the run
+itself: a field this review never saw is UNKNOWN, and one UNKNOWN field is still a `FAIL`.
 
 ### The agent vector
 

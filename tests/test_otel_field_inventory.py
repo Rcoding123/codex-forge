@@ -644,8 +644,14 @@ def test_an_allowlisted_unit_and_description_are_printed():
 
 
 def _unknown_output() -> str:
+    """Output built entirely out of identifiers the shipped manifest has never seen.
+
+    The scope name has to be one of them. `com.anthropic.claude_code` was, until the 2026-08-06
+    review put Claude's two real scopes into the vocabulary; a name already in the vocabulary is
+    KNOWN, and would prove nothing about how an unknown one is reported.
+    """
     return trace_dump(
-        scope="com.anthropic.claude_code",
+        scope="com.anthropic.claude_code.brand_new_scope",
         resource=[("service.name", "Str(claude-code)"), ("forge.invocation.id", f"Str({'a' * 32})")],
         spans=[
             {
@@ -656,7 +662,7 @@ def _unknown_output() -> str:
             }
         ],
     ) + metric_dump(
-        scope="com.anthropic.claude_code",
+        scope="com.anthropic.claude_code.brand_new_scope",
         metrics=[{"name": "claude_code.brand_new_metric", "unit": "", "description": ""}],
     )
 
@@ -665,7 +671,7 @@ def test_the_candidate_manifest_names_every_safe_unknown_identifier_in_full():
     document = document_for(_unknown_output())
     candidate = inventory.build_candidate_manifest(document)
     for name in (
-        "com.anthropic.claude_code",
+        "com.anthropic.claude_code.brand_new_scope",
         "claude_code.brand_new_span",
         "claude_code.brand_new_event",
         "claude_code.brand_new_metric",
@@ -675,7 +681,7 @@ def test_the_candidate_manifest_names_every_safe_unknown_identifier_in_full():
     assert "claude_code.brand_new_span" in parsed["vocabulary"]["span_names"]
     assert "claude_code.brand_new_event" in parsed["vocabulary"]["event_names"]
     assert "claude_code.brand_new_metric" in parsed["vocabulary"]["metric_names"]
-    assert "com.anthropic.claude_code" in parsed["vocabulary"]["scope_names"]
+    assert "com.anthropic.claude_code.brand_new_scope" in parsed["vocabulary"]["scope_names"]
 
 
 def test_the_candidate_manifest_proposes_only_unapproved_entries():
@@ -727,20 +733,26 @@ def test_the_candidate_manifest_closes_every_unknown_field(tmp_path):
     """The proof that the raw Collector log is unnecessary.
 
     Everything used here comes from the two files a run publishes. Merging the proposal into the
-    manifest leaves nothing UNKNOWN — and leaves everything UNAPPROVED, because a proposal is not an
-    approval.
+    manifest leaves nothing UNKNOWN — and leaves everything the proposal introduced UNAPPROVED,
+    because a proposal is not an approval. Fields the manifest already approved on its own evidence
+    stay approved; the claim is about what merging a candidate can do, not about the whole file.
     """
     document = document_for(_unknown_output())
     assert document["totals"]["unknown"] > 0
+    proposed = {
+        item["id"] for item in document["fields"] if item["status"] == inventory.DISPOSITION_UNKNOWN
+    }
 
     merged_path = _merge_candidate(tmp_path, inventory.build_candidate_manifest(document))
     merged = inventory.load_manifest(merged_path)
     rejudged = inventory.compare(_observations(document), merged)
 
     assert [item for item in rejudged if item["status"] == inventory.DISPOSITION_UNKNOWN] == []
+    assert [item["id"] for item in rejudged if item["id"] in proposed], "nothing was proposed"
     assert all(
         item["status"] in (inventory.STATUS_UNAPPROVED, inventory.STATUS_BLOCKED)
         for item in rejudged
+        if item["id"] in proposed
     )
 
 
@@ -961,8 +973,11 @@ def test_the_manifest_never_allowlists_a_forbidden_key_for_printing():
 
 
 def test_an_unapproved_field_fails_the_gate_6_verdict():
-    document = document_for(trace_dump(spans=[{"name": "claude_code.interaction"}]))
-    assert field(document, "span/claude_code.interaction")["status"] == inventory.STATUS_UNAPPROVED
+    # `claude_code.tool` is in the manifest and still unreviewed: a tool-disabled canary has never
+    # produced one, so nothing has been observed that a human could have approved. That is what an
+    # UNAPPROVED field is, and seeing one is a Gate 6 failure whatever else the run did.
+    document = document_for(trace_dump(spans=[{"name": "claude_code.tool"}]))
+    assert field(document, "span/claude_code.tool")["status"] == inventory.STATUS_UNAPPROVED
     assert document["totals"]["unapproved"] >= 1
     assert document["gate6"]["verdict"] == "FAIL"
     assert _condition(document, "no observed field is UNAPPROVED") is False

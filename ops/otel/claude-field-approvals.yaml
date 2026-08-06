@@ -42,11 +42,28 @@
 #   REDACTED   `transform/privacy` deletes this key. Observing it is a Gate 6 failure.
 #   UNAPPROVED not yet reviewed, or reviewed and rejected. Observing it fails the Gate 6 verdict.
 #
-# **Gate 6 has not passed.** `review.approved_by` is empty and `review.state` is `candidate`, and
-# the inventory refuses a PASS verdict while that is so, whatever the individual statuses say.
+# ## Review of 2026-08-06
+#
+# `human-operator` reviewed the supervised, local-only canary in
+# `claude-inventory-20260806-165526` -- 29 fields observed, no span link, no metric exemplar, no
+# redacted key surviving, span accounting balanced, both processes exiting 0 -- and approved the 29
+# fields it observed. Nothing else was approved: every entry this repository has never seen through
+# the pipeline is still UNAPPROVED, on purpose, because an approval is evidence-backed or it is
+# nothing.
+#
+# Two values were read out of that run's Collector log and allowlisted under `static_values` so the
+# four Claude metrics could classify: their units (`USD`, `tokens`, `s`) and their descriptions.
+# They are vendor-authored constants describing an instrument, not telemetry about a session.
+#
+# What the review did **not** approve: `claude_code.llm_request` and the request-level trace
+# attribution that rides on it stay BLOCKED; every key on `redacted_keys` -- identities, prompts,
+# responses, tool input and output, paths, URLs, exceptions, repository refs -- stays deleted by
+# `transform/privacy`; span links and metric exemplars remain unapprovable by construction; and no
+# raw dynamic value became printable because its key was approved. An approved key still reports a
+# *class*, and only `static_values`/`enum_values` widen that.
 
 schema: forge.claude.field-approvals/1
-version: 0.2.0-candidate
+version: 0.3.0
 
 subject:
   agent: claude-code
@@ -56,9 +73,9 @@ subject:
 
 # Filled in by the human who reviews an observed inventory. Until both are set, no run passes.
 review:
-  approved_by: ""
-  state: candidate
-  reviewed_on: ""
+  approved_by: human-operator
+  state: approved
+  reviewed_on: "2026-08-06"
 
 vocabulary:
   # The Collector's own `keep_keys` allowlist, the contract's minimum deletion set, and the
@@ -154,10 +171,14 @@ vocabulary:
   # a run produces is reported in full when it is safe, so a reviewer can add it from the
   # candidate manifest without reading a log.
   event_names: []
-  # Only the diagnostic counters this harness itself emits. No Claude metric name has been
-  # observed by this repository, and guessing one here would be inventing evidence. A real run
-  # reports Claude's metric names in full, subject to the safe-identifier policy.
+  # The diagnostic counters this harness itself emits, and -- since the 2026-08-06 canary -- the
+  # four Claude instruments it actually reported. Nothing here is guessed: every `claude_code.*`
+  # name below was printed in full by that run, which is what the safe-identifier policy is for.
   metric_names:
+    - claude_code.active_time.total
+    - claude_code.cost.usage
+    - claude_code.session.count
+    - claude_code.token.usage
     - forge.diagnostic.span.accepted.forge_task
     - forge.diagnostic.span.accepted.forge_attempt
     - forge.diagnostic.span.accepted.forge_phase
@@ -183,6 +204,9 @@ vocabulary:
   scope_names:
     - github.com/open-telemetry/opentelemetry-collector-contrib/connector/countconnector
     - forge.certification
+    # Claude Code's own two scopes, observed on 2026-08-06: one per signal.
+    - com.anthropic.claude_code
+    - com.anthropic.claude_code.tracing
 
 # The only values that may be reproduced verbatim in a report. Everything else is reduced to a
 # bounded class. A value that is not listed here for its key is never printed, whatever it is.
@@ -195,11 +219,22 @@ static_values:
   forge.telemetry.contract.version:
     - "1.0"
   # Metric units and descriptions are values, not identifiers. These are the ones this
-  # repository produces; a vendor's own prose is not printed until a human puts it here.
+  # repository produces, plus -- read out of the 2026-08-06 run's Collector log and allowlisted
+  # deliberately -- the ones Claude Code's four instruments carry. A vendor's prose is printed
+  # only once a human has put it here, which is what the entries under `Claude Code` are.
   metric.unit:
     - "{token}"
     - ms
+    # Claude Code 2.1.223.
+    - USD
+    - tokens
+    - s
   metric.description:
+    # Claude Code 2.1.223. Instrument documentation, carrying nothing about a session.
+    - "Count of CLI sessions started"
+    - "Cost of the Claude Code session"
+    - "Number of tokens used"
+    - "Total active time in seconds"
     - "spans named forge.task, counted accepted"
     - "spans named forge.attempt, counted accepted"
     - "spans named forge.phase, counted accepted"
@@ -292,79 +327,104 @@ fields:
   # -- Correlation, contract section 4 ---------------------------------------------------------
   # Both reach the child through OTEL_RESOURCE_ATTRIBUTES and nothing else sets them.
   - id: resource.attribute/traces/forge.invocation.id
-    status: UNAPPROVED
+    status: APPROVED
     expected: true
     types: [Str]
     value_classes: [lowercase-hex-32]
     note: >-
-      Gate 5 observed a Claude trace resource, so this must appear.
+      Gate 5 observed a Claude trace resource, so this must appear. Approved 2026-08-06: Forge's
+      own correlation handle, minted per invocation and carried in on OTEL_RESOURCE_ATTRIBUTES.
+      The id itself is never printed -- only its shape.
   - id: resource.attribute/traces/forge.telemetry.contract.version
-    status: UNAPPROVED
+    status: APPROVED
     expected: true
     types: [Str]
     value_classes: [approved-static-string]
     note: >-
-      The pinned contract version, allowlisted so the exact string is printed.
+      The pinned contract version, allowlisted so the exact string is printed. Approved
+      2026-08-06: a constant this repository sets, observed as "1.0".
   - id: resource.attribute/metrics/forge.invocation.id
-    status: UNAPPROVED
-    expected: false
+    status: APPROVED
+    expected: true
     types: [Str]
     value_classes: [lowercase-hex-32]
     note: >-
-      No Claude metric has been observed yet; set expected: true once one is.
+      Approved 2026-08-06, and expected from the same date: the canary reported four Claude
+      metrics, so the metric resource must carry the correlation handle too.
   - id: resource.attribute/metrics/forge.telemetry.contract.version
-    status: UNAPPROVED
-    expected: false
+    status: APPROVED
+    expected: true
     types: [Str]
     value_classes: [approved-static-string]
     note: >-
-      The pinned contract version, allowlisted so the exact string is printed.
+      The pinned contract version, allowlisted so the exact string is printed. Approved and
+      expected from 2026-08-06, for the same reason as its metrics-side neighbour.
 
   # -- Claude's own resource identity ----------------------------------------------------------
-  # Candidates. Claude Code is documented to set service.name and service.version on its
-  # resource; neither has been observed through this pipeline, so both ship unapproved and
-  # unexpected. A value that is not the allowlisted one classes as `unclassifiable`, which no
-  # approval may cover.
+  # Observed on both signals on 2026-08-06 and approved there. `service.name` is pinned to the one
+  # allowlisted string; a value that is not it classes as `unclassifiable`, which no approval
+  # covers, so this stays an approval of a constant rather than of whatever the field may carry.
   - id: resource.attribute/traces/service.name
-    status: UNAPPROVED
+    status: APPROVED
     types: [Str]
     value_classes: [approved-static-string]
     note: >-
-      Candidate. Approve only after a run shows the exact value.
+      Approved 2026-08-06. The run showed the exact value, "claude-code".
   - id: resource.attribute/traces/service.version
-    status: UNAPPROVED
+    status: APPROVED
     types: [Str]
     value_classes: [semantic-version]
     note: >-
-      Candidate. The version itself is never printed; only its shape is.
+      Approved 2026-08-06. The version itself is never printed; only its shape is.
   - id: resource.attribute/metrics/service.name
-    status: UNAPPROVED
+    status: APPROVED
     types: [Str]
     value_classes: [approved-static-string]
     note: >-
-      Candidate. Approve only after a run shows the exact value.
+      Approved 2026-08-06. The run showed the exact value, "claude-code".
   - id: resource.attribute/metrics/service.version
-    status: UNAPPROVED
+    status: APPROVED
     types: [Str]
     value_classes: [semantic-version]
     note: >-
-      Candidate. The version itself is never printed; only its shape is.
+      Approved 2026-08-06. The version itself is never printed; only its shape is.
 
   # -- Spans -----------------------------------------------------------------------------------
   - id: span/claude_code.interaction
-    status: UNAPPROVED
+    status: APPROVED
     expected: true
     kinds: [Internal, Client, Server]
     status_codes: [Unset, Ok, Error]
     note: >-
       The one Claude span the Gate 5 canary exported. Its fields are what Gate 6 is about.
+      Approved 2026-08-06 as an Internal/Unset span carrying the two correlation attributes below
+      and nothing else. Approving the span approves its shape, not its contents: a link on one of
+      these is unapprovable by construction, and any attribute key not listed below is UNKNOWN.
   - id: span/claude_code.llm_request
     status: BLOCKED
     note: >-
       Claude Code 2.1.223 attaches span links to these, and filter/unredactable drops any span
       carrying a link because no Collector 0.158.0 processor can empty a link attribute map.
       Request-level trace attribution is BLOCKED, not pending. Observing one of these after the
-      privacy pipeline means the filter did not run.
+      privacy pipeline means the filter did not run. Reaffirmed 2026-08-06: the canary produced
+      two of them, the filter dropped both, and the review did not reopen the question.
+
+  # -- Span attributes -------------------------------------------------------------------------
+  # Everything that survived on the one exported Claude span. Both are Forge's own correlation
+  # attributes, set on the resource and copied down; Claude contributed no attribute of its own
+  # that reached the inventory.
+  - id: span.attribute/claude_code.interaction/forge.invocation.id
+    status: APPROVED
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved 2026-08-06. The correlation handle, reported by shape and never by value.
+  - id: span.attribute/claude_code.interaction/forge.telemetry.contract.version
+    status: APPROVED
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved 2026-08-06. The pinned contract constant, observed as "1.0".
   - id: span/claude_code.tool
     status: UNAPPROVED
     kinds: [Internal, Client, Server]
@@ -419,11 +479,23 @@ fields:
 
   # -- Instrumentation scopes ------------------------------------------------------------------
   - id: scope/metrics/github.com/open-telemetry/opentelemetry-collector-contrib/connector/countconnector
-    status: UNAPPROVED
+    status: APPROVED
     version_classes: [absent]
     note: >-
       The bounded span-name diagnostic's own count connector. Its records are counted separately
-      in the report's `carriers` block and carry no attribute of any kind.
+      in the report's `carriers` block and carry no attribute of any kind. Approved 2026-08-06.
+  - id: scope/traces/com.anthropic.claude_code.tracing
+    status: APPROVED
+    version_classes: [semantic-version]
+    note: >-
+      Claude Code's trace instrumentation scope, observed 2026-08-06. A scope name and a version
+      shape; it carried no scope attribute, and an attribute appearing here later is UNKNOWN.
+  - id: scope/metrics/com.anthropic.claude_code
+    status: APPROVED
+    version_classes: [semantic-version]
+    note: >-
+      Claude Code's metric instrumentation scope, observed 2026-08-06. Same reasoning as its
+      trace-side counterpart.
   - id: scope/traces/forge.certification
     status: UNAPPROVED
     version_classes: [semantic-version, nonnegative-double, absent]
@@ -461,19 +533,23 @@ fields:
     aggregation_temporalities: [Delta]
     monotonicity: [true]
   - id: metric/forge.diagnostic.span.accepted.claude_code_interaction
-    status: UNAPPROVED
+    status: APPROVED
     unit_classes: [absent]
     description_classes: [approved-static-string]
     data_types: [Sum]
     aggregation_temporalities: [Delta]
     monotonicity: [true]
   - id: metric/forge.diagnostic.span.accepted.claude_code_llm_request
-    status: UNAPPROVED
+    status: APPROVED
     unit_classes: [absent]
     description_classes: [approved-static-string]
     data_types: [Sum]
     aggregation_temporalities: [Delta]
     monotonicity: [true]
+    note: >-
+      Approved 2026-08-06, and not in tension with `span/claude_code.llm_request` staying BLOCKED.
+      This is a count of spans the receiver accepted before `filter/unredactable` dropped them --
+      the evidence that the block fired. It carries no attribute, and so no attribution.
   - id: metric/forge.diagnostic.span.accepted.claude_code_tool
     status: UNAPPROVED
     unit_classes: [absent]
@@ -538,7 +614,7 @@ fields:
     aggregation_temporalities: [Delta]
     monotonicity: [true]
   - id: metric/forge.diagnostic.span.exported.claude_code_interaction
-    status: UNAPPROVED
+    status: APPROVED
     unit_classes: [absent]
     description_classes: [approved-static-string]
     data_types: [Sum]
@@ -593,6 +669,80 @@ fields:
     data_types: [Sum]
     aggregation_temporalities: [Delta]
     monotonicity: [true]
+
+  # -- Claude's own instruments ----------------------------------------------------------------
+  # The four metrics the 2026-08-06 canary reported, approved there. Each is a monotonic delta sum
+  # of aggregate usage: how many sessions, how many tokens, how much money, how much wall clock.
+  # None of them is content, and none of them names anything -- a model, a tool, a file -- because
+  # no attribute beyond the two correlation keys below reached the inventory. Their units and
+  # descriptions are allowlisted in `static_values`; without that they class as `unclassifiable`,
+  # and the harness refuses to approve an unclassifiable value however this file is edited.
+  - id: metric/claude_code.session.count
+    status: APPROVED
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/claude_code.token.usage
+    status: APPROVED
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/claude_code.cost.usage
+    status: APPROVED
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/claude_code.active_time.total
+    status: APPROVED
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+
+  # -- Metric data-point attributes ------------------------------------------------------------
+  # Written out per instrument rather than per key, so that a key appearing on an instrument
+  # nobody reviewed is UNKNOWN rather than quietly covered. Both keys are Forge's own; Claude's
+  # documented data-point attributes -- session id, account, model, terminal type -- are on
+  # `redacted_keys` or absent, and none of them survived to be inventoried.
+  - id: metric.datapoint.attribute/claude_code.session.count/forge.invocation.id
+    status: APPROVED
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+  - id: metric.datapoint.attribute/claude_code.session.count/forge.telemetry.contract.version
+    status: APPROVED
+    types: [Str]
+    value_classes: [approved-static-string]
+  - id: metric.datapoint.attribute/claude_code.token.usage/forge.invocation.id
+    status: APPROVED
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+  - id: metric.datapoint.attribute/claude_code.token.usage/forge.telemetry.contract.version
+    status: APPROVED
+    types: [Str]
+    value_classes: [approved-static-string]
+  - id: metric.datapoint.attribute/claude_code.cost.usage/forge.invocation.id
+    status: APPROVED
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+  - id: metric.datapoint.attribute/claude_code.cost.usage/forge.telemetry.contract.version
+    status: APPROVED
+    types: [Str]
+    value_classes: [approved-static-string]
+  - id: metric.datapoint.attribute/claude_code.active_time.total/forge.invocation.id
+    status: APPROVED
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+  - id: metric.datapoint.attribute/claude_code.active_time.total/forge.telemetry.contract.version
+    status: APPROVED
+    types: [Str]
+    value_classes: [approved-static-string]
 
 # The Gate 3 synthetic payloads also carry two metrics of their own,
 # `forge.certification.token.usage` and `forge.certification.phase.duration`. They are
