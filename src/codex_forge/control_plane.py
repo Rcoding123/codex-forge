@@ -226,6 +226,10 @@ def _safe_task_error(last_error: str | None) -> tuple[str | None, str | None]:
         "TOKEN_BUDGET_EXCEEDED": "The task exceeded its configured token limit.",
         "LOOP_DETECTED": "The task stopped after repeated identical failures.",
         "RECOVERED_AFTER_RESTART": "The task was recovered after a controller restart.",
+        "REVIEW_INFRASTRUCTURE_BLOCKED": (
+            "The independent review could not run because its command runner was unavailable. "
+            "This is an environment fault, not a finding about the task's code."
+        ),
     }
     for code, message in known_errors.items():
         if last_error.startswith(code):

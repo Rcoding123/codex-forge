@@ -4,6 +4,26 @@ All notable changes to Codex Forge are documented here. This project follows sem
 
 ## [Unreleased]
 
+### Fixed
+
+- Review phases no longer run under a sandbox that cannot launch a command. Codex enforces the
+  `read-only` and `workspace-write` sandboxes on Windows with a restricted token, which cannot reach
+  the non-interactive window station a service-style logon owns, so every reviewer command — down to
+  `pwd` — aborted with `STATUS_DLL_INIT_FAILED` (`0xC0000142`, reported as `-1073741502` or
+  `3221225794`) before running. Implementation and repair phases were unaffected because they use the
+  configured `danger-full-access` sandbox, which uses no restricted token. `CodexRunner` now probes
+  whether the sandbox can launch a process, using the same command construction and worker
+  environment a phase uses, and only a recognized process-launch failure changes the mode.
+
+### Changed
+
+- A review that could not inspect anything is reported as `REVIEW_INFRASTRUCTURE_BLOCKED` rather than
+  as a `changes_required` verdict. It starts no repair phase, makes no further model call, retains
+  the failing commands and exit codes in `review-infrastructure-block.json` next to the review
+  evidence, and fails the task closed — passing validation does not substitute for the independent
+  review that did not happen. New bounded telemetry vocabulary:
+  `review_infrastructure_blocked` and `review_infrastructure`.
+
 ### Added
 
 - Optional local OpenTelemetry tracing: `forge.task` → `forge.attempt` → `forge.phase` spans with

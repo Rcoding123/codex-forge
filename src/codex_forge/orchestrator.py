@@ -13,7 +13,12 @@ from .gitops import commit_task, prepare_worktree, write_patch
 from .knowledge import KnowledgeStore
 from .models import Project, Task, TaskState, ValidationResult
 from .prompts import implementation_prompt, review_prompt, validation_failure_summary
-from .runner import CodexRunner
+from .runner import (
+    CodexRunner,
+    ReviewInfrastructureBlock,
+    detect_review_infrastructure_block,
+    sandbox_infrastructure_block,
+)
 from .telemetry import (
     ATTR_ATTEMPT_TERMINATED_BY,
     ERROR_CODEX_EXIT_NONZERO,
@@ -23,6 +28,7 @@ from .telemetry import (
     OUTCOME_NONCOMPLETION,
     OUTCOME_OK,
     OUTCOME_REVIEW_CHANGES_REQUIRED,
+    OUTCOME_REVIEW_INFRASTRUCTURE_BLOCKED,
     OUTCOME_SKIPPED,
     OUTCOME_VALIDATION_FAILED,
     PHASE_COMPLETION,
@@ -42,6 +48,16 @@ from .telemetry import (
 from .usage import BUDGET_BASIS, budget_used_tokens
 from .utils import ControllerAlreadyRunning, controller_lock, ensure_dir, flatten_unique, tail_text, utc_now
 from .validation import run_validations
+
+
+# The reviewer is asked for a read-only sandbox. Whether it gets one is decided by whether that
+# sandbox can launch a command on this host, not assumed.
+REVIEW_SANDBOX = "read-only"
+
+# Written next to the review evidence, and the prefix `control_plane._safe_task_error` matches so
+# Shared Chat reports an infrastructure fault rather than a generic task error.
+REVIEW_INFRASTRUCTURE_BLOCK_FILENAME = "review-infrastructure-block.json"
+REVIEW_INFRASTRUCTURE_BLOCKED = "REVIEW_INFRASTRUCTURE_BLOCKED"
 
 
 class Orchestrator:
@@ -253,6 +269,13 @@ class Orchestrator:
             return OUTCOME_VALIDATION_FAILED
 
         self.db.update_task(task.id, state=TaskState.REVIEWING)
+        # Resolved before the reviewer is paid for: a sandbox that cannot launch a command produces
+        # a review that inspects nothing, and the model call that produces it is pure waste.
+        resolution = self.runner.resolve_sandbox(REVIEW_SANDBOX, cwd=worktree)
+        if resolution.sandbox is None:
+            return self._fail_review_infrastructure(
+                task, artifact_dir, sandbox_infrastructure_block(resolution)
+            )
         review = self._run_codex_phase(
             task,
             project,
@@ -262,9 +285,14 @@ class Orchestrator:
             effort=self._review_effort(task),
             prompt=review_prompt(project, task, worktree),
             schema="review-result.schema.json",
-            sandbox="read-only",
+            sandbox=resolution.sandbox,
             role=ROLE_REVIEWER,
         )
+        blocked = detect_review_infrastructure_block(
+            review, requested_sandbox=resolution.requested, sandbox=resolution.sandbox
+        )
+        if blocked is not None:
+            return self._fail_review_infrastructure(task, artifact_dir, blocked)
         review_final = review.final
 
         review_cycle = 0
@@ -298,9 +326,14 @@ class Orchestrator:
                 effort=self._review_effort(task),
                 prompt=review_prompt(project, task, worktree, previous_findings=findings),
                 schema="review-result.schema.json",
-                sandbox="read-only",
+                sandbox=resolution.sandbox,
                 role=ROLE_REVIEWER,
             )
+            blocked = detect_review_infrastructure_block(
+                review, requested_sandbox=resolution.requested, sandbox=resolution.sandbox
+            )
+            if blocked is not None:
+                return self._fail_review_infrastructure(task, artifact_dir, blocked)
             review_final = review.final
 
         if review_final.get("verdict") != "pass":
@@ -325,6 +358,10 @@ class Orchestrator:
                 "status": "completed",
                 "controller_validation": [self._validation_to_dict(item) for item in validation_results],
                 "review": review_final,
+                # Retained so a completed task records which sandbox the independent review actually
+                # ran under, including when the requested one could not launch a command here.
+                "review_sandbox": resolution.sandbox,
+                "review_sandbox_requested": resolution.requested,
                 "branch": branch,
                 "commit": commit_hash,
                 "worktree": str(worktree),
@@ -421,6 +458,33 @@ class Orchestrator:
             )
             span.set_outcome(OUTCOME_OK if self._all_passed(results) else OUTCOME_FAILED)
             return results
+
+    def _fail_review_infrastructure(
+        self, task: Task, artifact_dir: Path, block: ReviewInfrastructureBlock
+    ) -> str:
+        """End the task on a review that never ran, without treating it as a defect in the code.
+
+        A reviewer whose command runner is unavailable has said nothing about the candidate, so this
+        starts no repair phase and makes no further model call — the two repair cycles the live
+        canary spent could not have repaired an environment fault. It also refuses to complete the
+        task: passing validation is not a substitute for the independent review that did not happen.
+        The task fails closed rather than retrying, because every attempt on this host would re-run
+        implementation into the same unusable reviewer.
+        """
+        record = block.to_dict()
+        (artifact_dir / REVIEW_INFRASTRUCTURE_BLOCK_FILENAME).write_text(
+            json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        detail = json.dumps(record, ensure_ascii=False)
+        # The code stays at the front of `last_error`: `tail_text` keeps the tail, so bounding the
+        # composed string would cut off the very prefix the control plane matches on.
+        self.db.update_task(
+            task.id,
+            state=TaskState.FAILED,
+            last_error=f"{REVIEW_INFRASTRUCTURE_BLOCKED}: "
+            + tail_text(f"{block.summary()}\n{detail}", self.config.max_output_chars),
+        )
+        return OUTCOME_REVIEW_INFRASTRUCTURE_BLOCKED
 
     def _handle_noncompletion(self, task: Task, final: dict) -> bool:
         status = final.get("status")
