@@ -888,6 +888,11 @@ def _override_values(overrides: tuple[str, ...]) -> dict[str, str]:
     return dict(item.split("=", 1) for item in overrides[1::2])
 
 
+def _exporter_endpoint(table: str) -> str:
+    """The URL out of one rendered `{otlp-http={endpoint="...",...}}` exporter table."""
+    return table.split('endpoint="', 1)[1].split('"', 1)[0]
+
+
 def test_codex_overrides_are_an_immutable_vector_of_separate_arguments():
     overrides = agent_telemetry.build_codex_otel_overrides(context(), endpoint=CODEX_ENDPOINT)
     assert isinstance(overrides, tuple)
@@ -911,15 +916,60 @@ def test_codex_overrides_send_traces_and_metrics_only_to_the_loopback_collector(
     values = _override_values(
         agent_telemetry.build_codex_otel_overrides(context(), endpoint=CODEX_ENDPOINT)
     )
-    for key in ("otel.trace_exporter", "otel.metrics_exporter"):
-        assert values[key] == (
-            '{otlp-http={endpoint="http://127.0.0.1:4318",protocol="binary",headers={}}}'
-        ), key
+    # OTLP/HTTP is per signal: each exporter is posted to its own path under the same loopback base.
+    assert values["otel.trace_exporter"] == (
+        '{otlp-http={endpoint="http://127.0.0.1:4318/v1/traces",protocol="binary",headers={}}}'
+    )
+    assert values["otel.metrics_exporter"] == (
+        '{otlp-http={endpoint="http://127.0.0.1:4318/v1/metrics",protocol="binary",headers={}}}'
+    )
     assert values["otel.environment"] == '"forge-canary"'
     # Exactly one destination appears anywhere in the vector, and it is the loopback Collector.
     assert " ".join(values.values()).count("http://") == 2
     assert "otel.tracestate" not in values
     assert agent_telemetry.CODEX_FORBIDDEN_OVERRIDE_KEYS & set(values) == frozenset()
+
+
+def test_codex_trace_and_metric_endpoints_are_the_exact_signal_urls():
+    """The two URLs, spelled out. A change to either is a change to where a signal lands."""
+    values = _override_values(
+        agent_telemetry.build_codex_otel_overrides(context(), endpoint=CODEX_ENDPOINT)
+    )
+    traces = _exporter_endpoint(values["otel.trace_exporter"])
+    metrics = _exporter_endpoint(values["otel.metrics_exporter"])
+
+    assert traces == "http://127.0.0.1:4318/v1/traces"
+    assert metrics == "http://127.0.0.1:4318/v1/metrics"
+    assert traces.endswith("/v1/traces")
+    assert metrics.endswith("/v1/metrics")
+    assert traces != metrics, "one endpoint for both signals is what OTLP/HTTP does not accept"
+
+
+def test_codex_signal_urls_are_built_from_a_bare_base_endpoint_the_caller_supplies():
+    """The caller passes the Collector's base address; the builder owns the two paths."""
+    values = _override_values(
+        agent_telemetry.build_codex_otel_overrides(context(), endpoint="http://localhost:14318")
+    )
+    assert _exporter_endpoint(values["otel.trace_exporter"]) == "http://localhost:14318/v1/traces"
+    assert _exporter_endpoint(values["otel.metrics_exporter"]) == "http://localhost:14318/v1/metrics"
+
+    assert agent_telemetry.CODEX_SIGNAL_PATHS == ("/v1/traces", "/v1/metrics")
+    with pytest.raises(ValueError):
+        agent_telemetry.codex_signal_endpoint(CODEX_ENDPOINT, "/v1/logs")
+    # A base that already carries a path is refused rather than having a signal path appended to it.
+    with pytest.raises(ValueError):
+        agent_telemetry.codex_signal_endpoint(f"{CODEX_ENDPOINT}/v1/traces", "/v1/traces")
+
+
+def test_codex_overrides_still_declare_no_logs_exporter_beside_the_signal_urls():
+    """The endpoint change touches traces and metrics only; logs stay off and unaddressed."""
+    values = _override_values(
+        agent_telemetry.build_codex_otel_overrides(context(), endpoint=CODEX_ENDPOINT)
+    )
+    assert values["otel.exporter"] == '"none"'
+    assert values["otel.log_user_prompt"] == "false"
+    assert "/v1/logs" not in " ".join(values.values())
+    assert tuple(values) == agent_telemetry.CODEX_OTEL_OVERRIDE_KEYS
 
 
 def test_codex_overrides_carry_both_canonical_correlation_attributes_and_no_third():

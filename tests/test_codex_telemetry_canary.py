@@ -18,6 +18,7 @@ deliberately cannot claim it.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import shlex
@@ -323,12 +324,12 @@ def test_a_clean_transcript_reports_exactly_one_matching_response():
     assert transcript.event_counts["item.completed"] == 1
 
 
-def test_malformed_jsonl_fails_rather_than_being_skipped():
+def test_malformed_jsonl_is_counted_rather_than_being_skipped():
+    """A line stdout could not parse is a malformed *stream*, and the gate below fails on it."""
     transcript = codex_canary.parse_codex_transcript(CLEAN_TRANSCRIPT + "{not json\n")
 
     assert transcript.malformed == 1
     assert transcript.parsed_cleanly is False
-    assert transcript.canary_ok is False
 
 
 @pytest.mark.parametrize(
@@ -378,6 +379,96 @@ def test_no_message_text_survives_parsing():
             "matched": transcript.matched_messages,
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# stdout is the protocol; stderr is not
+# ---------------------------------------------------------------------------
+
+
+# What a real Codex run wrote beside its JSONL. Not JSON, not a record, not an answer.
+BENIGN_STDERR = "codex: using profile 'default'\nWarning: OTEL exporter retrying in 1s\n"
+
+
+def test_stderr_is_never_parsed_as_jsonl():
+    """The stderr summary is counts. It cannot raise a line count or a malformed count."""
+    diagnostics = codex_canary.summarize_stderr(BENIGN_STDERR)
+    transcript = codex_canary.parse_codex_transcript(CLEAN_TRANSCRIPT)
+
+    assert diagnostics.lines == 2
+    assert diagnostics.empty is False
+    assert transcript.lines == 5, "stdout alone decides the line count"
+    assert transcript.malformed == 0
+    assert not hasattr(diagnostics, "malformed")
+
+
+def test_a_diagnostic_stderr_line_cannot_become_an_assistant_response():
+    """Even stderr shaped exactly like a completed assistant item is not one: it is not parsed."""
+    impostor = json.dumps(
+        {"type": "item.completed", "item": {"item_type": "agent_message", "text": "CANARY_OK"}}
+    )
+    diagnostics = codex_canary.summarize_stderr(impostor + "\n")
+
+    assert diagnostics.lines == 1
+    assert not hasattr(diagnostics, "assistant_messages")
+    assert not hasattr(diagnostics, "matched_messages")
+    # The only route from a stream to an assistant count is the stdout parser, and the agent gives it
+    # the stdout file by name.
+    source = inspect.getsource(codex_canary.codex_agent)
+    assert "parse_codex_transcript" in source
+    assert "canary.AGENT_STDOUT_NAME" in source
+    assert source.count("parse_codex_transcript") == 1
+
+
+def test_a_benign_stderr_line_does_not_make_an_exact_canary_ok_run_fail():
+    """The observed contradiction: one matched CANARY_OK reply reported as canary_ok=false."""
+    transcript = codex_canary.parse_codex_transcript(CLEAN_TRANSCRIPT)
+    diagnostics = codex_canary.summarize_stderr(BENIGN_STDERR)
+
+    assert transcript.assistant_messages == 1
+    assert transcript.matched_messages == 1
+    assert transcript.canary_ok is True
+    assert diagnostics.lines > 0
+
+    document = _document(transcript=transcript, diagnostics=diagnostics)
+    assert document["canary_process"]["canary_ok"] is True
+    assert document["canary_process"]["stderr_lines"] == 2
+    assert _unmet(document) == [], "a diagnostic line is not a Gate 7 failure"
+
+
+def test_stderr_content_never_reaches_the_report():
+    secret = r"failed to read C:\Users\operator\.codex\auth.json for operator@example.invalid"
+    document = _document(diagnostics=codex_canary.summarize_stderr(secret + "\n"))
+
+    serialized = json.dumps(document)
+    markdown = codex_canary.render_markdown(document)
+    for fragment in (secret, r"C:\Users\operator", "auth.json", "operator@example.invalid"):
+        assert fragment not in serialized, fragment
+        assert fragment not in markdown, fragment
+    # Only how much there was, never what it said.
+    assert document["canary_process"]["stderr_lines"] == 1
+    assert document["canary_process"]["stderr_characters"] == len(secret)
+
+
+def test_the_subprocess_agent_writes_the_two_streams_to_separate_files(tmp_path):
+    """The root cause, at the helper both canaries share: the streams are never merged."""
+    program = (
+        "import sys;"
+        "sys.stdout.write('{\"type\": \"turn.completed\"}\\n');"
+        "sys.stderr.write('diagnostic: not json\\n')"
+    )
+    agent = canary.subprocess_agent([sys.executable, "-c", program], {}, timeout=60.0)
+    assert agent({"http": 0, "grpc": 0, "internal": 0}, tmp_path) == 0
+
+    out = (tmp_path / canary.AGENT_STDOUT_NAME).read_text(encoding="utf-8")
+    err = (tmp_path / canary.AGENT_STDERR_NAME).read_text(encoding="utf-8")
+    assert "diagnostic" not in out, "stderr must not land in the JSONL stream"
+    assert "turn.completed" not in err
+
+    transcript = codex_canary.parse_codex_transcript(out)
+    assert transcript.lines == 1
+    assert transcript.malformed == 0, "the merged-stream bug counted this diagnostic as malformed"
+    assert codex_canary.summarize_stderr(err).lines == 1
 
 
 # ---------------------------------------------------------------------------
@@ -563,6 +654,19 @@ def test_malformed_jsonl_fails_the_gate():
     assert "every Codex JSONL line parsed" in _unmet(document)
 
 
+def test_malformed_stdout_fails_the_gate_even_when_the_response_was_exactly_canary_ok():
+    """Two separate facts, gated separately. The stream is bad; the answer was still the answer."""
+    document = _document(
+        transcript=codex_canary.parse_codex_transcript(CLEAN_TRANSCRIPT + "{not json\n")
+    )
+    unmet = _unmet(document)
+
+    assert document["canary_process"]["jsonl_malformed"] == 1
+    assert "every Codex JSONL line parsed" in unmet
+    assert "the response was exactly CANARY_OK" not in unmet
+    assert document["gate7"]["verdict"] == "FAIL"
+
+
 def test_a_response_that_is_not_exactly_canary_ok_fails_the_gate():
     document = _document(
         transcript=codex_canary.parse_codex_transcript(
@@ -572,6 +676,33 @@ def test_a_response_that_is_not_exactly_canary_ok_fails_the_gate():
         )
     )
     assert "the response was exactly CANARY_OK" in _unmet(document)
+
+
+@pytest.mark.parametrize("reply", ["CANARY_OK.", "canary_ok", "Sure! CANARY_OK", ""])
+def test_exact_matching_is_not_loosened_by_a_stderr_line(reply):
+    """A near-miss reply fails whether or not stderr said anything."""
+    document = _document(
+        transcript=codex_canary.parse_codex_transcript(
+            _jsonl({"type": "item.completed", "item": {"item_type": "agent_message", "text": reply}})
+        ),
+        diagnostics=codex_canary.summarize_stderr(BENIGN_STDERR),
+    )
+    assert document["canary_process"]["matched_canary_responses"] == 0
+    assert "the response was exactly CANARY_OK" in _unmet(document)
+
+
+def test_no_gate_condition_reads_the_stderr_counts():
+    """A non-empty stderr is never itself a verdict. Process and export failures are read directly."""
+    quiet = _document(diagnostics=codex_canary.summarize_stderr(""))
+    noisy = _document(diagnostics=codex_canary.summarize_stderr(BENIGN_STDERR * 40))
+
+    assert quiet["canary_process"]["stderr_lines"] == 0
+    assert noisy["canary_process"]["stderr_lines"] == 80
+    assert quiet["gate7"]["conditions"] == noisy["gate7"]["conditions"]
+    assert noisy["gate7"]["verdict"] == "PASS"
+    # The failures stderr would have narrated are gated on their own evidence instead.
+    for condition in ("the Codex process exited cleanly", "at least one span was accepted"):
+        assert condition in {item["condition"] for item in noisy["gate7"]["conditions"]}
 
 
 def test_a_timeout_fails_the_gate_and_is_reported_as_a_timeout():

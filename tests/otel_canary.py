@@ -424,6 +424,12 @@ def otlp_payload_agent(payloads: Sequence[tuple[str, dict]]) -> Callable[[dict, 
     return agent
 
 
+# The two files `subprocess_agent` writes into the working directory, one per stream. Named here so a
+# caller that parses a child's stdout asks for it by name rather than by convention.
+AGENT_STDOUT_NAME = "agent.log"
+AGENT_STDERR_NAME = "agent.err.log"
+
+
 def subprocess_agent(
     argv: Sequence[str],
     environment: Mapping[str, str],
@@ -440,30 +446,40 @@ def subprocess_agent(
     ``on_timeout`` is called once if the child outlives ``timeout``, before it is terminated. The
     return code of a terminated child is not distinguishable from an ordinary failure, so a caller
     that must report "it timed out" rather than "it failed" needs to be told here.
+
+    The two streams are **never merged**. An agent whose stdout is a machine format — Codex's
+    ``exec --json`` emits JSONL there, and only there — has a stderr that is free-form diagnostic
+    text, and folding one into the other turns every diagnostic line into a malformed record of the
+    other protocol. Each stream gets its own file in the working directory, and a caller that parses
+    one reads that one by name.
     """
 
     def agent(ports: dict, workdir: Path) -> int:
         flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        log = (workdir / "agent.log").open("w", encoding="utf-8", errors="replace")
-        process = subprocess.Popen(
-            list(argv),
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            cwd=str(workdir),
-            env=dict(environment),
-            creationflags=flags,
-        )
+        out = (workdir / AGENT_STDOUT_NAME).open("w", encoding="utf-8", errors="replace")
+        err = (workdir / AGENT_STDERR_NAME).open("w", encoding="utf-8", errors="replace")
         try:
-            return process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            if on_timeout is not None:
-                on_timeout()
-            return _terminate(process)
+            process = subprocess.Popen(
+                list(argv),
+                stdout=out,
+                stderr=err,
+                stdin=subprocess.DEVNULL,
+                cwd=str(workdir),
+                env=dict(environment),
+                creationflags=flags,
+            )
+            try:
+                return process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                if on_timeout is not None:
+                    on_timeout()
+                return _terminate(process)
+            finally:
+                if process.poll() is None:
+                    _terminate(process)
         finally:
-            if process.poll() is None:
-                _terminate(process)
-            log.close()
+            out.close()
+            err.close()
 
     return agent
 

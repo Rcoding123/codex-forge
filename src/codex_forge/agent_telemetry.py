@@ -626,9 +626,11 @@ def build_codex_child_environment(
 #
 #   1. the exact nesting of an exporter variant — `{otlp-http={...}}` as an externally tagged table;
 #   2. whether `headers` is accepted on that variant, and whether an empty table is accepted;
-#   3. whether `endpoint` is a base URL to which the exporter appends `/v1/traces` and `/v1/metrics`,
-#      or a full signal URL. The bundled exporter appends those paths when it reads a *base* endpoint
-#      from the environment, which is why the base form is what this builder emits.
+#   3. whether an exporter table's `endpoint` is posted to verbatim. It is treated here as a full
+#      signal URL, so this builder appends `/v1/traces` and `/v1/metrics` itself rather than handing
+#      over a base URL and relying on the exporter to append them. The path-appending behaviour
+#      belongs to the *environment* form of the setting; an explicitly configured endpoint is the
+#      form OTLP/HTTP posts to as written.
 #
 # None of the three may be described as accepted until one supervised `codex` run has accepted it.
 
@@ -638,6 +640,12 @@ CODEX_OTEL_ENVIRONMENT = "forge-canary"
 # wire format is inspectable from the Collector side without a second client library.
 CODEX_OTEL_HTTP_PROTOCOL = "binary"
 CODEX_LOGS_EXPORTER = "none"
+
+# The OTLP/HTTP signal paths. The builder is given a bare Collector base URL and constructs these two
+# URLs itself, so neither the caller nor the exporter's own defaulting decides where a signal lands.
+CODEX_TRACES_PATH = "/v1/traces"
+CODEX_METRICS_PATH = "/v1/metrics"
+CODEX_SIGNAL_PATHS = (CODEX_TRACES_PATH, CODEX_METRICS_PATH)
 
 # Every `[otel]` key this builder writes, in the order it writes them. A reviewer can diff this
 # tuple against the emitted vector without reading the function.
@@ -681,8 +689,20 @@ def _toml_inline_table(pairs: tuple[tuple[str, str], ...]) -> str:
     return "{" + ",".join(f"{_toml_string(key)}={_toml_string(value)}" for key, value in pairs) + "}"
 
 
+def codex_signal_endpoint(endpoint: str, path: str) -> str:
+    """Return the OTLP/HTTP URL for one signal, built from a validated loopback base endpoint.
+
+    The base is validated first, so a caller cannot smuggle a path in and have a signal path appended
+    behind it; the path itself is one of the two this module owns and is not caller-supplied text.
+    """
+    base = validate_loopback_endpoint(endpoint)
+    if path not in CODEX_SIGNAL_PATHS:
+        raise ValueError(f"signal path must be one of {', '.join(CODEX_SIGNAL_PATHS)}; got {path!r}.")
+    return f"{base}{path}"
+
+
 def _codex_otlp_http_exporter(endpoint: str) -> str:
-    """Render one externally tagged `otlp-http` exporter table."""
+    """Render one externally tagged `otlp-http` exporter table for one signal URL."""
     return (
         "{otlp-http={"
         f"endpoint={_toml_string(endpoint)},"
@@ -720,14 +740,16 @@ def build_codex_otel_overrides(
             f"contract version must be {AGENT_TELEMETRY_CONTRACT_VERSION!r}; "
             f"got {context.contract_version!r}."
         )
-    validated_endpoint = validate_loopback_endpoint(endpoint)
-    exporter = _codex_otlp_http_exporter(validated_endpoint)
+    # One base endpoint in, two signal URLs out. The caller passes the Collector's bare loopback
+    # address; which path each signal is posted to is this builder's decision, not the caller's.
+    traces = codex_signal_endpoint(endpoint, CODEX_TRACES_PATH)
+    metrics = codex_signal_endpoint(endpoint, CODEX_METRICS_PATH)
 
     values = {
         "otel.exporter": _toml_string(CODEX_LOGS_EXPORTER),
         "otel.log_user_prompt": "false",
-        "otel.trace_exporter": exporter,
-        "otel.metrics_exporter": exporter,
+        "otel.trace_exporter": _codex_otlp_http_exporter(traces),
+        "otel.metrics_exporter": _codex_otlp_http_exporter(metrics),
         "otel.environment": _toml_string(CODEX_OTEL_ENVIRONMENT),
         "otel.span_attributes": _toml_inline_table(
             (

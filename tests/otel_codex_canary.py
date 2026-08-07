@@ -320,12 +320,24 @@ class CodexTranscript:
 
     @property
     def canary_ok(self) -> bool:
-        """Exactly one visible assistant reply, and it was exactly `CANARY_OK`."""
-        return self.parsed_cleanly and self.assistant_messages == 1 and self.matched_messages == 1
+        """Exactly one visible assistant reply, and it was exactly `CANARY_OK`.
+
+        This is a statement about the reply and nothing else. Whether every line of the stream parsed
+        is a separate fact, reported separately and gated separately: a stream that also carried a
+        line this parser could not read is a *malformed stream*, not a wrong answer, and conflating
+        the two produced a run that reported one matched `CANARY_OK` response and `canary_ok=false`
+        in the same breath. The exactness of the match is untouched — `matched_messages` still counts
+        only a reply equal to `CANARY_OK`, and one unmatched reply still makes this false.
+        """
+        return self.assistant_messages == 1 and self.matched_messages == 1
 
 
 def parse_codex_transcript(text: str) -> CodexTranscript:
-    """Reduce Codex JSONL to counts. Never returns, stores, or logs any message text."""
+    """Reduce Codex **stdout** JSONL to counts. Never returns, stores, or logs any message text.
+
+    Only stdout is ever passed here. `codex exec --json` defines stdout as the JSONL stream; stderr
+    is free-form diagnostic text that is not, and never was, a record in this protocol.
+    """
     lines = 0
     malformed = 0
     counts: dict[str, int] = {}
@@ -381,6 +393,35 @@ def _assistant_text(event: Mapping) -> str | None:
     if kind in ASSISTANT_ITEM_TYPES and isinstance(event.get("text"), str):
         return str(event["text"])
     return None
+
+
+@dataclass(frozen=True)
+class CodexDiagnostics:
+    """What Codex wrote to stderr, reduced to counts before anything is kept.
+
+    Stderr is diagnostic text of unknown provenance: it can quote a path, a profile name, or an
+    upstream error body. None of it is parsed as JSONL, none of it can become an assistant response,
+    and none of it reaches the report — only how much of it there was.
+    """
+
+    lines: int = 0
+    characters: int = 0
+
+    @property
+    def empty(self) -> bool:
+        return self.lines == 0
+
+
+def summarize_stderr(text: str) -> CodexDiagnostics:
+    """Reduce Codex stderr to two counts. Never returns, stores, or logs any diagnostic text.
+
+    A non-empty stderr is not by itself a Gate 7 failure. Codex writes ordinary notices there on a
+    run that behaved, and the failures that *are* verdict-relevant are observed directly rather than
+    inferred from prose: a process failure is the return code, and an export failure is the
+    Collector's own accepted/refused counters and the span and metric accounting built from them.
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    return CodexDiagnostics(lines=len(lines), characters=sum(len(line) for line in lines))
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +503,8 @@ LIMITATIONS = (
     "span are the model's report of one request, not a bill and not a balance.",
     "The exporter override is accepted or rejected by this run alone. Until it is accepted, the "
     "nesting of the otlp-http exporter table, the presence of a headers field on it, and whether "
-    "endpoint is a base URL or a full signal URL are unproven.",
+    "the per-signal endpoint URLs the builder emits (/v1/traces and /v1/metrics) are the form the "
+    "exporter posts to are unproven.",
     "CODEX_HOME is preserved exactly as the operator holds it. It is never set, redirected, or "
     "removed, and --ignore-user-config still authenticates out of it.",
 )
@@ -475,6 +517,7 @@ def build_document(
     invocation_id: str,
     timed_out: bool = False,
     codex_returncode: int | None = None,
+    diagnostics: CodexDiagnostics | None = None,
     config: Mapping | None = None,
     errors: Sequence[str] = (),
 ) -> dict:
@@ -485,6 +528,7 @@ def build_document(
     effective = config if config is not None else canary_configuration()
     empty = CodexTranscript()
     seen = transcript if transcript is not None else empty
+    stderr = diagnostics if diagnostics is not None else CodexDiagnostics()
 
     body = {
         "schema": SCHEMA_VERSION,
@@ -505,6 +549,10 @@ def build_document(
             "matched_canary_responses": seen.matched_messages,
             "canary_ok": seen.canary_ok,
             "transcript_read": transcript is not None,
+            # Counts only, and no condition below reads them: stderr is diagnostic text, a non-empty
+            # stderr is not a failure, and its content never reaches this report.
+            "stderr_lines": stderr.lines,
+            "stderr_characters": stderr.characters,
         },
         "telemetry_transport": {
             "logs_exporter": agent_telemetry.CODEX_LOGS_EXPORTER,
@@ -577,6 +625,7 @@ def _verdict(body: Mapping) -> dict:
         "the Codex process exited cleanly": process["codex_returncode"] == 0,
         "the Codex process did not time out": process["timed_out"] is False,
         "the Codex JSONL was read": process["transcript_read"] is True,
+        # Stdout only. Stderr is a separate stream, counted separately, and cannot reach this.
         "every Codex JSONL line parsed": process["jsonl_lines"] > 0
         and process["jsonl_malformed"] == 0,
         "exactly one visible assistant response was returned": process["assistant_messages"] == 1,
@@ -744,6 +793,7 @@ class CodexOutcome:
     returncode: int | None = None
     timed_out: bool = False
     transcript: CodexTranscript | None = None
+    diagnostics: CodexDiagnostics | None = None
     errors: tuple[str, ...] = ()
 
 
@@ -764,6 +814,9 @@ def codex_agent(
     repository, never a git worktree — and is removed on every path including a timeout. It holds the
     child's stdout, which is Codex JSONL, which contains the model's reply. The reply is parsed into
     counts inside that directory and the directory is then deleted; no text leaves this function.
+
+    Stdout and stderr are read from separate files. Only stdout is Codex JSONL; stderr is reduced to
+    a line count and discarded with the directory.
     """
 
     def agent(ports: dict, workdir: Path) -> int | None:
@@ -789,13 +842,20 @@ def codex_agent(
                 on_timeout=lambda: setattr(outcome, "timed_out", True),
             )(ports, isolated)
             outcome.returncode = returncode
-            log = isolated / "agent.log"
+            # stdout only. The stderr file beside it is diagnostic text and is never parsed here.
+            log = isolated / canary.AGENT_STDOUT_NAME
             if log.is_file():
                 outcome.transcript = parse_codex_transcript(
                     log.read_text(encoding="utf-8", errors="replace")
                 )
             else:
                 outcome.errors += ("Codex produced no output file to parse",)
+            diagnostic = isolated / canary.AGENT_STDERR_NAME
+            outcome.diagnostics = summarize_stderr(
+                diagnostic.read_text(encoding="utf-8", errors="replace")
+                if diagnostic.is_file()
+                else ""
+            )
             return returncode
         finally:
             shutil.rmtree(isolated, ignore_errors=True)
@@ -876,6 +936,7 @@ def run_codex_canary(
             invocation_id=invocation_id,
             timed_out=outcome.timed_out,
             codex_returncode=outcome.returncode,
+            diagnostics=outcome.diagnostics,
             config=config,
             errors=outcome.errors,
         )

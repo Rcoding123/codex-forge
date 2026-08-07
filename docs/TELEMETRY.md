@@ -1146,8 +1146,8 @@ Built by `agent_telemetry.build_codex_otel_overrides()` as separate argv element
 ```
 -c otel.exporter="none"
 -c otel.log_user_prompt=false
--c otel.trace_exporter={otlp-http={endpoint="http://127.0.0.1:<port>",protocol="binary",headers={}}}
--c otel.metrics_exporter={otlp-http={endpoint="http://127.0.0.1:<port>",protocol="binary",headers={}}}
+-c otel.trace_exporter={otlp-http={endpoint="http://127.0.0.1:<port>/v1/traces",protocol="binary",headers={}}}
+-c otel.metrics_exporter={otlp-http={endpoint="http://127.0.0.1:<port>/v1/metrics",protocol="binary",headers={}}}
 -c otel.environment="forge-canary"
 -c otel.span_attributes={"forge.invocation.id"="<32 hex>","forge.telemetry.contract.version"="1.0"}
 ```
@@ -1167,9 +1167,10 @@ run can legitimately fail:
 
 1. the nesting of an exporter variant — `{otlp-http={…}}` as an externally tagged table;
 2. whether `headers` is a field of that variant, and whether an empty table is accepted;
-3. whether `endpoint` is a **base** URL to which `/v1/traces` and `/v1/metrics` are appended, or a
-   full signal URL. The base form is what the builder emits, because the exporter Codex embeds
-   appends those paths when it reads a base endpoint from the environment.
+3. whether an exporter table's `endpoint` is posted to verbatim. It is treated as a **full signal
+   URL**, so the builder is handed the Collector's bare loopback base and appends `/v1/traces` and
+   `/v1/metrics` itself. Path-appending is the *environment* form of the setting; an explicitly
+   configured OTLP/HTTP endpoint is the form the exporter posts to as written.
 
 Until one supervised run accepts it, none of the three may be described as settled, and the Codex
 correlation mechanism stays **proposed**.
