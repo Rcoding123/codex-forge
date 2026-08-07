@@ -20,7 +20,7 @@ f78beddd6560f2b947dd6d54a258c76c3dd733b540ff7a1c16e0b70e3369db66  ./docs/AGENT-T
 eb88009c0b7866002e671c122f8ac4a32d87c762dee97393d937d6b5a0ac8fa2  ./ops/otel/Resolve-OtelCollector.ps1
 ddd230e7560676f64a1beca43e14dae0523a8623269c5d2481ede8f187e6bb00  ./ops/otel/Start-OtelCollector.ps1
 e26146b8983d29c3721e7e59128cf0fe9e35595ee513c2ab21b7d20cc1c5d6c2  ./ops/otel/claude-field-approvals.yaml
-6ae4cc88b0766653ba0e5fb9aaf068f26b664548e91fb281f1bb9abac9ea7633  ./ops/otel/codex-field-approvals.yaml
+5c90fda4f51dd941488f23fc2873ce351ab2766a65a92a80b95ed440be315e3e  ./ops/otel/codex-field-approvals.yaml
 98ef3cace004a0638a40e52c355c7f5ba6388f6f629983c82962a217126e37de  ./ops/otel/collector-config.yaml
 378b011645c3c7d0a1e67120bdc18ca6a9160b45191904524a5fa2b8de56ffa9  ./publish-to-github.ps1
 395afd02258e4d22191da58476795693a600c5e143e05582f4238e5da408afc2  ./pyproject.toml
@@ -58,7 +58,7 @@ d62a87be9e57dc6f05247258bd443c61e05360ca200eee01396a942d4f35722b  ./templates/tr
 e292e118f15163ebda61821aa5a6bbe509952c96d2d58d874c704fc6cd71a3c7  ./tests/otel_canary.py
 272fca9a16c33a79d9c568f57ea1c982ad922aaeebac1bdf23e4b868e0a459cf  ./tests/otel_certification.py
 3fd2f1b685bf12aa1b850475ae81e1aa5c037c16c2ecbf060e026ae810eb7e03  ./tests/otel_codex_canary.py
-a7737590d183c664958110308ef2aa9a512c3a9cf0a6d81f67acc265f6a5a283  ./tests/otel_codex_evidence.py
+f444de7264b8dc65dc4ce778437708f3cdb12a4886eeb285841e2b6dc9851bc0  ./tests/otel_codex_evidence.py
 b738fd3ad4ebce03f1fce8ba99a04432d2ab163e1f267548f63e1957b0d5275d  ./tests/otel_codex_inventory.py
 decd7b89e951d6ec22a1739287ad7668870dfa3af23d4e9fe08e4cf8306f5e01  ./tests/otel_inventory.py
 19a39b19c4ab06ee0429a673b47bec8887c64fc77bdaaddab7a8a38f2fa5795a  ./tests/test_agent_telemetry.py
