@@ -356,6 +356,300 @@ def test_the_privacy_check_passes_and_names_every_check_it_ran(canary_run):
 
 
 # ---------------------------------------------------------------------------
+# Metric accounting: the exporter is shared, so the receiver is not the only source
+# ---------------------------------------------------------------------------
+#
+# The first Gate 7 run reported `exporter sent 98` against `receiver accepted 96` and called the
+# difference an unresolved remainder of -2. Nothing was lost and nothing appeared from nowhere: the
+# diagnostic `count` connectors feed `metrics/diagnostic` into the same `debug` exporter the OTLP
+# `metrics` pipeline uses, so the exporter counter covers a population the receiver counter cannot
+# see. These tests pin both halves of that -- the measurement of the connector-made points, and the
+# equation that consumes it.
+
+# One `count` connector emission as the debug exporter prints it: a bare delta sum, one data point,
+# no attribute of any kind. `Value: 224` is one metric point that says 224, not 224 metric points.
+_DIAGNOSTIC_BLOCK = """\
+Metric #0
+Descriptor:
+     -> Name: {name}
+     -> Description: spans named outside the diagnostic vocabulary, counted {stage}
+     -> Unit:
+     -> DataType: Sum
+     -> IsMonotonic: true
+     -> AggregationTemporality: Delta
+NumberDataPoints #0
+StartTimestamp: 2026-08-07 17:19:45.1644117 +0000 UTC
+Timestamp: 2026-08-07 17:19:48.4971326 +0000 UTC
+Value: {value}
+"""
+
+
+def _diagnostic_output(*blocks: tuple[str, str, int]) -> str:
+    return "\n".join(
+        _DIAGNOSTIC_BLOCK.format(
+            name=certification.diagnostic_metric_name(stage, bucket), stage=stage, value=value
+        )
+        for stage, bucket, value in blocks
+    )
+
+
+def test_a_diagnostic_block_is_one_metric_point_however_large_its_value():
+    """The count and the counter are different numbers, and the accounting needs the count."""
+    output = _diagnostic_output(("accepted", "other", 224), ("exported", "other", 224))
+
+    assert certification.count_diagnostic_metric_points(output) == 2
+    # The value-total parser still reads the same blocks as 224 spans per stage. Both are correct;
+    # they answer different questions, and conflating them is the bug this file exists to pin.
+    counts = certification.parse_diagnostic_counts(output)
+    assert counts == {"accepted": {"other": 224}, "exported": {"other": 224}}
+
+
+def test_every_diagnostic_block_a_run_flushed_is_counted():
+    """Several flushes mean several blocks per bucket, and every one reached the exporter."""
+    output = _diagnostic_output(
+        ("accepted", "forge.phase", 3),
+        ("accepted", "other", 1),
+        ("exported", "forge.phase", 3),
+        ("accepted", "forge.phase", 5),
+    )
+    assert certification.count_diagnostic_metric_points(output) == 4
+
+
+def test_a_metric_that_is_not_the_diagnostic_is_not_credited_to_the_connectors():
+    """Only the bounded vocabulary counts. An agent metric point came in through the receiver."""
+    output = """\
+Metric #0
+Descriptor:
+     -> Name: forge.certification.token.usage
+     -> DataType: Sum
+NumberDataPoints #0
+Value: 1200
+"""
+    assert certification.count_diagnostic_metric_points(output) == 0
+
+
+def test_output_with_no_diagnostic_at_all_generates_nothing():
+    """A topology without the connectors must collapse to the receiver-only equation."""
+    assert certification.count_diagnostic_metric_points("") == 0
+    accounting = canary.MetricAccounting(accepted=40, exported=40, refused=0, send_failed=0)
+    assert accounting.internally_generated == 0
+    assert accounting.available == 40
+    assert accounting.unresolved == 0
+    assert accounting.balanced
+
+
+def test_the_recorded_gate_7_run_balances_once_the_connectors_are_credited():
+    """The real 2026-08-07 Codex run, re-evaluated. 96 + 2 - 98 = 0.
+
+    These are the numbers that run actually reported: 96 metric points accepted at the OTLP
+    receiver, 98 sent by the debug exporter, nothing refused and nothing send-failed, and two
+    diagnostic data points in its `collector.log` — one `forge.diagnostic.span.accepted.other`
+    and one `forge.diagnostic.span.exported.other`, each a single delta point carrying 224.
+    """
+    accounting = canary.MetricAccounting(
+        accepted=96, exported=98, refused=0, send_failed=0
+    ).with_internally_generated(
+        certification.count_diagnostic_metric_points(
+            _diagnostic_output(("accepted", "other", 224), ("exported", "other", 224))
+        )
+    )
+
+    assert accounting.internally_generated == 2
+    assert accounting.available == 98
+    assert accounting.unresolved == 0
+    assert accounting.balanced
+
+
+def test_crediting_the_connectors_does_not_explain_away_a_real_loss():
+    """The whole point of a remainder is that it still fires. Two points explain two points."""
+    accounting = canary.MetricAccounting(
+        accepted=96, exported=90, refused=0, send_failed=0
+    ).with_internally_generated(2)
+
+    assert accounting.available == 98
+    assert accounting.unresolved == 8
+    assert accounting.balanced is False
+
+
+def test_a_surplus_the_connectors_do_not_cover_is_still_a_negative_remainder():
+    """Not a clamp. If the exporter sent more than both sources produced, the report says so."""
+    accounting = canary.MetricAccounting(
+        accepted=96, exported=101, refused=0, send_failed=0
+    ).with_internally_generated(2)
+
+    assert accounting.unresolved == -3
+    assert accounting.balanced is False
+
+
+def test_refused_and_send_failed_still_settle_the_equation():
+    accounting = canary.MetricAccounting(
+        accepted=96, exported=90, refused=5, send_failed=3
+    ).with_internally_generated(2)
+
+    assert accounting.available == 98
+    assert accounting.unresolved == 0
+    assert accounting.balanced
+
+
+def test_with_internally_generated_does_not_mutate_the_reading_it_came_from():
+    """The counters are read once, while the Collector answers. That reading stays as read."""
+    read = canary.MetricAccounting(accepted=96, exported=98, refused=0, send_failed=0)
+    joined = read.with_internally_generated(2)
+
+    assert read.internally_generated == 0
+    assert read.unresolved == -2, "the uncorrected reading is preserved, not rewritten in place"
+    assert joined is not read
+    assert (joined.accepted, joined.exported) == (read.accepted, read.exported)
+
+
+def _metric_datapoints(payload: dict) -> tuple[int, int]:
+    """(data points in this payload, how many of them carry an exemplar).
+
+    Derived from the payload rather than written out, for the same reason
+    `diagnostic_expected_counts` is: the two must not drift apart.
+    """
+    total = exemplars = 0
+    for resource in payload["resourceMetrics"]:
+        for scope in resource["scopeMetrics"]:
+            for metric in scope["metrics"]:
+                for body in metric.values():
+                    if not isinstance(body, dict):
+                        continue
+                    for point in body.get("dataPoints", ()):
+                        total += 1
+                        exemplars += bool(point.get("exemplars"))
+    return total, exemplars
+
+
+def _without_exemplars(payload: dict) -> dict:
+    """The same hostile payload with the one unredactable carrier removed.
+
+    Everything else stays hostile. Only the exemplar goes, because `filter/unredactable` drops the
+    data point carrying it and this variant is for measuring a pipeline where nothing is dropped.
+    """
+    clean = copy.deepcopy(payload)
+    for resource in clean["resourceMetrics"]:
+        for scope in resource["scopeMetrics"]:
+            for metric in scope["metrics"]:
+                for body in metric.values():
+                    if isinstance(body, dict) and "dataPoints" in body:
+                        body["dataPoints"] = [
+                            point for point in body["dataPoints"] if not point.get("exemplars")
+                        ]
+    return clean
+
+
+def _probed_metric_accounting(workdir, metric_payload) -> tuple[canary.MetricAccounting, int]:
+    """One live canary posting spans and ``metric_payload``. Returns the corrected accounting.
+
+    The counters are read through the probe, while the Collector still answers; the connector
+    points are counted off the complete log afterwards. That is the same two-moment join the Codex
+    canary does, exercised here without Claude, Codex, or a Forge task.
+    """
+    probed: dict[str, canary.MetricAccounting] = {}
+    report = canary.run_canary(
+        binary=COLLECTOR,
+        workdir=workdir,
+        agent=canary.otlp_payload_agent(
+            [
+                ("/v1/traces", certification.diagnostic_trace_payload()),
+                ("/v1/metrics", metric_payload),
+            ]
+        ),
+        probe=lambda ports: probed.setdefault(
+            "metrics", canary.read_metric_accounting(int(ports["internal"]))
+        ),
+    )
+    assert report.collector_returncode == 0
+    generated = certification.count_diagnostic_metric_points(report.output)
+    return probed["metrics"].with_internally_generated(generated), generated
+
+
+@requires_collector
+def test_the_exporter_total_covers_both_metric_pipelines_against_a_real_collector(tmp_path):
+    """The topology claim itself, proven by a Collector rather than argued from the config.
+
+    Synthetic OTLP only — no Claude, no Codex, no Forge task. The receiver sees the posted metric
+    points; the exporter sees those *and* the points the connectors made out of the posted spans.
+    With nothing deliberately dropped, the difference between the two counters is exactly the
+    diagnostic data points printed in the log, and the corrected equation balances to zero.
+    """
+    payload = _without_exemplars(certification.hostile_metric_payload())
+    posted, exemplars = _metric_datapoints(payload)
+    assert exemplars == 0, "this variant exists to have nothing the filter would drop"
+
+    accounting, generated = _probed_metric_accounting(tmp_path / "metric-balance", payload)
+
+    # The connectors really did manufacture points, so this run exercises the corrected term
+    # rather than passing because the term happened to be zero.
+    assert generated > 0
+    assert accounting.accepted == posted
+    assert accounting.exported == posted + generated, (
+        "the exporter total must cover both metric pipelines: "
+        f"accepted={accounting.accepted} generated={generated} exported={accounting.exported}"
+    )
+    assert accounting.available == accounting.exported
+    assert accounting.unresolved == 0
+    assert accounting.balanced
+
+
+@requires_collector
+def test_a_deliberately_dropped_metric_point_is_still_an_unresolved_remainder(tmp_path):
+    """Crediting the connectors must not turn into crediting everything.
+
+    The hostile payload carries one data point with an exemplar, which `filter/unredactable` drops
+    whole. That drop has no counter this harness credits — `otelcol_processor_filter_spans_filtered`
+    is span-oriented — so it is left as a remainder rather than explained away. The remainder is
+    exactly one point: the connectors' contribution covered the connectors' points and nothing else.
+    """
+    payload = certification.hostile_metric_payload()
+    posted, exemplars = _metric_datapoints(payload)
+    assert exemplars == 1, "the payload is supposed to carry exactly one unredactable data point"
+
+    accounting, generated = _probed_metric_accounting(tmp_path / "metric-drop", payload)
+
+    assert generated > 0
+    assert accounting.accepted == posted
+    assert accounting.exported == posted - exemplars + generated
+    assert accounting.unresolved == exemplars
+    assert accounting.balanced is False
+    # And the point that did not make it is the one carrying the exemplar, not a random casualty.
+    assert f"Value: {certification.EXEMPLAR_DATAPOINT_VALUE}" not in _read_log(tmp_path / "metric-drop")
+
+
+def _read_log(workdir) -> str:
+    return (workdir / "collector.log").read_text(encoding="utf-8", errors="replace")
+
+
+@requires_collector
+def test_the_connectors_are_invisible_to_the_receiver_counter(tmp_path):
+    """Why the old equation could not have worked: a connector is not a receiver.
+
+    If the connector-made points were counted as accepted, the receiver total would already
+    include them and the original `accepted == exported` reading would have balanced. It does not,
+    and this pins the reason so a Collector upgrade that changes it fails here rather than silently
+    double-counting the diagnostic.
+    """
+    seen: list[tuple[str, dict, float]] = []
+
+    def agent(ports, workdir):
+        result = _payload_agent()(ports, workdir)
+        canary.wait_until_settled(ports["internal"], batch_timeout=5.0, timeout=60.0)
+        seen.extend(certification.scrape_internal_metrics(ports["internal"]))
+        return result
+
+    canary.run_canary(binary=COLLECTOR, workdir=tmp_path / "receiver-labels", agent=agent)
+
+    receivers = {
+        labels.get("receiver")
+        for name, labels, _value in seen
+        if name == canary.COUNTER_ACCEPTED_POINTS
+    }
+    assert receivers, f"{canary.COUNTER_ACCEPTED_POINTS} was never reported"
+    assert receivers == {"otlp"}, f"a non-OTLP source appeared in the receiver counter: {receivers}"
+
+
+# ---------------------------------------------------------------------------
 # Negative controls: the layers are load-bearing
 # ---------------------------------------------------------------------------
 

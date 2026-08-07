@@ -572,6 +572,112 @@ def test_unresolved_metric_points_fail_the_gate():
     assert "the metric accounting balanced" in _unmet(document)
 
 
+# One diagnostic emission exactly as the debug exporter printed it in the 2026-08-07 Codex run:
+# its own log record, the count connector's instrumentation scope, one attribute-free delta point.
+_DIAGNOSTIC_RECORD = """\
+2026-08-07T12:19:49.990-0500\tinfo\tResourceMetrics #0
+Resource SchemaURL:
+ScopeMetrics #0
+ScopeMetrics SchemaURL:
+InstrumentationScope github.com/open-telemetry/opentelemetry-collector-contrib/connector/countconnector
+Metric #0
+Descriptor:
+     -> Name: forge.diagnostic.span.{stage}.other
+     -> Description: spans named outside the diagnostic vocabulary, counted {stage}
+     -> Unit:
+     -> DataType: Sum
+     -> IsMonotonic: true
+     -> AggregationTemporality: Delta
+NumberDataPoints #0
+StartTimestamp: 2026-08-07 17:19:45.1644117 +0000 UTC
+Timestamp: 2026-08-07 17:19:48.4971326 +0000 UTC
+Value: 224
+"""
+
+
+def _report_with_diagnostic_metrics(**metric_totals) -> canary.CanaryReport:
+    """A passing report whose Collector output carries the two diagnostic blocks a real run makes."""
+    output = _passing_report().output + "".join(
+        _DIAGNOSTIC_RECORD.format(stage=stage) for stage in ("accepted", "exported")
+    )
+    return _passing_report(
+        output=output,
+        privacy=canary.check_privacy(output),
+        probe=codex_canary.TransportProbe(
+            metrics=canary.MetricAccounting(**metric_totals),
+            log_records_accepted=0,
+            log_records_refused=0,
+        ),
+    )
+
+
+def test_the_report_separates_agent_points_from_collector_generated_points():
+    """The three populations the gate must not conflate, each named in the document.
+
+    This is the 2026-08-07 Codex run's arithmetic: 96 points accepted from Codex at the OTLP
+    receiver, 2 manufactured by the diagnostic count connectors, 98 sent by the `debug` exporter
+    that both metric pipelines share.
+    """
+    document = _document(
+        _report_with_diagnostic_metrics(accepted=96, exported=98, refused=0, send_failed=0)
+    )
+    metrics = document["metric_accounting"]
+
+    assert metrics["accepted"] == 96
+    assert metrics["internally_generated"] == 2
+    assert metrics["available"] == 98
+    assert metrics["exported"] == 98
+    assert metrics["unresolved"] == 0
+    assert metrics["balanced"] is True
+    assert _unmet(document) == []
+    assert document["gate7"]["verdict"] == "PASS"
+
+
+def test_the_rendered_report_shows_the_metric_balance_term_by_term():
+    """A reader must be able to check 96 + 2 = 98 without opening the source."""
+    document = _document(
+        _report_with_diagnostic_metrics(accepted=96, exported=98, refused=0, send_failed=0)
+    )
+    rendered = codex_canary.render_markdown(document)
+
+    assert "`internally_generated` | `2`" in rendered
+    assert "96  accepted from Codex at the OTLP receiver" in rendered
+    assert "2  generated inside the Collector by the diagnostic count connectors" in rendered
+    assert "98  sent by the debug exporter" in rendered
+    assert "0  unresolved remainder" in rendered
+
+
+def test_connector_points_never_explain_away_a_metric_the_exporter_lost():
+    """Crediting two manufactured points explains two points and no more."""
+    document = _document(
+        _report_with_diagnostic_metrics(accepted=96, exported=91, refused=0, send_failed=0)
+    )
+
+    assert document["metric_accounting"]["internally_generated"] == 2
+    assert document["metric_accounting"]["unresolved"] == 7
+    assert "the metric accounting balanced" in _unmet(document)
+    assert document["gate7"]["verdict"] == "FAIL"
+
+
+def test_a_surplus_the_diagnostic_cannot_account_for_still_fails_the_gate():
+    """Not clamped to zero: an exporter total nothing explains is reported as it is."""
+    document = _document(
+        _report_with_diagnostic_metrics(accepted=96, exported=104, refused=0, send_failed=0)
+    )
+
+    assert document["metric_accounting"]["unresolved"] == -6
+    assert "the metric accounting balanced" in _unmet(document)
+
+
+def test_a_run_without_a_diagnostic_emission_generates_nothing_and_still_balances():
+    """The corrected term must not require the connectors to have fired."""
+    document = _document()
+
+    assert document["metric_accounting"]["internally_generated"] == 0
+    assert document["metric_accounting"]["available"] == document["metric_accounting"]["accepted"]
+    assert document["metric_accounting"]["balanced"] is True
+
+
 def test_counts_that_never_settled_fail_even_when_they_balance():
     accounting = canary.SpanAccounting(
         accepted=2, exported=2, filtered=0, refused=0, send_failed=0, settled=False

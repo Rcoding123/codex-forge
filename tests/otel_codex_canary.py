@@ -525,6 +525,14 @@ def build_document(
     accounting = report.accounting
     probe = report.probe if isinstance(report.probe, TransportProbe) else None
     metrics = probe.metrics if probe is not None else None
+    if metrics is not None:
+        # The probe read the counters while the Collector still answered; the connector-generated
+        # points can only be counted off the complete log, which exists only after shutdown
+        # flushed the final batch. Joining them here is what makes the metric equation balance
+        # for a topology whose exporter is shared by the OTLP and diagnostic metric pipelines.
+        metrics = metrics.with_internally_generated(
+            certification.count_diagnostic_metric_points(report.output)
+        )
     effective = config if config is not None else canary_configuration()
     empty = CodexTranscript()
     seen = transcript if transcript is not None else empty
@@ -581,8 +589,16 @@ def build_document(
                 getattr(accounting, "diagnostic_disagreements", ()) or ()
             ),
         },
+        # Three populations, named separately, because two of them are counted by different
+        # Collector counters and the third is their sum. `accepted` is agent-originated points at
+        # the OTLP receiver; `internally_generated` is points the diagnostic `count` connectors
+        # made out of spans and handed straight to the shared exporter; `exported` is everything
+        # the exporter sent, which is both. A reader who sees only `accepted` and `exported` would
+        # reach the same wrong conclusion this accounting used to.
         "metric_accounting": {
             "accepted": getattr(metrics, "accepted", None),
+            "internally_generated": getattr(metrics, "internally_generated", None),
+            "available": getattr(metrics, "available", None),
             "exported": getattr(metrics, "exported", None),
             "refused": getattr(metrics, "refused", None),
             "send_failed": getattr(metrics, "send_failed", None),
@@ -699,6 +715,8 @@ def render_markdown(document: Mapping) -> str:
         lines += ["", f"## {title}", "", "| Field | Value |", "| --- | --- |"]
         for name, value in sorted(document[key].items()):
             lines.append(f"| `{name}` | {_cell(value)} |")
+        if key == "metric_accounting":
+            lines += ["", *_metric_equation(document[key])]
 
     lines += ["", "## Privacy scan", "", "| Field | Value |", "| --- | --- |"]
     for name, value in sorted(document["privacy_scan"].items()):
@@ -713,6 +731,33 @@ def render_markdown(document: Mapping) -> str:
         lines.append(f"- {limitation}")
     lines.append("")
     return "\n".join(lines)
+
+
+def _metric_equation(metrics: Mapping) -> list[str]:
+    """The metric balance written out, so a reader can check the arithmetic without the source.
+
+    The exporter is shared by the OTLP metrics pipeline and the diagnostic metrics pipeline, so
+    `exported` is larger than `accepted` by however many points the `count` connectors made. That
+    is a property of the topology, not a discrepancy, and a report that printed only the two
+    counters would read as though points had appeared from nowhere.
+    """
+    if any(metrics.get(name) is None for name in ("accepted", "internally_generated", "exported")):
+        return ["The metric balance is unavailable: the run did not reach a countable state."]
+    return [
+        "Metric points enter through two doors and leave through one. The receiver counter sees "
+        "only the first door:",
+        "",
+        "```",
+        f"  {metrics['accepted']:>5}  accepted from Codex at the OTLP receiver",
+        f"+ {metrics['internally_generated']:>5}  generated inside the Collector by the "
+        "diagnostic count connectors",
+        f"= {metrics['available']:>5}  entered a metric pipeline",
+        f"- {metrics['exported']:>5}  sent by the debug exporter (both pipelines share it)",
+        f"- {metrics['refused']:>5}  refused at the receiver",
+        f"- {metrics['send_failed']:>5}  failed to send at the exporter",
+        f"= {metrics['unresolved']:>5}  unresolved remainder",
+        "```",
+    ]
 
 
 def _cell(value: object) -> str:

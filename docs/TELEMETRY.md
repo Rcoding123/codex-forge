@@ -1124,10 +1124,9 @@ logic, and it needs no other file — the Collector log is not part of the ident
 
 ## Codex telemetry canary (Gate 7 foundation)
 
-**Gate 7 has not passed.** `tests/otel_codex_canary.py` is the harness for one supervised Codex
-request that **has not been made**. No Codex process has run under it, no `-c` override has been
-accepted by a real `codex --strict-config` invocation, and nothing in this section is evidence about
-Codex. What exists is the apparatus and its refusals; what is missing is the run.
+**Gate 7 has passed.** One supervised Codex request was made on 2026-08-07 under
+`tests/otel_codex_canary.py`. Every one of the gate's 24 conditions is met, and the limitations
+below are unchanged by that — a PASS is one observed invocation, not a field inventory.
 
 Codex differs from Claude in the two ways that decide the shape of this harness:
 
@@ -1159,11 +1158,11 @@ admits inbound trace context only. Values are TOML basic strings drawn from a bo
 value that would need escaping is **refused** rather than escaped, which also means no element of the
 vector contains a backslash, a quote-inside-a-quote, or whitespace for a Windows shim to re-split.
 
-#### What this vector does not yet prove
+#### What the supervised run settled about this vector
 
-`--strict-config` acceptance is exactly what the supervised run is for. Three details are read off the
-0.146.0 binary's configuration surface rather than off a successful invocation, and each is a way the
-run can legitimately fail:
+`--strict-config` acceptance is exactly what the supervised run was for. Three details were read off
+the 0.146.0 binary's configuration surface rather than off a successful invocation, and each was a
+way the run could legitimately have failed:
 
 1. the nesting of an exporter variant — `{otlp-http={…}}` as an externally tagged table;
 2. whether `headers` is a field of that variant, and whether an empty table is accepted;
@@ -1172,8 +1171,12 @@ run can legitimately fail:
    `/v1/metrics` itself. Path-appending is the *environment* form of the setting; an explicitly
    configured OTLP/HTTP endpoint is the form the exporter posts to as written.
 
-Until one supervised run accepts it, none of the three may be described as settled, and the Codex
-correlation mechanism stays **proposed**.
+The 2026-08-07 run accepted the vector as written: `codex --strict-config` exited 0, and 224 spans
+and 96 metric points reached the Collector's OTLP receiver over the configured loopback endpoints —
+which no unrecognized-key failure and no unposted-to endpoint could have produced. All three are
+settled for 0.146.0 against that one invocation, and the Codex correlation mechanism is **observed**
+rather than proposed. It is still one binary version and one invocation: a Codex upgrade re-opens
+all three, which is what the version pin exists to catch.
 
 ### The exact Codex vector
 
@@ -1236,7 +1239,7 @@ One JSON and one Markdown file under the chosen output directory, schema
 | telemetry transport | logs exporter, whether a logs pipeline is declared, log records accepted and refused, whether any log signal reached the exporter, Collector exit, whether the counts settled |
 | correlation | three booleans: `forge.invocation.id` observed after redaction, its value matched the locally held one, `forge.telemetry.contract.version` observed |
 | span accounting | accepted, exported, deliberately filtered, refused, send-failed, unresolved remainder, and the bounded by-name breakdown |
-| metric accounting | metric points accepted, exported, refused, send-failed, unresolved remainder |
+| metric accounting | metric points accepted from the agent, points the diagnostic connectors generated inside the Collector, the two summed, points exported, refused, send-failed, unresolved remainder |
 | privacy check | every check that ran, every finding, and the forbidden-output scan of the report itself |
 | limitations | what a PASS still does not mean |
 
@@ -1250,10 +1253,65 @@ correlation attribute, any log record or logs pipeline, a malformed JSONL line, 
 exactly `CANARY_OK`, a timeout, a nonzero exit from Codex or the Collector, a privacy finding, or a
 forbidden value in the report.
 
-### The later supervised run
+#### Metric points enter through two doors
 
-Not part of this slice. It is a separate, supervised event that needs its own approval, and it is the
-only thing that can produce a Gate 7 `PASS`.
+The metric signal does not balance the way the span signal does, and the first supervised run is what
+made that visible: it reported 96 metric points accepted and 98 sent, an unresolved remainder of
+**-2**. Nothing was lost and nothing appeared from nowhere. The certification topology runs *two*
+metric pipelines into the *same* `debug` exporter:
+
+| Pipeline | Source | Counted by `receiver_accepted_metric_points`? | Counted by `exporter_sent_metric_points`? |
+| --- | --- | --- | --- |
+| `metrics` | the `otlp` receiver — the agent's own points | yes | yes |
+| `metrics/diagnostic` | the two `count/diagnostic_*` connectors | **no** | yes |
+
+A `count` connector manufactures metric points out of spans. They are real points and they really do
+leave through the exporter, but no receiver ever accepted them, so `accepted == exported` is not a
+balance equation for this topology. The equation the report checks is:
+
+```
+  accepted (agent, at the OTLP receiver)
++ internally generated (the diagnostic count connectors)
+= entered a metric pipeline
+- exported  - refused  - send-failed
+= unresolved remainder
+```
+
+The internally generated term is **measured, not assumed**: it is the number of diagnostic data
+points the exporter actually printed, counted by
+`otel_certification.count_diagnostic_metric_points()` off the complete `collector.log`. A run whose
+connectors emitted nothing carries a zero there and the equation collapses back to the receiver-only
+form. Crediting the connectors explains the points they made and no others — a genuine export loss
+is still an unresolved remainder, and a surplus larger than the diagnostic is still reported as a
+negative one rather than clamped.
+
+Note that one diagnostic block is **one** metric point regardless of the count it carries: the run
+above emitted `forge.diagnostic.span.accepted.other = 224` and
+`forge.diagnostic.span.exported.other = 224` — two data points saying 224, not 224 points. That is
+the distinction the original accounting missed.
+
+### The supervised run
+
+Made 2026-08-07. One request, one Collector, one report. What it observed:
+
+| | |
+| --- | --- |
+| Codex | exit 0, no timeout, 4 JSONL lines, 0 malformed, exactly one assistant message, exactly `CANARY_OK` |
+| Spans | 224 accepted, 224 exported, 0 filtered, 0 refused, 0 send-failed, **0 unresolved**; every span in the `other` bucket, diagnostic and counters in agreement |
+| Metric points | 96 accepted from Codex, 2 generated by the diagnostic connectors, 98 exported, 0 refused, 0 send-failed, **0 unresolved** |
+| Logs | exporter `none`, no logs pipeline declared, 0 log records accepted, no log signal at the exporter |
+| Correlation | `forge.invocation.id` observed after redaction and equal to the locally held value; `forge.telemetry.contract.version` observed |
+| Privacy | all 5 checks ran, 0 findings; the forbidden-output scan of the report itself passed |
+| Collector | exit 0, counts settled |
+
+The run's own report recorded the metric remainder as **-2** and a verdict of `FAIL`, because the
+metric equation at the time compared the OTLP receiver's total against an exporter total that also
+covers the diagnostic pipeline. The two extra points are the two diagnostic data points in that run's
+`collector.log`, and the corrected equation above resolves them exactly: 96 + 2 - 98 = 0. Re-deriving
+the verdict from that run's own evidence meets all 24 conditions. No further Codex request was needed
+to reach a `PASS` — the numbers were already recorded; only the arithmetic over them was wrong.
+
+Re-running it (a separate supervised event that needs its own approval):
 
 ```powershell
 $env:OTELCOL_PATH = 'C:\Tools\OpenTelemetry\otelcol-contrib\0.158.0\otelcol-contrib.exe'

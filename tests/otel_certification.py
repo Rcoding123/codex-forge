@@ -1344,6 +1344,7 @@ def counter_total(
 
 _METRIC_NAME_LINE = re.compile(r"^\s*->\s*Name:\s*(\S+)\s*$")
 _VALUE_LINE = re.compile(r"^\s*Value:\s*(-?\d+)")
+_DATA_POINT_LINE = re.compile(r"^\s*\w*DataPoints\s+#\d+\s*$")
 
 
 def parse_diagnostic_counts(output: str) -> dict[str, dict[str, int]]:
@@ -1373,6 +1374,42 @@ def parse_diagnostic_counts(output: str) -> dict[str, dict[str, int]]:
                 totals[stage][bucket] = totals[stage].get(bucket, 0) + int(value.group(1))
                 break
     return totals
+
+
+def count_diagnostic_metric_points(output: str) -> int:
+    """How many metric *data points* the `count` connectors manufactured inside the Collector.
+
+    `parse_diagnostic_counts` totals the counter *values* -- how many spans each bucket saw.
+    This counts the carriers instead, and the two are different numbers for the same blocks: a
+    diagnostic block reading `Value: 224` is **one** metric point that says 224, not 224 metric
+    points.
+
+    That distinction is what the metric accounting was getting wrong. The diagnostic metrics
+    pipeline shares the `debug` exporter with the OTLP metrics pipeline, so every point counted
+    here is included in `otelcol_exporter_sent_metric_points`. None of them is included in
+    `otelcol_receiver_accepted_metric_points`: a connector is not a receiver, and these points
+    were made from spans rather than accepted from an agent. Reading the two counters as though
+    they measured the same population is what drove the remainder negative.
+
+    Read this off the *complete* log, after shutdown has flushed the final batch. An early read
+    undercounts for the same reason an early counter read does.
+    """
+    allowed = set(diagnostic_metric_names())
+    lines = output.splitlines()
+    points = 0
+    for index, line in enumerate(lines):
+        matched = _METRIC_NAME_LINE.match(line)
+        if not matched or matched.group(1) not in allowed:
+            continue
+        # Count every data point under this descriptor, not one per block: a future diagnostic
+        # that did carry a dimension would emit several, and silently counting one would
+        # under-explain the exporter total rather than leaving an honest remainder.
+        for following in lines[index + 1 :]:
+            if _METRIC_NAME_LINE.match(following):
+                break
+            if _DATA_POINT_LINE.match(following):
+                points += 1
+    return points
 
 
 def unknown_diagnostic_metric_names(output: str) -> list[str]:

@@ -15,6 +15,10 @@ So this module reads four numbers instead of two, and refuses to call a run clea
 A nonzero unresolved remainder fails the canary. It is the only honest verdict available: something
 left the pipeline for a reason nothing in the run accounts for.
 
+The metric signal needs a *different* equation, not the same one with the nouns swapped, because it
+has a second source: the diagnostic `count` connectors make metric points out of spans, and those
+points reach the exporter without ever crossing a receiver. See :class:`MetricAccounting`.
+
 Alongside the totals, the bounded span-name diagnostic in :mod:`otel_certification` reports the same
 two ends broken down by an allowlisted span-name vocabulary, so a remainder can be attributed to a
 bucket without exporting anything from the spans themselves.
@@ -39,7 +43,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import otel_certification as certification
@@ -113,25 +117,68 @@ class SpanAccounting:
 
 @dataclass(frozen=True)
 class MetricAccounting:
-    """The metric points the Collector took in, and how many left through the certified exporter.
+    """Every metric point that entered the Collector's metric pipelines, and where each went.
 
     Metrics are a second signal with its own counters, and a span accounting says nothing about
     them. An agent canary that enables metrics needs both, because a metric point that the receiver
     accepted and the exporter never sent is the same unexplained loss a missing span would be.
+
+    **The metric signal has two sources, and only one of them is a receiver.** The certification
+    topology runs two metric pipelines into the same `debug` exporter:
+
+        metrics             otlp receiver          -> ... -> debug
+        metrics/diagnostic  the two count/... connectors -> ... -> debug
+
+    The `count` connectors manufacture metric points out of spans. Those points are counted by
+    `otelcol_exporter_sent_metric_points` -- they really do leave through the exporter -- and are
+    *not* counted by `otelcol_receiver_accepted_metric_points`, because a connector is not a
+    receiver and nothing accepted them from an agent. So
+
+        accepted == exported
+
+    is not a balance equation for this topology, and reading it as one drives the remainder
+    negative whenever the diagnostic emits anything. The equation this class actually checks is
+
+        accepted (agent, at the OTLP receiver) + internally generated (connectors)
+            =  exported  +  refused  +  send-failed  +  unresolved remainder
+
+    ``internally_generated`` is measured, not assumed: it is the number of diagnostic data points
+    the exporter printed (:func:`otel_certification.count_diagnostic_metric_points`), so a run
+    where the connectors emitted nothing carries a zero here and the equation collapses back to
+    the receiver-only form. A remainder is still a remainder -- crediting the connectors explains
+    the points they made and no others.
     """
 
     accepted: int
     exported: int
     refused: int
     send_failed: int
+    # Points created inside the Collector by the diagnostic `count` connectors. Zero on any
+    # topology without them, which is why it defaults rather than being required at construction.
+    internally_generated: int = 0
+
+    @property
+    def available(self) -> int:
+        """Every metric point that entered a metric pipeline, from either source."""
+        return self.accepted + self.internally_generated
 
     @property
     def unresolved(self) -> int:
-        return self.accepted - self.exported - self.refused - self.send_failed
+        """Points that entered a pipeline and that nothing in this run explains the fate of."""
+        return self.available - self.exported - self.refused - self.send_failed
 
     @property
     def balanced(self) -> bool:
         return self.unresolved == 0
+
+    def with_internally_generated(self, points: int) -> MetricAccounting:
+        """This accounting, with the connector-generated points filled in from exporter output.
+
+        The counters are read while the Collector still answers; the diagnostic point count can
+        only be read off the complete log, after shutdown flushed the last batch. They arrive at
+        different moments, so they are joined here rather than at construction.
+        """
+        return replace(self, internally_generated=points)
 
 
 COUNTER_ACCEPTED_POINTS = "otelcol_receiver_accepted_metric_points"
@@ -142,6 +189,12 @@ COUNTER_SEND_FAILED_POINTS = "otelcol_exporter_send_failed_metric_points"
 
 def read_metric_accounting(port: int) -> MetricAccounting:
     """Read the metric-point totals from the Collector's own loopback internal telemetry.
+
+    The counters alone cannot say how many points the diagnostic connectors made, so
+    ``internally_generated`` is left at zero here and filled in by
+    :meth:`MetricAccounting.with_internally_generated` once the complete exporter output is
+    readable. A caller that reads this and stops will see the connectors' points as an
+    unexplained surplus — which is the honest failure, not a silent one.
 
     There is no `filtered` term. `filter/unredactable` drops metric *data points* under its own
     span-oriented counter name, so a deliberate metric drop shows up as an unresolved remainder
