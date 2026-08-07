@@ -23,8 +23,17 @@ def _build_process_command(executable: str, arguments: list[str]) -> list[str]:
 
     if os.name == "nt" and suffix in {".cmd", ".bat"}:
         comspec = os.environ.get("ComSpec") or os.environ.get("COMSPEC") or "cmd.exe"
-        command_line = subprocess.list2cmdline([resolved, *arguments])
-        return [comspec, "/d", "/s", "/c", command_line]
+        # The shim path and its arguments stay separate elements: `subprocess` runs
+        # `list2cmdline` over whatever it is handed, so pre-flattening here would quote
+        # everything twice. The second pass rewrites the first pass's real quotes as
+        # literal `\"`, which `cmd.exe` does not undo, so an argument containing a space
+        # arrives at the shim's child split at every space.
+        #
+        # `call` is load-bearing: with `/s`, `cmd.exe` strips the first and last quote of
+        # the command line whenever it begins with a quote, which mangles the vector as
+        # soon as the shim path itself needs quoting. A leading unquoted word means there
+        # is no leading quote to strip, so every quote reaches the shim as written.
+        return [comspec, "/d", "/s", "/c", "call", resolved, *arguments]
 
     return [resolved, *arguments]
 

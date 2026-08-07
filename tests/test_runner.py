@@ -97,13 +97,25 @@ out.write_text(json.dumps({'status':'completed'}), encoding='utf-8')
 
 
 def test_build_process_command_wraps_windows_shims(monkeypatch):
+    """The shim path and its arguments stay separate elements, so `subprocess` quotes them once.
+
+    Flattening them here would quote them twice and split any argument containing a space; see
+    tests/test_windows_shim_quoting.py for the child-side proof.
+    """
     monkeypatch.setattr("codex_forge.runner.os.name", "nt")
     monkeypatch.setattr("codex_forge.runner.shutil.which", lambda _: r"C:\Tools With Space\codex.cmd")
     monkeypatch.setenv("ComSpec", r"C:\Windows\System32\cmd.exe")
     command = _build_process_command("codex", ["exec", "quoted value"])
-    assert command[:4] == [r"C:\Windows\System32\cmd.exe", "/d", "/s", "/c"]
-    assert '"C:\\Tools With Space\\codex.cmd"' in command[4]
-    assert '"quoted value"' in command[4]
+    assert command == [
+        r"C:\Windows\System32\cmd.exe",
+        "/d",
+        "/s",
+        "/c",
+        "call",
+        r"C:\Tools With Space\codex.cmd",
+        "exec",
+        "quoted value",
+    ]
 
 
 def test_runner_timeout_is_bounded_and_preserved(tmp_path: Path, monkeypatch):
