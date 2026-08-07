@@ -258,7 +258,7 @@ Schema `1.1` — requested explicitly, adds the categories the worker reported:
   "total_tokens": 1500,
   "cache_hit_ratio": 0.75,
   "accounting_basis": "reported_token_categories",
-  "budget_basis": "raw_input_plus_output"
+  "budget_basis": "fresh_input_plus_output"
 }
 ```
 
@@ -270,22 +270,27 @@ them are observable from a persisted run record.
 |---|---|---|---|
 | `input_tokens` | 1.0 | integer | Reported input tokens. Includes the cached portion. |
 | `output_tokens` | 1.0 | integer | Reported output tokens. Includes the reasoning portion. |
-| `total_tokens` | 1.0 | integer | `sum(input_tokens + output_tokens)`. Unchanged meaning and value. |
+| `total_tokens` | 1.0 | integer | `sum(input_tokens + output_tokens)`. Raw traffic, informational. Unchanged meaning and value. |
 | `cached_input_tokens` | 1.1 | integer | The subset of `input_tokens` served from the prompt cache. |
 | `fresh_input_tokens` | 1.1 | integer | `sum(max(0, input_tokens - cached_input_tokens))` per run. |
 | `cache_write_input_tokens` | 1.1 | integer | Reported input tokens written into the cache. |
 | `reasoning_output_tokens` | 1.1 | integer | The subset of `output_tokens` spent on reasoning. |
-| `raw_total_tokens` | 1.1 | integer | `sum(input_tokens + output_tokens)`, always equal to `total_tokens`. |
+| `raw_total_tokens` | 1.1 | integer | `sum(input_tokens + output_tokens)`, always equal to `total_tokens`. Traffic, not budget. |
 | `cache_hit_ratio` | 1.1 | number | `cached_input_tokens / input_tokens`, `0.0` when no input was reported, always within `[0.0, 1.0]`. |
 | `accounting_basis` | 1.1 | string | `"reported_token_categories"`. |
-| `budget_basis` | 1.1 | string | `"raw_input_plus_output"` — what `token_limit` is compared against. |
+| `budget_basis` | 1.1 | string | `"fresh_input_plus_output"` — what `token_limit` is compared against. |
 
 `cached_input_tokens` and `reasoning_output_tokens` are subtotals of `input_tokens` and
 `output_tokens`, so neither is ever added into a total; adding them would double-count. Only
-`input_tokens` and `output_tokens` are summed, which is exactly the value the token budget has always
-enforced. Making these categories visible changed no budget decision, and both versions report the
-same `input_tokens`, `output_tokens`, and `total_tokens` for the same task — 1.1 adds detail, it does
-not restate the total.
+`input_tokens` and `output_tokens` are summed into `total_tokens` and `raw_total_tokens`, and both
+versions report the same `input_tokens`, `output_tokens`, and `total_tokens` for the same task — 1.1
+adds detail, it does not restate the total.
+
+Those raw sums are traffic, not budget. `token_limit` is compared against new work only —
+`fresh_input_tokens + output_tokens`, as `budget_basis` states. A cached input read consumes zero
+task budget: it is inside `input_tokens` and outside `fresh_input_tokens`. `reasoning_output_tokens`
+is not added on top of `output_tokens`, and `cache_write_input_tokens` is not added on top of the
+fresh-input term, because the reported contract already carries it inside `input_tokens`.
 
 Values a run reported as missing, null, negative, boolean, non-numeric, or otherwise unusable are
 counted as `0`. No category and no derived field can be negative, and an unrecognized member of a
@@ -498,7 +503,10 @@ Field notes:
   the task; the existing controller loop picks it up.
 - `token_limit` is the active configured task limit, not a per-task value. A configured limit of `0`
   means the controller does not enforce a token budget. The limit is compared against
-  `token_usage.total_tokens`, as `token_usage.budget_basis` states.
+  `token_usage.fresh_input_tokens + token_usage.output_tokens`, as `token_usage.budget_basis`
+  states — not against `token_usage.total_tokens`, which is raw traffic. The controller checks that
+  quantity at phase boundaries, so one in-flight phase can carry a task past the limit before the
+  next check stops it.
 
 ### Submission failures
 

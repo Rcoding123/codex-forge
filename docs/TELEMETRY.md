@@ -136,7 +136,8 @@ counts:
 These come from the same `codex_forge.usage` normalization the control-plane JSON contract and the
 token budget use. Telemetry performs no token arithmetic of its own, so a span can never disagree
 with what `forge task show --json` reports for the same task. `forge.usage.budget_basis` records
-that the budget still counts raw input + output, unchanged by this slice.
+which quantity the budget is enforced against — `fresh_input_plus_output`, new work only.
+`forge.usage.raw_total_tokens` stays the raw input + output traffic and is informational.
 
 ### Resource attributes
 

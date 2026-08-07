@@ -7,6 +7,7 @@ import pytest
 
 from codex_forge.models import Task, TaskState
 from codex_forge.orchestrator import Orchestrator, TaskUsageBudgetExceeded
+from codex_forge.usage import aggregate_token_usage
 
 
 class FakeDB:
@@ -19,7 +20,7 @@ class FakeDB:
         self.updates.append((task_id, kwargs))
 
     def task_token_usage(self, task_id: str):
-        return {"input_tokens": self.usage, "output_tokens": 0, "total_tokens": self.usage}
+        return aggregate_token_usage([{"input_tokens": self.usage, "output_tokens": 0}])
 
     def add_decision(self, *args):
         self.decisions.append(args)

@@ -91,7 +91,7 @@ Forge enforces complementary bounds:
 - task attempt limit;
 - validation/review repair-cycle limit;
 - identical-failure fingerprint threshold;
-- cumulative per-task input/output token budget;
+- cumulative per-task new-token budget (fresh input + output, excluding cached input reads), checked at phase boundaries;
 - process-scoped singleton lock for the controller.
 
 An unchanged deterministic failure reaches `FAILED` rather than cycling. A human-dependent ambiguity reaches `NEEDS_DECISION`. Limits are durable configuration and are not weakened automatically.

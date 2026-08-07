@@ -13,8 +13,12 @@ Observed usage contract, Codex CLI 0.146.0 `turn.completed` event:
 the reasoning *subset* of `output_tokens`. Both mirror the provider fields the installed binary
 carries verbatim — `input_tokens_details.cached_tokens` and `output_tokens_details.reasoning_tokens`
 — which are documented subtotals of their parent count. Neither is a sibling category, so neither is
-ever added into a total: `raw_total_tokens` stays `input_tokens + output_tokens`, which is exactly
-what this controller counted before this module existed.
+ever added into a total: `raw_total_tokens` stays `input_tokens + output_tokens`, the raw traffic a
+task moved.
+
+Raw traffic is not the task budget. Only new work consumes a budget, so the enforced quantity is
+`fresh_input_tokens + output_tokens` — see `budget_used_tokens`. A cached input read is work the
+provider already did; it moves bytes, not budget.
 
 This module deliberately reports categories only. It assigns no price, no billable-token value, and
 no cache discount, because those differ by model, plan, and date and none of them are observable
@@ -29,10 +33,10 @@ from typing import Any, Iterable, Mapping
 
 
 # `accounting_basis` names what the numbers are: the categories the worker reported, not a derived
-# billing model. `budget_basis` names what the token budget still counts, so a reader can see that
-# the budget did not silently change meaning when the categories became visible.
+# billing model. `budget_basis` names the one quantity the token budget is enforced against, so a
+# reader never has to guess which of the reported categories a limit applies to.
 ACCOUNTING_BASIS = "reported_token_categories"
-BUDGET_BASIS = "raw_input_plus_output"
+BUDGET_BASIS = "fresh_input_plus_output"
 
 # Fields taken verbatim from a run's reported usage. Anything else in the record is ignored, so a
 # usage object that later gains a member cannot silently join a total under this contract.
@@ -101,6 +105,37 @@ def normalize_run_usage(usage: Any) -> dict[str, int]:
     return counts
 
 
+def budget_used_tokens(usage: Any) -> int:
+    """Return the tokens of new work a task has consumed, which is what a token budget bounds.
+
+    This is the single definition of the budgeted quantity, `fresh_input_tokens + output_tokens`.
+    Enforcement and the reporting around it read it from here rather than restating the sum, so the
+    basis cannot drift between the value that stops a task and the value `budget_basis` advertises.
+
+    Excluded by construction:
+
+    * `cached_input_tokens`, because a cached read is input the provider already had. It is inside
+      `input_tokens` and outside `fresh_input_tokens`, so it consumes no budget at all.
+    * `reasoning_output_tokens`, because it is a subset of `output_tokens` and adding it would
+      charge reasoning twice.
+    * `cache_write_input_tokens`, because the reported contract carries it inside `input_tokens`,
+      so the fresh-input term already accounts for it. Adding it separately would double-count.
+
+    Accepts an `aggregate_token_usage` total or a single `normalize_run_usage` record. A record that
+    reports the categories without the derived field is counted from its own input minus its cached
+    subset, so a missing derivation can never silently reduce the count to output alone.
+    """
+    counts = parse_usage_document(usage)
+    fresh = counts.get("fresh_input_tokens")
+    if fresh is None:
+        fresh = max(
+            0,
+            coerce_token_count(counts.get("input_tokens"))
+            - coerce_token_count(counts.get("cached_input_tokens")),
+        )
+    return coerce_token_count(fresh) + coerce_token_count(counts.get("output_tokens"))
+
+
 def cache_hit_ratio(cached_input_tokens: int, input_tokens: int) -> float:
     """Return cached input as a fraction of reported input.
 
@@ -115,9 +150,10 @@ def cache_hit_ratio(cached_input_tokens: int, input_tokens: int) -> float:
 def aggregate_token_usage(usages: Iterable[Any]) -> dict[str, Any]:
     """Aggregate persisted run usage records into one categorized task total.
 
-    `total_tokens` keeps its established meaning — the raw `input_tokens + output_tokens` sum — so
-    existing consumers and the token budget observe exactly the value they observed before. The
-    categorized fields are additive visibility on top of that same sum.
+    `total_tokens` keeps its established meaning — the raw `input_tokens + output_tokens` sum, equal
+    to `raw_total_tokens` — so every existing consumer and the schema 1.0 projection observe exactly
+    the value they observed before. That sum is traffic, reported for diagnostics; the budgeted
+    quantity is `budget_used_tokens`, which `budget_basis` names.
     """
     totals = dict.fromkeys(REPORTED_FIELDS + DERIVED_FIELDS, 0)
     for usage in usages:

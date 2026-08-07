@@ -46,6 +46,20 @@ All notable changes to Codex Forge are documented here. This project follows sem
   one. Nothing is enabled by the approval, and Forge persisted usage remains the authoritative basis
   for accounting, budgets, retries, and task state.
 
+### Changed
+
+- The per-task token budget is enforced against new work only: `fresh_input_tokens + output_tokens`,
+  centralized in `codex_forge.usage.budget_used_tokens`. Cached input reads consumed the configured
+  budget before this change even though the provider had already served them, so a task doing a small
+  amount of new work could be stopped by its own prompt cache. `reasoning_output_tokens` and
+  `cache_write_input_tokens` are still never added on top, because the reported contract carries each
+  inside the parent count already being charged. `token_usage.budget_basis` now reports
+  `fresh_input_plus_output`; `total_tokens` and `raw_total_tokens` keep their raw
+  `input_tokens + output_tokens` traffic meaning and remain informational, so schema 1.0 is unchanged.
+  Enforcement still happens at both phase boundaries — before a phase starts and after a completed
+  phase is recorded — and one in-flight phase can still overshoot the remainder, because neither the
+  runner nor codex-cli 0.146.0 exposes a per-request token cap.
+
 ## [0.2.0] - 2026-08-02
 
 ### Added

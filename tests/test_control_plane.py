@@ -304,7 +304,7 @@ def test_explicit_1_1_emits_the_categorized_contract(tmp_path: Path, capsys):
     assert usage["total_tokens"] == 2262181
     assert usage["cache_hit_ratio"] == round(2118400 / 2245133, 6)
     assert usage["accounting_basis"] == "reported_token_categories"
-    assert usage["budget_basis"] == "raw_input_plus_output"
+    assert usage["budget_basis"] == "fresh_input_plus_output"
     assert payload["data"]["task"]["state"] == "READY"
 
 

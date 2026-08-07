@@ -338,7 +338,9 @@ class ForgeDB:
 
         The categories are derived from the persisted `usage_json` rather than from normalized
         columns, so runs recorded before the categories were exposed report the same detail as runs
-        recorded today. `total_tokens` keeps its previous meaning and value.
+        recorded today. `total_tokens` keeps its previous meaning and value — the raw
+        `input_tokens + output_tokens` traffic — while the token budget is enforced against
+        `usage.budget_used_tokens` of this same aggregate.
         """
         with self.connect() as connection:
             rows = connection.execute(

@@ -360,8 +360,9 @@ def usage_attributes(counts: Mapping[str, Any]) -> dict[str, Any]:
 
     Accepts either one run's `normalize_run_usage` output or a task's `aggregate_token_usage`
     totals — both use the same field names. No token arithmetic happens here: the categories and
-    the cache ratio come from `codex_forge.usage`, so telemetry can never disagree with the number
-    the control-plane contract and the token budget report for the same task.
+    the cache ratio come from `codex_forge.usage`, so telemetry can never disagree with the numbers
+    the control-plane contract reports for the same task. `ATTR_BUDGET_BASIS` names which of those
+    categories the token budget is enforced against; the spans carry no budget arithmetic.
 
     Every field goes through the shared `coerce_token_count`, which makes this function total. A
     malformed count degrades to zero rather than raising an exception that instrumentation would

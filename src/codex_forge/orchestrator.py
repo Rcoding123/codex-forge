@@ -39,6 +39,7 @@ from .telemetry import (
     phase_usage_attributes,
     usage_attributes,
 )
+from .usage import BUDGET_BASIS, budget_used_tokens
 from .utils import ControllerAlreadyRunning, controller_lock, ensure_dir, flatten_unique, tail_text, utc_now
 from .validation import run_validations
 
@@ -360,6 +361,9 @@ class Orchestrator:
             phase_name=phase_name, cycle=cycle, role=role, model=model, effort=effort
         ) as span:
             phase_dir = ensure_dir(artifact_dir / phase)
+            # Both boundaries enforce the same new-token basis: this one refuses to start a phase
+            # the budget cannot cover, the one below stops the task as soon as a completed phase
+            # has spent it.
             self._enforce_usage_budget(task)
             run_id = self.db.record_run_start(task.id, phase, model, effort, phase_dir)
             result = self.runner.run(
@@ -481,13 +485,27 @@ class Orchestrator:
         return self.config.escalation_effort if task.risk.lower() in {"critical", "high"} else self.config.review_effort
 
     def _enforce_usage_budget(self, task: Task) -> None:
+        """Stop a task whose new-token usage has reached the configured ceiling.
+
+        The budget counts new work only — `budget_used_tokens`, the fresh input plus the output of
+        every completed run. Cached input reads are excluded, so a task that re-reads a large cached
+        prompt many times is not charged for it. `raw_total_tokens` stays available for traffic
+        diagnostics and is reported in the error, but it decides nothing.
+
+        This runs at phase boundaries — before a Codex phase starts and after its run is recorded —
+        so a single in-flight phase can overshoot the remaining budget. The runner has no
+        intra-request token cap to enforce against, and Codex CLI 0.146.0 exposes none.
+        """
         if self.config.max_task_tokens <= 0:
             return
         usage = self.db.task_token_usage(task.id)
-        if usage["total_tokens"] >= self.config.max_task_tokens:
+        budgeted = budget_used_tokens(usage)
+        if budgeted >= self.config.max_task_tokens:
             raise TaskUsageBudgetExceeded(
-                f"TOKEN_BUDGET_EXCEEDED: {usage['total_tokens']} used of "
-                f"{self.config.max_task_tokens} configured tokens for {task.id}."
+                f"TOKEN_BUDGET_EXCEEDED: {budgeted} new tokens used of "
+                f"{self.config.max_task_tokens} configured tokens for {task.id} "
+                f"(basis {BUDGET_BASIS}; raw traffic {usage['raw_total_tokens']} tokens, "
+                f"cached input {usage['cached_input_tokens']} tokens not budgeted)."
             )
 
     def _recover_interrupted_tasks(self) -> None:
