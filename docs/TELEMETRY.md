@@ -685,7 +685,9 @@ not weakened in the meantime.
   telemetry stay disabled, and no production path emits agent telemetry.
 - **No authority moved.** Forge persisted usage stays authoritative, native metrics stay
   observational evidence only, and accounting, budgets, retries, and task state are unchanged.
-- **Codex is untouched.** No Codex canary has run; Gates 7–8 are where they were.
+- **Codex is untouched by *this* run.** Codex has since had gates of its own — see
+  [Gate 7](#codex-telemetry-canary-gate-7-foundation) and
+  [Gate 8](#codex-field-inventory-gate-8) — and neither was passed by anything on this page.
 
 ## Agent correlation primitives (Gate 4)
 
@@ -1333,8 +1335,8 @@ $env:OTELCOL_PATH = 'C:\Tools\OpenTelemetry\otelcol-contrib\0.158.0\otelcol-cont
 ### What Gate 7 does not change
 
 - **Gate 7 is not a field inventory.** It observes one invocation. No Codex resource, span, event, or
-  metric attribute has been individually inspected or approved — that is **Gate 8**, and it needs its
-  own manifest and its own supervised run.
+  metric attribute is individually inspected or approved by it — that is
+  [Gate 8](#codex-field-inventory-gate-8), which reads this run's own evidence.
 - **Normal Forge execution remains unwired.** No production module imports these builders,
   `CodexRunner` emits no `-c otel` override and no `OTEL_*` variable, and native Codex telemetry stays
   disabled outside the harness. A test runs a real `CodexRunner.run()` against a recording executable
@@ -1344,6 +1346,127 @@ $env:OTELCOL_PATH = 'C:\Tools\OpenTelemetry\otelcol-contrib\0.158.0\otelcol-cont
   public JSON contract changes.
 - **Native telemetry proves nothing about cost or quota.** Token counts on a span are the model's
   report of one request — not a bill, and not a remaining balance.
+
+## Codex field inventory (Gate 8)
+
+**Gate 8 has passed.** Every field the successful Gate 7 run exported after redaction is now
+inventoried and decided: **381 observed, 372 approved, 9 refused, 0 UNKNOWN, 0 UNAPPROVED, and a zero
+unresolved remainder**. The approvals are in `ops/otel/codex-field-approvals.yaml`, pinned to
+codex-cli 0.146.0 under Collector 0.158.0.
+
+**No second Codex request was made, and none was needed.** The 2026-08-07 run's `debug` exporter was
+already at `verbosity: detailed`, so it printed every resource attribute, scope, span name, span
+attribute, event, and metric descriptor that survived the privacy pipeline. Gate 8 is a re-reading of
+that output, not a new invocation.
+
+### It reuses Gate 6 rather than repeating it
+
+The parser, the value classifier, the safe-identifier policy, the manifest reader, the comparison,
+the forbidden-output scan, and the document builder are all
+[Gate 6's](#field-inventory-gate-6), in `tests/otel_inventory.py`, used unchanged. Four things are
+new, and three of them are data rather than machinery:
+
+| | |
+| --- | --- |
+| `tests/otel_codex_evidence.py` | the observation — every distinct name the run exported, plus each name's bounded descriptors, as a table |
+| `ops/otel/codex-field-approvals.yaml` | the approvals, under `forge.codex.field-approvals/1` so neither manifest can be loaded in the other's place |
+| `tests/otel_codex_inventory.py` | the Codex manifest loader, the Gate 7 run facts, and the Gate 8 verdict |
+| `tests/test_otel_codex_field_inventory.py` | the certification, including the fail-closed tests |
+
+Observation and approval stay two files, for the reason Gate 6 gave: an observation that edits its
+own approval is not an approval. The evidence table holds no trace identifier, span identifier,
+timestamp, measurement, or invocation identifier from that run, and the three identifier-shaped
+values its renderer needs are built out of `"0"` at import time.
+
+### What the run exported
+
+| Surface | Fields | What it turned out to be |
+| --- | --- | --- |
+| resource attributes | 4 | `service.name` (`codex_exec`) and `service.version` (`0.146.0`), on each of the two signals |
+| instrumentation scopes | 3 | `codex_exec` on traces, `codex` on metrics, and the Collector's own count connector |
+| span names | 109 | Codex function and phase names — `session_init`, `build_tool_router`, `codex.exec` |
+| span attributes | 220 | `forge.invocation.id` and `forge.telemetry.contract.version` on all 109, plus `gen_ai.usage.input_tokens` and `gen_ai.usage.output_tokens` on the one span that talks to the API |
+| span events | 9 | seven distinct names, **every one refused** — see below |
+| metric names | 36 | 34 native Codex instruments and Forge's two span-count connectors |
+| data point attributes | **0** | not one metric point carried an attribute after redaction |
+
+The attribute surface is the striking number: six distinct keys across 224 spans and 96 metric
+points. `keep_keys` in `transform/privacy` is an allowlist, so everything Codex 0.146.0 put on a
+resource, scope, span, event, or data point that the allowlist does not name was deleted before the
+exporter saw it — including the identity and content keys the certification names.
+
+### What was approved
+
+Names and shapes, and nothing else. Span names, metric names, scope names, the two resource
+attributes, Forge's two correlation attributes, and the two token counters — ordinary local-safe
+telemetry metadata saying *which* step ran, never *what* it ran on. No prompt, response, identity,
+path, URL, secret, raw identifier, link, exemplar, or log record survived the pipeline to be
+reviewed, and the logs signal was never on: `otel.exporter` is `none` and the Collector declares no
+logs pipeline.
+
+Four values may be printed verbatim, each allowlisted by key under `static_values`: `codex_exec`,
+`1.0`, the unit `ms`, and three instrument descriptions. Everything else is reported as a class —
+`forge.invocation.id` appears as `lowercase-hex-32`, and the identifier itself is never written down.
+
+Sixteen names needed a reviewer's explicit decision to be printable at all. Ten span names and six
+metric names trip the safe-identifier policy's *content-bearing word* check on `prompt` or
+`response`, or its *conservative grammar* check on a `/` — `build_prompt`, `handle_responses`,
+`thread/start`, `codex.responses_api_overhead.duration_ms`. They name code, not content, so they were
+admitted through the manifest vocabulary. That waiver is bounded and tested: every name in the Codex
+vocabulary must still be plain ASCII with no whitespace, backslash, colon, `@`, `=`, or `?`, so
+vocabulary membership can never readmit a path, a URL, an address, or a credential.
+
+### The one finding: Codex span-event names are source locations
+
+Codex 0.146.0 names a span event after the Rust source location that emitted it —
+`event <crate>\src\…\<file>.rs:<line>`. That name carries a relative source path, a space, and a
+colon, and it fails four of the safe-identifier policy's eleven checks.
+
+**Nothing in the pipeline can remove it.** An event name is not an attribute, so `keep_keys` cannot
+reach it, and Collector 0.158.0 offers no processor that rewrites a span event's name. So Gate 8 does
+what the contract asks when something cannot be reviewed: it refuses. All nine observed events are
+`BLOCKED`, they are keyed in the manifest by SHA-256 fingerprint, and neither the manifest nor any
+report reproduces one. `event_names` in the vocabulary is empty, and that is a decision rather than
+an omission.
+
+This is the finding a Codex telemetry slice must resolve before it is enabled. Refusing the name in
+an approval manifest is not the same as keeping it off the wire: the events reached the exporter in
+this run and would reach it again. Dropping span events at the Collector is the change that would
+close it, and that is a Gate 3 re-certification, not an edit.
+
+### The verdict
+
+Twenty conditions, each reported by name. Gate 8 keeps Gate 6's conditions on subject pinning, human
+approval, coverage, constraints, carriers, accounting, and forbidden output, and replaces the one it
+cannot hold — *every observed identifier is printable* — with the two that do:
+
+- **every unprintable identifier is refused** — an identifier nobody can print is never approved;
+- **every refused field is an unprintable span event** — so a manifest cannot quieten an ordinary
+  field by blocking it instead of approving it.
+
+Two further conditions are read off the manifest rather than the export, because neither is derivable
+from telemetry and both are what a reader of a PASS most needs to know: `accounting_basis` must be
+`forge-persisted-usage`, and `native_token_metrics` must be `observational`.
+
+`tests/test_otel_codex_field_inventory.py` breaks the manifest in one place at a time — approving a
+blocked event, blocking an ordinary field, dropping an entry, widening a constraint, unnaming the
+reviewer, moving the version pin, moving the accounting basis — and requires the verdict to notice
+each.
+
+### What Gate 8 does not change
+
+- **Nothing is enabled.** Native Codex telemetry stays disabled outside the canary harness,
+  `CodexRunner` emits no `-c otel` override and no `OTEL_*` variable, and no production module
+  imports any of this. Approving a field is not turning on the exporter that would carry it.
+- **No authority moved.** Forge persisted usage remains the authoritative basis for accounting,
+  budgets, retries, and task state. `codex.turn.token_usage` and the two `gen_ai.usage.*` span
+  attributes are observational; nothing reads them, and a token count on a span is one request's
+  self-report — not a bill and not a remaining balance.
+- **It is one binary version and one invocation.** A Codex upgrade re-opens the inventory: a field
+  set is a property of a version, which is what the pin in `subject` exists to catch. A longer or
+  differently shaped session would also exercise instruments this one did not.
+- **The Claude manifest is untouched.** Gate 6's approvals, subject, and verdict are unchanged, and a
+  test asserts it.
 
 ## Verify spans
 

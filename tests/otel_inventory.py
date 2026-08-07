@@ -40,6 +40,13 @@ to carry a human's name — which the shipped candidate manifest deliberately do
 **This module starts no agent by itself.** Like :mod:`otel_canary` it refuses to launch one without
 `--approved-by`, and the argument vector it would launch is a constant in this file
 (:data:`DEFAULT_CLAUDE_ARGV`) rather than a string assembled on a command line.
+
+**Everything above the verdict is agent-independent, and Gate 8 reuses it.**
+:mod:`otel_codex_inventory` inventories Codex through this parser, this classifier, this identifier
+policy, and this comparison, supplying only its own manifest, its own run facts, and its own
+conditions. Three parameters exist for that and no other reason: :func:`load_manifest` takes the
+schema a caller expects, and :func:`build_document` takes the report schema, the gate key, and the
+verdict function. Their defaults are Claude's, so Gate 6 reads exactly as it did.
 """
 
 from __future__ import annotations
@@ -528,16 +535,22 @@ _CONSTRAINT_KEYS = (
 )
 
 
-def load_manifest(path: Path = MANIFEST_PATH) -> Manifest:
-    """Read and validate the approval manifest. A malformed manifest is an error, not a default."""
+def load_manifest(path: Path = MANIFEST_PATH, *, schema: str = MANIFEST_SCHEMA) -> Manifest:
+    """Read and validate the approval manifest. A malformed manifest is an error, not a default.
+
+    ``schema`` is the literal a manifest must declare. It is a parameter rather than a constant so a
+    second agent's manifest -- Gate 8's `ops/otel/codex-field-approvals.yaml` -- can reuse this
+    reader without being able to masquerade as the Claude one: each caller names the schema it
+    expects, and a manifest declaring the other is rejected here rather than merged by accident.
+    """
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except FileNotFoundError as error:
         raise ManifestError(f"no approval manifest at {path}") from error
     if not isinstance(raw, dict):
         raise ManifestError(f"{path}: the manifest must be a mapping")
-    if raw.get("schema") != MANIFEST_SCHEMA:
-        raise ManifestError(f"{path}: schema must be {MANIFEST_SCHEMA!r}")
+    if raw.get("schema") != schema:
+        raise ManifestError(f"{path}: schema must be {schema!r}")
 
     subject = raw.get("subject") or {}
     if not isinstance(subject, dict):
@@ -1180,7 +1193,13 @@ def compare(entries: Sequence[dict], manifest: Manifest) -> list[dict]:
             item["status"] = STATUS_UNAPPROVED
             reasons.append("a metric exemplar reached the exporter and cannot be approved")
         if item.get("identifier_status") == IDENTIFIER_UNPRINTABLE:
-            item["status"] = STATUS_UNAPPROVED if declared is not None else DISPOSITION_UNKNOWN
+            # Refusing an identifier nobody can print is always available; *approving* one never is.
+            # A manifest that already says BLOCKED or REDACTED has refused it, so that disposition
+            # stands. Anything else -- APPROVED, UNAPPROVED, or no entry at all -- is forced down.
+            if declared is None:
+                item["status"] = DISPOSITION_UNKNOWN
+            elif declared.status not in (STATUS_BLOCKED, STATUS_REDACTED):
+                item["status"] = STATUS_UNAPPROVED
             reasons.append("the identifier failed the safe-identifier policy and cannot be approved")
         if CLASS_UNCLASSIFIABLE in _observed_classes(item) and item["status"] == STATUS_APPROVED:
             item["status"] = STATUS_UNAPPROVED
@@ -1221,8 +1240,21 @@ def _constraint_mismatches(item: dict, declared: ManifestField, manifest: Manife
 # ---------------------------------------------------------------------------
 
 
-def build_document(report: canary.CanaryReport, manifest: Manifest) -> dict:
-    """Turn one canary run into the canonical inventory document. Deterministic and sorted."""
+def build_document(
+    report: canary.CanaryReport,
+    manifest: Manifest,
+    *,
+    schema: str = SCHEMA_VERSION,
+    gate: str = "gate6",
+    verdict: Callable[[dict, Manifest], dict] | None = None,
+) -> dict:
+    """Turn one canary run into the canonical inventory document. Deterministic and sorted.
+
+    ``schema``, ``gate``, and ``verdict`` exist so a second agent can be inventoried by the same
+    parser, the same classifier, and the same comparison, and still be judged by its own conditions
+    under its own report format. Everything above the verdict is agent-independent; the verdict is
+    not, and pretending otherwise would let one agent's gate be reported under another agent's name.
+    """
     inventory = parse_export(report.output, manifest)
     fields = compare(inventory.documents(), manifest)
 
@@ -1253,7 +1285,7 @@ def build_document(report: canary.CanaryReport, manifest: Manifest) -> dict:
 
     accounting = report.accounting
     body = {
-        "schema": SCHEMA_VERSION,
+        "schema": schema,
         "subject": {
             "agent": manifest.subject.get("agent", ""),
             "agent_version": manifest.subject.get("agent_version", ""),
@@ -1303,7 +1335,7 @@ def build_document(report: canary.CanaryReport, manifest: Manifest) -> dict:
         "patterns_found": list(leaked),
         "passed": not leaked,
     }
-    body["gate6"] = _verdict(body, manifest)
+    body[gate] = (verdict or _verdict)(body, manifest)
     return body
 
 

@@ -640,19 +640,22 @@ Notes that make the ordering meaningful:
   evidence about Claude: **no supervised inventory run has been made**, the manifest approves
   nothing, names nobody, and carries the review state `candidate`, and the harness refuses to return
   a PASS verdict while that is so. See [Section 16](#16--field-inventory).
-- **The Gate 7 harness exists; Gate 7 has not passed.** `tests/otel_codex_canary.py` builds the
-  child environment, the `-c` override vector, and the exact Codex argument vector for one minimal
-  canary, and produces the `forge.codex.telemetry-canary/1` report. **No Codex process has run under
-  it.** One supervised Codex request remains required, and it is the only thing that can decide
-  whether `--strict-config` accepts the override at all. The harness starts nothing without
-  `--approved-by`. See [Section 17](#17--codex-canary).
-- **Gate 7 does not begin Gate 8.** One invocation is not an inspection of the fields it carried.
-  Gate 8 needs its own manifest, its own supervised run, and its own human.
+- **Gate 7 has passed.** One supervised `codex-cli` 0.146.0 request ran on 2026-08-07 under
+  `tests/otel_codex_canary.py`: `--strict-config` accepted the `-c` override vector, 224 spans and 96
+  metric points reached the Collector over the configured loopback endpoints, `forge.invocation.id`
+  correlated them to that invocation, no log record was accepted, and every count balanced. The
+  harness still starts nothing without `--approved-by`. See [Section 17](#17--codex-canary).
+- **Gate 8 has passed, on Gate 7's own evidence.** That run's exporter was at `verbosity: detailed`,
+  so it printed the whole post-redaction field surface; no second Codex request was made. All 381
+  observed fields are decided in `ops/otel/codex-field-approvals.yaml` — 372 approved, 9 refused,
+  none UNKNOWN, none UNAPPROVED. **Every Codex span event is refused**, because Codex names an event
+  after the Rust source location that emitted it and no processor at Collector 0.158.0 can rewrite an
+  event name. See [Section 18](#18--codex-field-inventory).
 
-Gate 1 is the approval of this document. Gates 2–5 have passed. Gate 6 has its apparatus and none of
-its evidence; Gate 7 now has its apparatus and none of its evidence either; everything after them is
-unbuilt. Native Claude and Codex telemetry remain disabled: Gate 5 authorized one supervised run, not
-an enabled exporter, and no Codex run has been authorized at all.
+Gate 1 is the approval of this document. Gates 2–5, 7, and 8 have passed; Gate 6 has its apparatus,
+its manifest, and a human's approval, and wants only a confirming run against that manifest.
+Native Claude and Codex telemetry remain disabled: each gate authorized one supervised run, not an
+enabled exporter, and an approved field is not an enabled one.
 
 ---
 
@@ -707,7 +710,11 @@ before treating that as more than it is. Every other item remains **[REQUIRED]**
 | 37 | **The Codex canary vector is exact** — separate argv elements, `read-only` sandbox, `never` approval policy, `--ephemeral`, `--strict-config`, `--ignore-user-config` without replacing `CODEX_HOME`, the reused worker-feature disables, and the exact canary prompt; bypass flags, writable sandboxes, and conflicting commands are refused by name **[CERTIFIED]** | 7 |
 | 38 | **The Codex canary starts nothing without `--approved-by`**, `--dry-run` starts nothing and prints no environment value, an existing output directory is refused before a Collector starts, and the Collector and child are reaped on every path including a timeout **[CERTIFIED]** | 7 |
 | 39 | **The Gate 7 report fails closed** — malformed JSONL, a reply other than exactly `CANARY_OK`, a nonzero span or metric-point remainder, an absent or non-matching correlation attribute, any log record or logs pipeline, a privacy finding, or a forbidden value in the report each produce FAIL, and the invocation identifier never appears in the report **[CERTIFIED]** | 7 |
-| 40 | **One supervised Codex canary passes** — `--strict-config` accepts the override, traces and metrics reach the Collector, `forge.invocation.id` correlates them to that invocation, and every count balances | 7 |
+| 40 | **One supervised Codex canary passes** — `--strict-config` accepts the override, traces and metrics reach the Collector, `forge.invocation.id` correlates them to that invocation, and every count balances **[CERTIFIED]** | 7 |
+| 41 | **Every observed Codex field is inspected and decided by a human** — the manifest names the reviewer and pins codex-cli 0.146.0 under Collector 0.158.0, no observed field is UNKNOWN or UNAPPROVED, no redacted key survived, and the verdict is PASS **[CERTIFIED]** | 8 |
+| 42 | **The Codex inventory reuses the Gate 6 machinery and cannot borrow its approvals** — one parser, one classifier, one identifier policy, one comparison, and two manifests whose schemas refuse to load in each other's place **[CERTIFIED]** | 8 |
+| 43 | **The Codex approval is bounded where it is widened** — a vocabulary entry may waive only the content-word and grammar checks, must still be plain ASCII with no whitespace, backslash, colon, `@`, `=`, or `?`, and no key on the deletion set is allowlisted for printing **[CERTIFIED]** | 8 |
+| 44 | **Codex span events are refused, not redacted** — an event name is a Rust source location, `keep_keys` cannot reach it, and no Collector 0.158.0 processor rewrites it; a slice that enables Codex telemetry MUST drop span events at the Collector | 8 |
 
 ### What "certified at the helper level" means for items 1–7 and 9
 
@@ -744,10 +751,11 @@ Items 35–39 are certified in that same narrow sense, and the distinction matte
 it did for Claude. They certify the **builders and the harness**, against synthetic Collector
 payloads: that the environment builder adds nothing and preserves `CODEX_HOME`, that the override
 vector is what this document says it is, that the argument vector is exact and its refusals hold,
-and that the report fails closed on every Gate 7 condition. **They certify nothing about Codex.** The
-one item that would — item 40, the supervised run — remains **[REQUIRED]**, and items 10 and 11 with
-it: no `codex` process has parsed the override, so `--strict-config` acceptance and Windows shim
-survival are both still open. Gate 8 is where it was.
+and that the report fails closed on every Gate 7 condition. **They certified nothing about Codex**
+until item 40 — the supervised run — was met on 2026-08-07, which is also what settled items 10 and
+11: a `codex` process parsed the override under `--strict-config` and posted to the endpoints as
+written, through the Windows shim, and every count balanced. Items 41–43 rest on that one run's own
+output and on nothing else; item 44 is the finding it produced.
 
 ---
 
@@ -1101,9 +1109,9 @@ One run, separately supervised, and not part of the slice that built the harness
 
 ## 17 — Codex canary
 
-Gate 7's subject. Added with the harness that would satisfy it, and **not** satisfied by it: at the
-time of writing no Codex process has run under this contract, and the section below describes a run
-that has not happened.
+Gate 7's subject. Added with the harness that would satisfy it, and **not** satisfied by it; the run
+that satisfied it was a separate, separately approved event on 2026-08-07. The requirements below
+bind that run and every re-run of it.
 
 ### Why Codex needs its own gate
 
@@ -1154,8 +1162,9 @@ hexadecimal run in a rendered report is a leak whether or not anyone recognizes 
 
 ### What a Codex canary does not change
 
-- **It is not a field inventory.** Gate 8 governs what Codex telemetry may *keep*, and needs its own
-  manifest, its own supervised run, and its own human. One invocation is not an inspection.
+- **It is not a field inventory.** Gate 8 governs what Codex telemetry may *keep*. One invocation is
+  not an inspection; what makes that invocation's *output* an inspection is
+  [Section 18](#18--codex-field-inventory).
 - **Normal Forge execution stays unwired.** No production module imports the builders, `CodexRunner`
   emits no `-c otel` override and no `OTEL_*` variable, and native Codex telemetry remains disabled
   outside the harness.
@@ -1163,6 +1172,78 @@ hexadecimal run in a rendered report is a leak whether or not anyone recognizes 
   metrics are observational; accounting, budgets, retries, task state, schemas, and the public JSON
   contract are untouched.
 - **Nothing here reports cost or quota.** See [Section 13](#both).
+
+---
+
+## 18 — Codex field inventory
+
+Gate 8's subject. [Section 16](#16--field-inventory) defines what a field inventory *is* and how one
+is judged; this section says what is different when the agent is Codex, and records what the
+inspection found.
+
+### A supervised run is not required twice
+
+Gate 8 **MUST** be decided against an observation of the certified pipeline's own output. It **MUST
+NOT** require a new agent invocation when a passing Gate 7 run already printed that output: the
+`debug` exporter at `verbosity: detailed` is the terminal component of both pipelines, so a Gate 7
+run at that verbosity has already recorded every field this gate reviews. Making a second request to
+re-read evidence that exists is a cost with no answer attached to it.
+
+The 2026-08-07 run is that observation. Where its report gave counts, `tests/otel_codex_evidence.py`
+gives the names behind them, distilled to a table: every distinct resource attribute, scope, span
+name, span attribute, event name, and metric descriptor, and no trace identifier, span identifier,
+timestamp, measurement, or invocation identifier.
+
+### One machinery, two manifests
+
+The inventory harness **MUST** be shared with Gate 6 — one parser, one value classifier, one
+safe-identifier policy, one comparison, one forbidden-output scan. Only three things may be Codex's
+own: its manifest, its run facts, and its verdict.
+
+The two manifests **MUST** declare different schemas and **MUST NOT** be loadable in each other's
+place. An approval is for one agent at one version; a reader that accepted either file would let
+Claude's approvals answer a question about Codex.
+
+### Refusal is available where redaction is not
+
+An identifier that fails the safe-identifier policy **MUST NOT** be approved. It **MAY** be refused:
+a manifest entry of `BLOCKED` or `REDACTED` stands, keyed by the identifier's SHA-256 fingerprint,
+and the raw identifier appears in no report and in no manifest. Refusing is the opposite of
+approving, and a policy that made an unreviewable name unrefusable as well would leave the reviewer
+no disposition at all.
+
+Where a manifest widens what may be printed, the widening **MUST** be bounded. A `vocabulary` entry
+overrides the safe-identifier policy for that name, so it **MUST** be admissible only for the
+*content-bearing word* and *conservative grammar* checks, and **MUST** still be plain ASCII with no
+whitespace, backslash, colon, `@`, `=`, or `?`. A path, a URL, an address, or a credential can never
+re-enter through the vocabulary.
+
+### What the inspection found
+
+381 fields observed after redaction; 372 approved, 9 refused, none UNKNOWN, none UNAPPROVED, and a
+zero unresolved remainder. Six distinct attribute keys survived across 224 spans and 96 metric
+points, because `keep_keys` is an allowlist. No data point carried an attribute at all. No span link
+and no metric exemplar reached the exporter. What was approved is names and shapes: span names,
+metric names, scope names, two resource attributes, Forge's two correlation attributes, and two token
+counters.
+
+**The finding: every Codex span event is refused.** Codex 0.146.0 names a span event after the Rust
+source location that emitted it, so the name carries a relative source path, a space, and a colon. An
+event name is not an attribute, so `keep_keys` cannot reach it, and Collector 0.158.0 offers no
+processor that rewrites one. Refusing it in an approval manifest is not the same as keeping it off
+the wire. **A slice that enables Codex telemetry MUST drop span events at the Collector**, which is a
+change to `ops/otel/collector-config.yaml` and therefore a Gate 3 re-certification.
+
+### What Gate 8 does not change
+
+- **Nothing is enabled.** An approved field is not an exported one. Native Codex telemetry stays
+  disabled outside the harness, and no production module imports the inventory.
+- **No authority moved** ([Section 8](#8--token-semantics)). `codex.turn.token_usage` and the two
+  `gen_ai.usage.*` span attributes are observational. The manifest records this as `accounting_basis:
+  forge-persisted-usage` and `native_token_metrics: observational`, and the verdict checks both, so
+  moving either is a failing gate rather than an edit.
+- **It is one version and one invocation.** A field set is a property of a binary version. A Codex
+  upgrade re-opens the inventory, which is what the version pin in `subject` exists to catch.
 
 ---
 

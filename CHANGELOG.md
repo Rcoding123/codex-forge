@@ -19,17 +19,32 @@ All notable changes to Codex Forge are documented here. This project follows sem
   debug exporter's post-privacy output. Every distinct unknown schema identifier gets its own entry,
   rendered exactly when it passes a strict safe-identifier policy and fingerprinted with SHA-256 when
   it does not, and each run emits a `candidate-manifest.yaml` a reviewer can merge without reading
-  the Collector log. **Gate 6 has not passed**: no supervised inventory run has been made, the
-  manifest approves nothing, and the harness refuses a PASS verdict until a human is named in it.
+  the Collector log. **Gate 6 has not returned a PASS verdict**: a supervised run was made and
+  `human-operator` approved the 29 fields it observed, but the confirming run against the approved
+  manifest is outstanding, and the harness refuses a PASS verdict until it has one.
 - Gate 7 Codex telemetry-canary foundation: a pure Codex child-environment builder that removes
   inherited `OTEL_*`, `TRACEPARENT`, and `TRACESTATE` while adding nothing and preserving `CODEX_HOME`
   exactly; a pure builder for the proposed per-invocation `-c otel` override vector (logs exporter
   `none`, prompt logging off, OTLP/HTTP binary traces and metrics to a loopback Collector, and the two
   canonical correlation attributes); and `tests/otel_codex_canary.py`, the approval-gated harness that
   would run one minimal Codex request and report the `forge.codex.telemetry-canary/1` result. **Gate 7
-  has not passed**: no Codex process has run, `--strict-config` has accepted nothing, one supervised
-  request remains required, and the Codex correlation mechanism stays proposed. Normal Forge execution
-  is unchanged and native Codex telemetry remains disabled outside the harness.
+  has since passed**: one supervised codex-cli 0.146.0 request on 2026-08-07 had its `-c` override
+  accepted under `--strict-config`, put 224 spans and 96 metric points through the certified pipeline,
+  correlated them by `forge.invocation.id`, accepted no log record, and balanced every count. Normal
+  Forge execution is unchanged and native Codex telemetry remains disabled outside the harness.
+- Gate 8 Codex field inventory: `ops/otel/codex-field-approvals.yaml`, the approval manifest pinned to
+  codex-cli 0.146.0 under Collector 0.158.0, alongside `tests/otel_codex_evidence.py` (the Gate 7
+  run's post-redaction surface, distilled to a table of names and bounded descriptors) and
+  `tests/otel_codex_inventory.py` (the Codex manifest loader and the Gate 8 verdict). The Gate 6
+  parser, classifier, safe-identifier policy, comparison, and forbidden-output scan are reused
+  unchanged; `otel_inventory.load_manifest` and `build_document` gained schema, gate, and verdict
+  parameters so a second agent can share them without borrowing Claude's approvals. **Gate 8 has
+  passed** on the recorded Gate 7 evidence, with no second Codex request: 381 fields observed, 372
+  approved, 9 refused, none UNKNOWN or UNAPPROVED, no redacted key surviving, and a zero unresolved
+  remainder. Every Codex span event is refused — Codex names an event after the Rust source location
+  that emitted it, `keep_keys` cannot reach an event name, and no Collector 0.158.0 processor rewrites
+  one. Nothing is enabled by the approval, and Forge persisted usage remains the authoritative basis
+  for accounting, budgets, retries, and task state.
 
 ## [0.2.0] - 2026-08-02
 

@@ -1,0 +1,2998 @@
+# Gate 8 approval manifest for codex-cli 0.146.0 under OpenTelemetry Collector 0.158.0.
+#
+# This file records what a **human** has approved about the Codex telemetry surface. The
+# observation it was approved against is `tests/otel_codex_evidence.py`, distilled from the
+# successful Gate 7 run `codex-final-20260807-121944` of 2026-08-07; the two are separate files on purpose,
+# because an observation that edits its own approval is not an approval.
+#
+# It is the Codex twin of `ops/otel/claude-field-approvals.yaml` and shares its reader, its
+# classifier, its safe-identifier policy, and its four statuses -- `tests/otel_inventory.py`, which
+# Gate 6 built. `schema` differs so neither manifest can be loaded in the other's place.
+#
+#   APPROVED   a human reviewed this field and is content for it to be exported and reported.
+#   BLOCKED    the field is refused. It is not approved whatever else changes.
+#   REDACTED   `transform/privacy` deletes this key. Observing it is a Gate 8 failure.
+#   UNAPPROVED not yet reviewed, or reviewed and rejected. Observing it fails the Gate 8 verdict.
+#
+# ## What the 2026-08-07 review approved
+#
+# 381 fields were observed after redaction. 372 are approved and 9 are blocked.
+# Nothing was approved that the run did not produce, and nothing the run produced is left
+# undecided: an observed field with no entry below is reported UNKNOWN, which fails the verdict.
+#
+# Approved, in one sentence: names and shapes. Span names, metric names, scope names, two resource
+# attributes, Forge's two correlation attributes, and two token counters -- every one of them
+# ordinary local-safe telemetry metadata about *which* step ran, not *what* it ran on. No prompt,
+# response, identity, path, URL, secret, raw identifier, link, exemplar, or log record survived the
+# pipeline to be reviewed, and the logs signal was never enabled: `otel.exporter` is pinned to
+# `none` and the Collector declares no logs pipeline.
+#
+# Blocked, and the one finding of this review: **every Codex span event**. Codex 0.146.0 names an
+# event after the Rust source location that emitted it -- a relative source path, a space, and a
+# colon. An event name is not an attribute, so the `keep_keys` allowlist cannot reach it, and
+# Collector 0.158.0 offers no processor that can rewrite it. It is refused. A Codex telemetry slice
+# enabled later must drop span events at the Collector or leave this gate's finding standing.
+#
+# ## Two things this approval deliberately does not do
+#
+#   * **It does not make Codex token metrics authoritative.** `codex.turn.token_usage` and the two
+#     `gen_ai.usage.*` span attributes are observational. Forge persisted usage remains the
+#     authoritative basis for accounting, budgets, retries, and task state, nothing reads these,
+#     and a token count on a span is one request's self-report -- not a bill and not a balance.
+#   * **It does not enable anything.** Native Codex telemetry stays disabled outside the canary
+#     harness, `CodexRunner` emits no `-c otel` override, and no production module imports the
+#     builders. Approving a field is not turning on the exporter that would carry it.
+#
+# ## `vocabulary` is not approval, and one place where it matters
+#
+# `vocabulary` records the identifiers this repository knows; `status` is what approves. They are
+# separate axes. Membership does, however, decide printability for an identifier that the
+# safe-identifier policy in `tests/otel_inventory.py` would otherwise refuse, and sixteen names
+# below are there for exactly that reason:
+#
+#   * ten span names and six metric names trip the *content-bearing word* check on `prompt` or
+#     `response`, or the *conservative grammar* check on a `/`. They are Rust function and route
+#     names -- `build_prompt`, `handle_responses`, `thread/start`,
+#     `codex.responses_api_overhead.duration_ms` -- naming code, not carrying content.
+#
+# That override is bounded and tested: `tests/test_otel_codex_field_inventory.py` asserts every
+# name in this vocabulary is plain ASCII with no whitespace, backslash, colon, `@`, `=`, or `?`, so
+# vocabulary membership can never readmit a path, a URL, an address, or a credential. The seven
+# Codex event names are the proof it bites -- they are refused, and `event_names` is empty.
+
+schema: forge.codex.field-approvals/1
+version: 1.0.0
+
+subject:
+  agent: codex-cli
+  agent_version: 0.146.0
+  collector_version: 0.158.0
+  contract_version: "1.0"
+
+# Filled in by the human who reviews an observed inventory. Until both are set, no run passes.
+review:
+  approved_by: human-operator
+  state: approved
+  reviewed_on: "2026-08-07"
+  # The supervised Gate 7 run this approval was made against. No further Codex request was made:
+  # the run's own Collector output already carried every field named below.
+  evidence: codex-final-20260807-121944
+  # Restated here so it travels with the approvals rather than only in prose.
+  accounting_basis: forge-persisted-usage
+  native_token_metrics: observational
+
+vocabulary:
+  # The six keys Codex and Forge actually put on a surface that survived, followed by the
+  # contract's minimum deletion set. The deleted keys are listed so that one surviving is
+  # reported by name rather than by fingerprint -- naming a key is not approving it.
+  attribute_keys:
+    - service.name
+    - service.version
+    - forge.invocation.id
+    - forge.telemetry.contract.version
+    - gen_ai.usage.input_tokens
+    - gen_ai.usage.output_tokens
+    - user.email
+    - organization.id
+    - user.id
+    - user.account_uuid
+    - user.account_id
+    - session.id
+    - ccr.session.id
+    - workspace.host_paths
+    - user_prompt
+    - system_prompt
+    - system_prompt_preview
+    - user_system_prompt
+    - assistant_response
+    - response
+    - tool_input
+    - tool_parameters
+    - tool_output
+    - payload
+    - content
+    - error
+    - error.message
+    - url.full
+    - url.query
+    - app.workspace.root
+    - claude.prompt.v3
+    - code.snippet
+    - codex.turn.agent_message
+    - exception.message
+    - exception.stacktrace
+    - forge.review.findings
+    - forge.validation.stdout
+    - gen_ai.completion.0.content
+    - gen_ai.prompt.0.content
+    - http.request.header.authorization
+    - process.command_line
+    - process.environment
+    - vcs.ref.head.name
+    - vcs.ref.head.revision
+    - vcs.repository.url
+  # All 109 span names the 2026-08-07 run exported, each printed in full by that run or
+  # admitted here for the reason given in the header.
+  span_names:
+    - add_collaboration_tools
+    - add_core_utility_tools
+    - add_dynamic_tools
+    - add_extension_tools
+    - add_mcp_resource_tools
+    - add_shell_tools
+    - add_tool_sources
+    - agents_md.refresh
+    - app_server.serialized_request_queue
+    - app_server.thread_start.attach_listener
+    - app_server.thread_start.config_snapshot
+    - app_server.thread_start.create_thread
+    - app_server.thread_start.notify_started
+    - app_server.thread_start.resolve_status
+    - app_server.thread_start.send_response
+    - app_server.thread_start.upsert_thread
+    - append_tool_search_executor
+    - auth
+    - build_extension_turn_input_items
+    - build_mcp_tool_runtimes
+    - build_model_visible_specs_and_registry
+    - build_prompt
+    - build_skill_injections
+    - build_skill_outcome
+    - build_skills_and_plugins
+    - build_tool_call
+    - build_tool_router
+    - build_tool_specs_and_registry
+    - built_tools
+    - built_tools.load_discoverable_tools
+    - built_tools.load_plugins
+    - capability_roots.resolve
+    - capability_roots.snapshot_for_step
+    - codex.exec
+    - collect_explicit_skill_mentions
+    - drain_in_flight
+    - endpoint_session.execute_with
+    - environments.snapshot
+    - extension_tool_executors
+    - from_tools
+    - get_default_model
+    - get_model_info
+    - handle_output_item_done
+    - handle_responses
+    - hosted_model_tool_specs
+    - initialize
+    - list_models
+    - list_skills
+    - load
+    - load_with_cli_overrides
+    - mcp.runtime.refresh
+    - mcp.runtime.resolve_for_step
+    - mcp.runtime_config.project_for_step
+    - merge_connector_selection
+    - merge_into_namespaces
+    - model_client.stream_responses_websocket
+    - model_client.websocket_connection
+    - op.dispatch.shutdown
+    - op.dispatch.user_input
+    - persist_rollout_items
+    - plugins_for_config
+    - receiving
+    - receiving_stream
+    - record_context_updates_and_set_reference_context_item
+    - record_conversation_items
+    - regular_task.prepare_run_turn
+    - render_available_skills
+    - responses_websocket.connect
+    - responses_websocket.stream_request
+    - run_hooks_and_record_inputs
+    - run_legacy_after_agent_hook
+    - run_pending_session_start_hooks
+    - run_pre_sampling_compact
+    - run_sampling_request
+    - run_session_end_hooks
+    - run_turn
+    - run_turn.collect_post_sampling_state
+    - run_turn.prepare_sampling_request_input
+    - run_turn_stop_hooks
+    - send_raw_response_items
+    - session.flush_rollout
+    - session_init
+    - session_init.auth_mcp
+    - session_init.mcp_manager_init
+    - session_init.plugin_skill_warmup
+    - session_init.required_mcp_wait
+    - session_init.state_db
+    - session_init.thread_name_lookup
+    - session_init.thread_persistence
+    - session_loop
+    - session_task.run
+    - session_task.turn
+    - set_previous_turn_settings
+    - shell_snapshot
+    - skills.executor.catalog_snapshot
+    - skills_for_config
+    - startup_prewarm
+    - startup_prewarm.resolve
+    - step_context.capture
+    - stream_request
+    - thread/start
+    - thread/unsubscribe
+    - thread_spawn
+    - track_turn_resolved_config_analytics
+    - try_run_sampling_request
+    - turn/start
+    - turn_context.build
+    - turn_diff_display_roots
+    - world_state.build
+  # Empty, and not by omission. Every Codex span-event name observed is a source location;
+  # admitting one here would make this file reproduce a path. They stay fingerprinted.
+  event_names: []
+  # The 34 native Codex instruments the run reported, plus Forge's two span-count connectors.
+  metric_names:
+    - codex.conversation.turn.count
+    - codex.feature.state
+    - codex.process.start
+    - codex.remote_models.fetch_update.duration_ms
+    - codex.remote_models.load_cache.duration_ms
+    - codex.responses_api_engine_iapi_tbt.duration_ms
+    - codex.responses_api_engine_iapi_ttft.duration_ms
+    - codex.responses_api_engine_service_tbt.duration_ms
+    - codex.responses_api_engine_service_ttft.duration_ms
+    - codex.responses_api_inference_time.duration_ms
+    - codex.responses_api_overhead.duration_ms
+    - codex.shell_snapshot
+    - codex.shell_snapshot.duration_ms
+    - codex.sqlite.init.count
+    - codex.sqlite.init.duration_ms
+    - codex.startup.phase.duration_ms
+    - codex.startup_prewarm.age_at_first_turn_ms
+    - codex.startup_prewarm.duration_ms
+    - codex.thread.skills.description_truncated_chars
+    - codex.thread.skills.enabled_total
+    - codex.thread.skills.kept_total
+    - codex.thread.skills.truncated
+    - codex.thread.started
+    - codex.turn.e2e_duration_ms
+    - codex.turn.memory
+    - codex.turn.network_proxy
+    - codex.turn.token_usage
+    - codex.turn.tool.call
+    - codex.turn.ttfm.duration_ms
+    - codex.turn.ttft.duration_ms
+    - codex.websocket.event
+    - codex.websocket.event.duration_ms
+    - codex.websocket.request
+    - codex.websocket.request.duration_ms
+    - forge.diagnostic.span.accepted.other
+    - forge.diagnostic.span.exported.other
+  # Two Codex scopes and the Collector's own count connector.
+  scope_names:
+    - codex_exec
+    - codex
+    - github.com/open-telemetry/opentelemetry-collector-contrib/connector/countconnector
+
+# The only values that may be reproduced verbatim in a report. A metric's unit and
+# description are values, not identifiers, and are allowlisted under the pseudo-keys
+# `metric.unit` and `metric.description`: a safe metric name buys the prose beneath it
+# nothing. All four below were read out of the 2026-08-07 Collector log.
+static_values:
+  service.name:
+    - codex_exec
+  forge.telemetry.contract.version:
+    - "1.0"
+  metric.unit:
+    - ms
+  metric.description:
+    # codex-cli 0.146.0. Instrument documentation, carrying nothing about a session.
+    - "Duration in milliseconds."
+    # Forge's own count connectors.
+    - "spans named outside the diagnostic vocabulary, counted accepted"
+    - "spans named outside the diagnostic vocabulary, counted exported"
+
+# No bounded enumeration was observed. Declared empty rather than omitted so the section is
+# a decision rather than an oversight.
+enum_values: {}
+
+# Keys `transform/privacy` is required to delete, on every surface of both signals -- the same
+# set the Claude manifest carries, because redaction is a property of the key and the two
+# agents share one pipeline. Observing any of these post-privacy is a Gate 8 failure.
+redacted_keys:
+  - user.email
+  - organization.id
+  - user.id
+  - user.account_uuid
+  - user.account_id
+  - session.id
+  - ccr.session.id
+  - workspace.host_paths
+  - user_prompt
+  - system_prompt
+  - system_prompt_preview
+  - user_system_prompt
+  - assistant_response
+  - response
+  - tool_input
+  - tool_parameters
+  - tool_output
+  - payload
+  - content
+  - error
+  - error.message
+  - url.full
+  - url.query
+  - app.workspace.root
+  - claude.prompt.v3
+  - code.snippet
+  - codex.turn.agent_message
+  - exception.message
+  - exception.stacktrace
+  - forge.review.findings
+  - forge.validation.stdout
+  - gen_ai.completion.0.content
+  - gen_ai.prompt.0.content
+  - http.request.header.authorization
+  - process.command_line
+  - process.environment
+  - vcs.ref.head.name
+  - vcs.ref.head.revision
+  - vcs.repository.url
+
+# -----------------------------------------------------------------------------------------------
+# Reviewable fields
+# -----------------------------------------------------------------------------------------------
+#
+# `expected: true` means the contract requires this field, so a run that does not produce it is
+# reported rather than quietly passed. Seven entries carry it: the two resource attributes every
+# codex-cli process sets, on both signals, and the top-level `codex exec` span with the two
+# correlation attributes section 4 of the contract requires on it. The rest are approved *if they
+# appear* -- a session that never opens a database does not owe anyone a `codex.sqlite.init.count`,
+# and the blocked entries were observed by somebody who does not want them back.
+#
+# Constraints are the shape the approval covers. An APPROVED field observed outside its declared
+# types, value classes, kinds, status codes, data types, temporalities, monotonicity, unit classes,
+# or description classes is reported UNAPPROVED -- the approval described a field, not a wildcard.
+fields:
+
+  # -------------------------------------------------------------------------------------------
+  # Resource attributes -- 4
+  # Two keys on each signal, and nothing else: `keep_keys` in `transform/privacy` removed
+  # everything Codex put on its resource that the allowlist does not name.
+  # -------------------------------------------------------------------------------------------
+  - id: resource.attribute/metrics/service.name
+    status: APPROVED
+    expected: true
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the constant `codex_exec`, allowlisted under `static_values` so the report may print it. It
+      names the binary, not the machine, the account, or the workspace.
+  - id: resource.attribute/metrics/service.version
+    status: APPROVED
+    expected: true
+    types: [Str]
+    value_classes: [semantic-version]
+    note: >-
+      Approved: the codex-cli version, reported as a semantic-version class rather than a value. It is what
+      the version pin in `subject` is checked against.
+  - id: resource.attribute/traces/service.name
+    status: APPROVED
+    expected: true
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the constant `codex_exec`, allowlisted under `static_values` so the report may print it. It
+      names the binary, not the machine, the account, or the workspace.
+  - id: resource.attribute/traces/service.version
+    status: APPROVED
+    expected: true
+    types: [Str]
+    value_classes: [semantic-version]
+    note: >-
+      Approved: the codex-cli version, reported as a semantic-version class rather than a value. It is what
+      the version pin in `subject` is checked against.
+
+  # -------------------------------------------------------------------------------------------
+  # Instrumentation scopes -- 3
+  # Three, none of which carries a version or an attribute.
+  # -------------------------------------------------------------------------------------------
+  - id: scope/metrics/codex
+    status: APPROVED
+    expected: false
+    version_classes: [absent]
+    note: >-
+      Approved: the codex-cli meter scope, carrying no version and no attributes.
+  - id: scope/metrics/github.com/open-telemetry/opentelemetry-collector-contrib/connector/countconnector
+    status: APPROVED
+    expected: false
+    version_classes: [absent]
+    note: >-
+      Approved: the Collector's own count connector, which is Forge's span diagnostic rather than Codex
+      telemetry.
+  - id: scope/traces/codex_exec
+    status: APPROVED
+    expected: false
+    version_classes: [absent]
+    note: >-
+      Approved: the codex-cli tracer scope, carrying no version and no attributes.
+
+  # -------------------------------------------------------------------------------------------
+  # Span names -- 109
+  # Every distinct span name the run exported. A span name in Codex 0.146.0 is a function or
+  # phase in the binary; after redaction each one carries the two Forge correlation
+  # attributes below and nothing else, so approving the name approves the fact that a step
+  # ran -- not what it ran on.
+  # -------------------------------------------------------------------------------------------
+  - id: span/add_collaboration_tools
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/add_core_utility_tools
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/add_dynamic_tools
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/add_extension_tools
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/add_mcp_resource_tools
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/add_shell_tools
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/add_tool_sources
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/agents_md.refresh
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/app_server.serialized_request_queue
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/app_server.thread_start.attach_listener
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/app_server.thread_start.config_snapshot
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/app_server.thread_start.create_thread
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/app_server.thread_start.notify_started
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/app_server.thread_start.resolve_status
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/app_server.thread_start.send_response
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/app_server.thread_start.upsert_thread
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/append_tool_search_executor
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/auth
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/build_extension_turn_input_items
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/build_mcp_tool_runtimes
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/build_model_visible_specs_and_registry
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/build_prompt
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/build_skill_injections
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/build_skill_outcome
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/build_skills_and_plugins
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/build_tool_call
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/build_tool_router
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/build_tool_specs_and_registry
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/built_tools
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/built_tools.load_discoverable_tools
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/built_tools.load_plugins
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/capability_roots.resolve
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/capability_roots.snapshot_for_step
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/codex.exec
+    status: APPROVED
+    expected: true
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/collect_explicit_skill_mentions
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/drain_in_flight
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/endpoint_session.execute_with
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/environments.snapshot
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/extension_tool_executors
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/from_tools
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/get_default_model
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/get_model_info
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/handle_output_item_done
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/handle_responses
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/hosted_model_tool_specs
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/initialize
+    status: APPROVED
+    expected: false
+    kinds: [Server]
+    status_codes: [Unset]
+  - id: span/list_models
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/list_skills
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/load
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/load_with_cli_overrides
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/mcp.runtime.refresh
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/mcp.runtime.resolve_for_step
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/mcp.runtime_config.project_for_step
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/merge_connector_selection
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/merge_into_namespaces
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/model_client.stream_responses_websocket
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/model_client.websocket_connection
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/op.dispatch.shutdown
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/op.dispatch.user_input
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/persist_rollout_items
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/plugins_for_config
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/receiving
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/receiving_stream
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/record_context_updates_and_set_reference_context_item
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/record_conversation_items
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/regular_task.prepare_run_turn
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/render_available_skills
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/responses_websocket.connect
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/responses_websocket.stream_request
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/run_hooks_and_record_inputs
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/run_legacy_after_agent_hook
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/run_pending_session_start_hooks
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/run_pre_sampling_compact
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/run_sampling_request
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/run_session_end_hooks
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/run_turn
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/run_turn.collect_post_sampling_state
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/run_turn.prepare_sampling_request_input
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/run_turn_stop_hooks
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/send_raw_response_items
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/session.flush_rollout
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/session_init
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/session_init.auth_mcp
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/session_init.mcp_manager_init
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/session_init.plugin_skill_warmup
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/session_init.required_mcp_wait
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/session_init.state_db
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/session_init.thread_name_lookup
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/session_init.thread_persistence
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/session_loop
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/session_task.run
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/session_task.turn
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/set_previous_turn_settings
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/shell_snapshot
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/skills.executor.catalog_snapshot
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/skills_for_config
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/startup_prewarm
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/startup_prewarm.resolve
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/step_context.capture
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/stream_request
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/thread/start
+    status: APPROVED
+    expected: false
+    kinds: [Server]
+    status_codes: [Unset]
+  - id: span/thread/unsubscribe
+    status: APPROVED
+    expected: false
+    kinds: [Server]
+    status_codes: [Unset]
+  - id: span/thread_spawn
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/track_turn_resolved_config_analytics
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/try_run_sampling_request
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/turn/start
+    status: APPROVED
+    expected: false
+    kinds: [Server]
+    status_codes: [Unset]
+  - id: span/turn_context.build
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/turn_diff_display_roots
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+  - id: span/world_state.build
+    status: APPROVED
+    expected: false
+    kinds: [Internal]
+    status_codes: [Unset]
+
+  # -------------------------------------------------------------------------------------------
+  # Span attributes -- 220
+  # The whole post-redaction span-attribute surface: Forge's two correlation attributes on
+  # every span, and the model's own token counts on the one span that talks to the API.
+  # -------------------------------------------------------------------------------------------
+  - id: span.attribute/add_collaboration_tools/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/add_collaboration_tools/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/add_core_utility_tools/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/add_core_utility_tools/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/add_dynamic_tools/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/add_dynamic_tools/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/add_extension_tools/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/add_extension_tools/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/add_mcp_resource_tools/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/add_mcp_resource_tools/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/add_shell_tools/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/add_shell_tools/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/add_tool_sources/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/add_tool_sources/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/agents_md.refresh/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/agents_md.refresh/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/app_server.serialized_request_queue/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/app_server.serialized_request_queue/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/app_server.thread_start.attach_listener/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/app_server.thread_start.attach_listener/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/app_server.thread_start.config_snapshot/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/app_server.thread_start.config_snapshot/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/app_server.thread_start.create_thread/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/app_server.thread_start.create_thread/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/app_server.thread_start.notify_started/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/app_server.thread_start.notify_started/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/app_server.thread_start.resolve_status/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/app_server.thread_start.resolve_status/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/app_server.thread_start.send_response/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/app_server.thread_start.send_response/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/app_server.thread_start.upsert_thread/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/app_server.thread_start.upsert_thread/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/append_tool_search_executor/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/append_tool_search_executor/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/auth/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/auth/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/build_extension_turn_input_items/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/build_extension_turn_input_items/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/build_mcp_tool_runtimes/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/build_mcp_tool_runtimes/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/build_model_visible_specs_and_registry/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/build_model_visible_specs_and_registry/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/build_prompt/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/build_prompt/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/build_skill_injections/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/build_skill_injections/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/build_skill_outcome/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/build_skill_outcome/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/build_skills_and_plugins/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/build_skills_and_plugins/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/build_tool_call/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/build_tool_call/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/build_tool_router/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/build_tool_router/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/build_tool_specs_and_registry/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/build_tool_specs_and_registry/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/built_tools.load_discoverable_tools/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/built_tools.load_discoverable_tools/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/built_tools.load_plugins/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/built_tools.load_plugins/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/built_tools/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/built_tools/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/capability_roots.resolve/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/capability_roots.resolve/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/capability_roots.snapshot_for_step/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/capability_roots.snapshot_for_step/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/codex.exec/forge.invocation.id
+    status: APPROVED
+    expected: true
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/codex.exec/forge.telemetry.contract.version
+    status: APPROVED
+    expected: true
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/collect_explicit_skill_mentions/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/collect_explicit_skill_mentions/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/drain_in_flight/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/drain_in_flight/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/endpoint_session.execute_with/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/endpoint_session.execute_with/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/environments.snapshot/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/environments.snapshot/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/extension_tool_executors/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/extension_tool_executors/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/from_tools/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/from_tools/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/get_default_model/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/get_default_model/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/get_model_info/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/get_model_info/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/handle_output_item_done/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/handle_output_item_done/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/handle_responses/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/handle_responses/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/handle_responses/gen_ai.usage.input_tokens
+    status: APPROVED
+    expected: false
+    types: [Int]
+    value_classes: [nonnegative-integer]
+    note: >-
+      Approved, observational only. The model's own count for one request. Forge persisted usage remains the
+      authoritative basis for accounting, budgets, retries, and task state, and nothing reads this.
+  - id: span.attribute/handle_responses/gen_ai.usage.output_tokens
+    status: APPROVED
+    expected: false
+    types: [Int]
+    value_classes: [nonnegative-integer]
+    note: >-
+      Approved, observational only. The model's own count for one request. Forge persisted usage remains the
+      authoritative basis for accounting, budgets, retries, and task state, and nothing reads this.
+  - id: span.attribute/hosted_model_tool_specs/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/hosted_model_tool_specs/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/initialize/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/initialize/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/list_models/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/list_models/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/list_skills/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/list_skills/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/load/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/load/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/load_with_cli_overrides/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/load_with_cli_overrides/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/mcp.runtime.refresh/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/mcp.runtime.refresh/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/mcp.runtime.resolve_for_step/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/mcp.runtime.resolve_for_step/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/mcp.runtime_config.project_for_step/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/mcp.runtime_config.project_for_step/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/merge_connector_selection/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/merge_connector_selection/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/merge_into_namespaces/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/merge_into_namespaces/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/model_client.stream_responses_websocket/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/model_client.stream_responses_websocket/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/model_client.websocket_connection/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/model_client.websocket_connection/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/op.dispatch.shutdown/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/op.dispatch.shutdown/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/op.dispatch.user_input/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/op.dispatch.user_input/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/persist_rollout_items/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/persist_rollout_items/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/plugins_for_config/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/plugins_for_config/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/receiving/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/receiving/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/receiving_stream/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/receiving_stream/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/record_context_updates_and_set_reference_context_item/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/record_context_updates_and_set_reference_context_item/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/record_conversation_items/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/record_conversation_items/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/regular_task.prepare_run_turn/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/regular_task.prepare_run_turn/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/render_available_skills/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/render_available_skills/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/responses_websocket.connect/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/responses_websocket.connect/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/responses_websocket.stream_request/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/responses_websocket.stream_request/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/run_hooks_and_record_inputs/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/run_hooks_and_record_inputs/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/run_legacy_after_agent_hook/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/run_legacy_after_agent_hook/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/run_pending_session_start_hooks/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/run_pending_session_start_hooks/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/run_pre_sampling_compact/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/run_pre_sampling_compact/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/run_sampling_request/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/run_sampling_request/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/run_session_end_hooks/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/run_session_end_hooks/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/run_turn.collect_post_sampling_state/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/run_turn.collect_post_sampling_state/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/run_turn.prepare_sampling_request_input/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/run_turn.prepare_sampling_request_input/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/run_turn/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/run_turn/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/run_turn_stop_hooks/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/run_turn_stop_hooks/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/send_raw_response_items/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/send_raw_response_items/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/session.flush_rollout/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/session.flush_rollout/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/session_init.auth_mcp/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/session_init.auth_mcp/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/session_init.mcp_manager_init/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/session_init.mcp_manager_init/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/session_init.plugin_skill_warmup/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/session_init.plugin_skill_warmup/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/session_init.required_mcp_wait/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/session_init.required_mcp_wait/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/session_init.state_db/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/session_init.state_db/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/session_init.thread_name_lookup/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/session_init.thread_name_lookup/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/session_init.thread_persistence/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/session_init.thread_persistence/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/session_init/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/session_init/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/session_loop/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/session_loop/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/session_task.run/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/session_task.run/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/session_task.turn/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/session_task.turn/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/set_previous_turn_settings/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/set_previous_turn_settings/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/shell_snapshot/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/shell_snapshot/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/skills.executor.catalog_snapshot/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/skills.executor.catalog_snapshot/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/skills_for_config/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/skills_for_config/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/startup_prewarm.resolve/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/startup_prewarm.resolve/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/startup_prewarm/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/startup_prewarm/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/step_context.capture/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/step_context.capture/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/stream_request/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/stream_request/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/thread/start/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/thread/start/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/thread/unsubscribe/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/thread/unsubscribe/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/thread_spawn/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/thread_spawn/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/track_turn_resolved_config_analytics/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/track_turn_resolved_config_analytics/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/try_run_sampling_request/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/try_run_sampling_request/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/turn/start/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/turn/start/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/turn_context.build/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/turn_context.build/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/turn_diff_display_roots/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/turn_diff_display_roots/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+  - id: span.attribute/world_state.build/forge.invocation.id
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [lowercase-hex-32]
+    note: >-
+      Approved: Forge's own correlation handle, minted per invocation and carried in on `-c
+      otel.span_attributes`. Reported as a shape; the value is never printed.
+  - id: span.attribute/world_state.build/forge.telemetry.contract.version
+    status: APPROVED
+    expected: false
+    types: [Str]
+    value_classes: [approved-static-string]
+    note: >-
+      Approved: the contract version this run declared, allowlisted as the static string `1.0`.
+
+  # -------------------------------------------------------------------------------------------
+  # Span events -- BLOCKED, every one -- 9
+  # Nine observed events over seven distinct names, and not one of them is approved. See the
+  # note on each entry: the name is a source location, the pipeline cannot rewrite it, and
+  # the entry is keyed by fingerprint so this file does not reproduce it either.
+  # -------------------------------------------------------------------------------------------
+  - id: span.event/endpoint_session.execute_with/sha256-58cbad47a3cf021ca65e3b50375312a75fd525fbbb3e04ed271479f6fb143651
+    status: BLOCKED
+    expected: false
+    note: >-
+      BLOCKED. Codex 0.146.0 names a span event after the Rust source location that emitted it, so this name
+      carries a relative source path, a space, and a colon. An event name is not an attribute, so
+      `keep_keys` cannot reach it and no Collector 0.158.0 processor can rewrite it. It is refused rather
+      than approved, and the inventory reports it by fingerprint so the name itself is never printed.
+  - id: span.event/model_client.websocket_connection/sha256-13f7579fb74f8e3188d4ea167798dd13d704c47b0ab516f201ddc44ccd127fec
+    status: BLOCKED
+    expected: false
+    note: >-
+      BLOCKED. Codex 0.146.0 names a span event after the Rust source location that emitted it, so this name
+      carries a relative source path, a space, and a colon. An event name is not an attribute, so
+      `keep_keys` cannot reach it and no Collector 0.158.0 processor can rewrite it. It is refused rather
+      than approved, and the inventory reports it by fingerprint so the name itself is never printed.
+  - id: span.event/op.dispatch.user_input/sha256-1def707ed5fce0e00ce40e03ac31a635ad704a0ab6bec8befcf1f2512d4a8bca
+    status: BLOCKED
+    expected: false
+    note: >-
+      BLOCKED. Codex 0.146.0 names a span event after the Rust source location that emitted it, so this name
+      carries a relative source path, a space, and a colon. An event name is not an attribute, so
+      `keep_keys` cannot reach it and no Collector 0.158.0 processor can rewrite it. It is refused rather
+      than approved, and the inventory reports it by fingerprint so the name itself is never printed.
+  - id: span.event/responses_websocket.stream_request/sha256-7c17f1d23321d1ef5f9ad7a726dbd985eac6b1e81a538982988f330b19a9c283
+    status: BLOCKED
+    expected: false
+    note: >-
+      BLOCKED. Codex 0.146.0 names a span event after the Rust source location that emitted it, so this name
+      carries a relative source path, a space, and a colon. An event name is not an attribute, so
+      `keep_keys` cannot reach it and no Collector 0.158.0 processor can rewrite it. It is refused rather
+      than approved, and the inventory reports it by fingerprint so the name itself is never printed.
+  - id: span.event/session_init/sha256-fe4f9dc1a8bf17e9b0a90db70d2aaea9ba6822f0217038ca21fdd708b29b6939
+    status: BLOCKED
+    expected: false
+    note: >-
+      BLOCKED. Codex 0.146.0 names a span event after the Rust source location that emitted it, so this name
+      carries a relative source path, a space, and a colon. An event name is not an attribute, so
+      `keep_keys` cannot reach it and no Collector 0.158.0 processor can rewrite it. It is refused rather
+      than approved, and the inventory reports it by fingerprint so the name itself is never printed.
+  - id: span.event/startup_prewarm.resolve/sha256-eb2b659392c60a1734484f19bc9d38178d178206044aeabbf1b0ccdcb11777d9
+    status: BLOCKED
+    expected: false
+    note: >-
+      BLOCKED. Codex 0.146.0 names a span event after the Rust source location that emitted it, so this name
+      carries a relative source path, a space, and a colon. An event name is not an attribute, so
+      `keep_keys` cannot reach it and no Collector 0.158.0 processor can rewrite it. It is refused rather
+      than approved, and the inventory reports it by fingerprint so the name itself is never printed.
+  - id: span.event/startup_prewarm/sha256-eb2b659392c60a1734484f19bc9d38178d178206044aeabbf1b0ccdcb11777d9
+    status: BLOCKED
+    expected: false
+    note: >-
+      BLOCKED. Codex 0.146.0 names a span event after the Rust source location that emitted it, so this name
+      carries a relative source path, a space, and a colon. An event name is not an attribute, so
+      `keep_keys` cannot reach it and no Collector 0.158.0 processor can rewrite it. It is refused rather
+      than approved, and the inventory reports it by fingerprint so the name itself is never printed.
+  - id: span.event/thread/start/sha256-eb2b659392c60a1734484f19bc9d38178d178206044aeabbf1b0ccdcb11777d9
+    status: BLOCKED
+    expected: false
+    note: >-
+      BLOCKED. Codex 0.146.0 names a span event after the Rust source location that emitted it, so this name
+      carries a relative source path, a space, and a colon. An event name is not an attribute, so
+      `keep_keys` cannot reach it and no Collector 0.158.0 processor can rewrite it. It is refused rather
+      than approved, and the inventory reports it by fingerprint so the name itself is never printed.
+  - id: span.event/try_run_sampling_request/sha256-2760a654cfccaaa2d1bc60c8e3542558c8487122ec2a6627d17a993c814018d6
+    status: BLOCKED
+    expected: false
+    note: >-
+      BLOCKED. Codex 0.146.0 names a span event after the Rust source location that emitted it, so this name
+      carries a relative source path, a space, and a colon. An event name is not an attribute, so
+      `keep_keys` cannot reach it and no Collector 0.158.0 processor can rewrite it. It is refused rather
+      than approved, and the inventory reports it by fingerprint so the name itself is never printed.
+
+  # -------------------------------------------------------------------------------------------
+  # Metric names -- 36
+  # Thirty-four native Codex instruments and Forge's two span-count connectors. No data point
+  # carried an attribute, so there is no `metric.datapoint.attribute` entry to review: the
+  # instrument name and its descriptor are the entire metric surface this run produced.
+  # -------------------------------------------------------------------------------------------
+  - id: metric/codex.conversation.turn.count
+    status: APPROVED
+    expected: false
+    unit_classes: [absent]
+    description_classes: [absent]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/codex.feature.state
+    status: APPROVED
+    expected: false
+    unit_classes: [absent]
+    description_classes: [absent]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/codex.process.start
+    status: APPROVED
+    expected: false
+    unit_classes: [absent]
+    description_classes: [absent]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/codex.remote_models.fetch_update.duration_ms
+    status: APPROVED
+    expected: false
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.remote_models.load_cache.duration_ms
+    status: APPROVED
+    expected: false
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.responses_api_engine_iapi_tbt.duration_ms
+    status: APPROVED
+    expected: false
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.responses_api_engine_iapi_ttft.duration_ms
+    status: APPROVED
+    expected: false
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.responses_api_engine_service_tbt.duration_ms
+    status: APPROVED
+    expected: false
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.responses_api_engine_service_ttft.duration_ms
+    status: APPROVED
+    expected: false
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.responses_api_inference_time.duration_ms
+    status: APPROVED
+    expected: false
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.responses_api_overhead.duration_ms
+    status: APPROVED
+    expected: false
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.shell_snapshot
+    status: APPROVED
+    expected: false
+    unit_classes: [absent]
+    description_classes: [absent]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/codex.shell_snapshot.duration_ms
+    status: APPROVED
+    expected: false
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.sqlite.init.count
+    status: APPROVED
+    expected: false
+    unit_classes: [absent]
+    description_classes: [absent]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/codex.sqlite.init.duration_ms
+    status: APPROVED
+    expected: false
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.startup.phase.duration_ms
+    status: APPROVED
+    expected: false
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.startup_prewarm.age_at_first_turn_ms
+    status: APPROVED
+    expected: false
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.startup_prewarm.duration_ms
+    status: APPROVED
+    expected: false
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.thread.skills.description_truncated_chars
+    status: APPROVED
+    expected: false
+    unit_classes: [absent]
+    description_classes: [absent]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.thread.skills.enabled_total
+    status: APPROVED
+    expected: false
+    unit_classes: [absent]
+    description_classes: [absent]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.thread.skills.kept_total
+    status: APPROVED
+    expected: false
+    unit_classes: [absent]
+    description_classes: [absent]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.thread.skills.truncated
+    status: APPROVED
+    expected: false
+    unit_classes: [absent]
+    description_classes: [absent]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.thread.started
+    status: APPROVED
+    expected: false
+    unit_classes: [absent]
+    description_classes: [absent]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/codex.turn.e2e_duration_ms
+    status: APPROVED
+    expected: false
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.turn.memory
+    status: APPROVED
+    expected: false
+    unit_classes: [absent]
+    description_classes: [absent]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/codex.turn.network_proxy
+    status: APPROVED
+    expected: false
+    unit_classes: [absent]
+    description_classes: [absent]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/codex.turn.token_usage
+    status: APPROVED
+    expected: false
+    unit_classes: [absent]
+    description_classes: [absent]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+    note: >-
+      Approved, observational only. A native Codex instrument; it is not a bill, not a remaining balance,
+      and not an input to Forge accounting or budgets.
+  - id: metric/codex.turn.tool.call
+    status: APPROVED
+    expected: false
+    unit_classes: [absent]
+    description_classes: [absent]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.turn.ttfm.duration_ms
+    status: APPROVED
+    expected: false
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.turn.ttft.duration_ms
+    status: APPROVED
+    expected: false
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.websocket.event
+    status: APPROVED
+    expected: false
+    unit_classes: [absent]
+    description_classes: [absent]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/codex.websocket.event.duration_ms
+    status: APPROVED
+    expected: false
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/codex.websocket.request
+    status: APPROVED
+    expected: false
+    unit_classes: [absent]
+    description_classes: [absent]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/codex.websocket.request.duration_ms
+    status: APPROVED
+    expected: false
+    unit_classes: [approved-static-string]
+    description_classes: [approved-static-string]
+    data_types: [Histogram]
+    aggregation_temporalities: [Delta]
+  - id: metric/forge.diagnostic.span.accepted.other
+    status: APPROVED
+    expected: false
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
+  - id: metric/forge.diagnostic.span.exported.other
+    status: APPROVED
+    expected: false
+    unit_classes: [absent]
+    description_classes: [approved-static-string]
+    data_types: [Sum]
+    aggregation_temporalities: [Delta]
+    monotonicity: [true]
