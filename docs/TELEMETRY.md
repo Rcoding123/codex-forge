@@ -712,8 +712,10 @@ not weakened in the meantime.
   environment can suppress them; the Collector's privacy processor is what removes them. Enabling a
   Claude exporter without it running exports operator identity on the first request.
 - **Codex strict-config behavior remains unresolved.** The exact `-c` nesting for telemetry
-  overrides, and whether custom attributes reach *every* request span, are still open questions. No
-  Codex override is implemented here, and the Codex correlation mechanism stays **proposed**.
+  overrides, and whether custom attributes reach *every* request span, are still open questions. A
+  Codex override *builder* now exists (see [Codex telemetry canary](#codex-telemetry-canary-gate-7-foundation)),
+  no production path calls it, no Codex process has accepted its output, and the Codex correlation
+  mechanism stays **proposed**.
 
 ### What the module provides
 
@@ -724,6 +726,8 @@ not weakened in the meantime.
 | `current_traceparent()` | The W3C `traceparent` of the active Forge span, or `None` |
 | `InvocationContext` | `invocation_id`, `contract_version`, `traceparent` — and nothing else |
 | `build_claude_child_environment(base, context)` | A **new** dictionary; `os.environ` and `base` are left byte-for-byte unchanged |
+| `build_codex_child_environment(base, endpoint=…)` | A **new** dictionary with inherited telemetry configuration removed and **nothing added** |
+| `build_codex_otel_overrides(context, endpoint=…)` | An immutable `-c` argv fragment; **proposed, never accepted by Codex** |
 | `validate_loopback_endpoint(value)` | The endpoint unchanged, or `ValueError` |
 
 `AGENT_TELEMETRY_CONTRACT_VERSION` is defined once, in that module, and is the only place in
@@ -1117,6 +1121,170 @@ logic, and it needs no other file — the Collector log is not part of the ident
 - **Native agent metrics remain observational only.**
 - **Nothing is enabled.** `ops/otel/collector-config.yaml` is unchanged, no production module imports
   the harness, and native Claude and Codex telemetry stay disabled.
+
+## Codex telemetry canary (Gate 7 foundation)
+
+**Gate 7 has not passed.** `tests/otel_codex_canary.py` is the harness for one supervised Codex
+request that **has not been made**. No Codex process has run under it, no `-c` override has been
+accepted by a real `codex --strict-config` invocation, and nothing in this section is evidence about
+Codex. What exists is the apparatus and its refusals; what is missing is the run.
+
+Codex differs from Claude in the two ways that decide the shape of this harness:
+
+- **It is configured per invocation, not by environment variable.** Contract section 4 requires a
+  `-c` override and forbids touching `~/.codex/config.toml`, which every Codex process on the machine
+  reads. `--strict-config` then makes the override a real test: an unrecognized key fails the
+  invocation instead of being ignored.
+- **Its content-bearing events are logs.** Codex 0.146.0's own event definitions put `prompt`,
+  `user.email`, and `user.account_id` on the logs signal. `otel.exporter` — the *logs* exporter — is
+  therefore pinned to `none`, and the Collector still declares no logs pipeline beneath it.
+
+### The exact `-c` override vector
+
+Built by `agent_telemetry.build_codex_otel_overrides()` as separate argv elements, never a string:
+
+```
+-c otel.exporter="none"
+-c otel.log_user_prompt=false
+-c otel.trace_exporter={otlp-http={endpoint="http://127.0.0.1:<port>",protocol="binary",headers={}}}
+-c otel.metrics_exporter={otlp-http={endpoint="http://127.0.0.1:<port>",protocol="binary",headers={}}}
+-c otel.environment="forge-canary"
+-c otel.span_attributes={"forge.invocation.id"="<32 hex>","forge.telemetry.contract.version"="1.0"}
+```
+
+`<port>` is the ephemeral loopback port the run's own Collector bound; `<32 hex>` is the invocation
+identifier that run minted. Neither exists before the run starts, so neither can be typed on a
+command line. `otel.tracestate` is never written — it is unbounded vendor text, and contract section 4
+admits inbound trace context only. Values are TOML basic strings drawn from a bounded alphabet; a
+value that would need escaping is **refused** rather than escaped, which also means no element of the
+vector contains a backslash, a quote-inside-a-quote, or whitespace for a Windows shim to re-split.
+
+#### What this vector does not yet prove
+
+`--strict-config` acceptance is exactly what the supervised run is for. Three details are read off the
+0.146.0 binary's configuration surface rather than off a successful invocation, and each is a way the
+run can legitimately fail:
+
+1. the nesting of an exporter variant — `{otlp-http={…}}` as an externally tagged table;
+2. whether `headers` is a field of that variant, and whether an empty table is accepted;
+3. whether `endpoint` is a **base** URL to which `/v1/traces` and `/v1/metrics` are appended, or a
+   full signal URL. The base form is what the builder emits, because the exporter Codex embeds
+   appends those paths when it reads a base endpoint from the environment.
+
+Until one supervised run accepts it, none of the three may be described as settled, and the Codex
+correlation mechanism stays **proposed**.
+
+### The exact Codex vector
+
+```
+[0]  codex
+[1]  --ask-for-approval      [2]  never
+[3]  --sandbox               [4]  read-only
+[5]  --model                 [6]  gpt-5.6-terra
+[7]  -c                      [8]  model_reasoning_effort=low
+[9..20]  the six -c otel overrides above
+[21..38] --disable apps | browser_use | browser_use_external | goals | image_generation
+                  | memories | multi_agent | plugins | skill_search
+[39] exec
+[40] --json  [41] --strict-config  [42] --ephemeral  [43] --ignore-user-config
+[44] --skip-git-repo-check
+[45] Reply with exactly CANARY_OK and nothing else.
+```
+
+Global options precede `exec` and subcommand options follow it, which is the placement `CodexRunner`
+already uses. The `--disable` list is **read from `ForgeConfig`'s own default**, not retyped, so it
+cannot drift from what Forge disables in ordinary runs. The prompt is the same one the Claude canary
+uses, so the two gates differ in the agent and nothing else.
+
+`python tests/otel_codex_canary.py --output-dir <dir> --dry-run` prints this vector by index with a
+placeholder port and a placeholder identifier, prints the PowerShell command, and starts nothing.
+
+Refused by name: `--dangerously-bypass-approvals-and-sandbox`, its `--yolo` alias, the removed
+`--full-auto`, the `workspace-write` and `danger-full-access` sandboxes, any `--ask-for-approval`
+other than `never`, any prompt other than the exact canary prompt, and any operator-supplied
+`otel.*` override. `--codex-executable` names the executable by path; it is the only part of the
+vector an operator may change.
+
+### `CODEX_HOME` is preserved and never redirected
+
+`build_codex_child_environment()` copies the environment it is handed, removes every inherited
+`OTEL_*` and `CLAUDE_CODE_OTEL_*` name (compared case-insensitively), `TRACEPARENT`, and `TRACESTATE`,
+and **adds nothing**. `CODEX_HOME` is not in either list:
+
+- set by the operator → the child gets exactly that value, byte for byte;
+- unset → the child has no `CODEX_HOME`.
+
+Forge never creates, replaces, redirects, or deletes it, and never reads or writes any file under it.
+`CODEX_HOME` selects credential, history, and session storage; relocating it would break login rather
+than isolate telemetry. Isolation comes from `--ignore-user-config`, which skips
+`$CODEX_HOME/config.toml` while still authenticating out of `CODEX_HOME`.
+
+The removal is not decoration. Codex 0.146.0 embeds an OTLP exporter that reads the standard
+`OTEL_EXPORTER_OTLP_*` variables and falls back to `http://localhost:4318`, so an inherited endpoint
+or header variable would reach that exporter underneath the `-c` configuration. Forge's own Codex
+configuration deliberately depends on **none** of those variables.
+
+### What the supervised run will report
+
+One JSON and one Markdown file under the chosen output directory, schema
+`forge.codex.telemetry-canary/1`, with a section each for:
+
+| Section | What it answers |
+| --- | --- |
+| canary process | Codex exit code, whether it timed out, JSONL lines, malformed lines, bounded event-type counts, whether exactly one visible assistant response came back and whether it was exactly `CANARY_OK` |
+| telemetry transport | logs exporter, whether a logs pipeline is declared, log records accepted and refused, whether any log signal reached the exporter, Collector exit, whether the counts settled |
+| correlation | three booleans: `forge.invocation.id` observed after redaction, its value matched the locally held one, `forge.telemetry.contract.version` observed |
+| span accounting | accepted, exported, deliberately filtered, refused, send-failed, unresolved remainder, and the bounded by-name breakdown |
+| metric accounting | metric points accepted, exported, refused, send-failed, unresolved remainder |
+| privacy check | every check that ran, every finding, and the forbidden-output scan of the report itself |
+| limitations | what a PASS still does not mean |
+
+**The invocation identifier is never printed.** The report says the attribute was observed and that
+its value equalled the one the harness is holding; it never carries the value. The rendered report is
+scanned for a 32-character hexadecimal run — among nine other forbidden shapes — and a report that
+matched one is replaced by a stub naming the pattern rather than written.
+
+Gate 7 fails on any of: a nonzero unresolved span or metric remainder, an absent or non-matching
+correlation attribute, any log record or logs pipeline, a malformed JSONL line, a reply that is not
+exactly `CANARY_OK`, a timeout, a nonzero exit from Codex or the Collector, a privacy finding, or a
+forbidden value in the report.
+
+### The later supervised run
+
+Not part of this slice. It is a separate, supervised event that needs its own approval, and it is the
+only thing that can produce a Gate 7 `PASS`.
+
+```powershell
+$env:OTELCOL_PATH = 'C:\Tools\OpenTelemetry\otelcol-contrib\0.158.0\otelcol-contrib.exe'
+.\.venv\Scripts\python.exe tests\otel_codex_canary.py `
+    --output-dir 'C:\CodexData\canary\codex1' `
+    --approved-by '<the human approving this run>'
+```
+
+- **`--approved-by` is mandatory.** Without it the harness prints a refusal and starts nothing — no
+  Collector, no Codex, no output directory.
+- **An existing output directory stops the run** before a Collector is started.
+- **Codex runs in a fresh empty temporary directory** outside the repository, created under the system
+  temporary directory and removed on every path including a timeout. It holds the child's JSONL, which
+  contains the reply; the reply is reduced to counts inside that directory and the directory is then
+  deleted. No message text leaves the harness.
+- **The Collector and the Codex child are reaped on every path**, and the run is bounded by a
+  five-minute timeout.
+
+### What Gate 7 does not change
+
+- **Gate 7 is not a field inventory.** It observes one invocation. No Codex resource, span, event, or
+  metric attribute has been individually inspected or approved — that is **Gate 8**, and it needs its
+  own manifest and its own supervised run.
+- **Normal Forge execution remains unwired.** No production module imports these builders,
+  `CodexRunner` emits no `-c otel` override and no `OTEL_*` variable, and native Codex telemetry stays
+  disabled outside the harness. A test runs a real `CodexRunner.run()` against a recording executable
+  and asserts both.
+- **Traces and metrics are observational.** Forge persisted usage remains the authoritative basis for
+  accounting, budgets, retries, and task state. Nothing here feeds any of them, and no schema or
+  public JSON contract changes.
+- **Native telemetry proves nothing about cost or quota.** Token counts on a span are the model's
+  report of one request — not a bill, and not a remaining balance.
 
 ## Verify spans
 

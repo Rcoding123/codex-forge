@@ -758,6 +758,234 @@ def test_loopback_endpoints_are_accepted_unchanged(endpoint):
 
 
 # ------------------------------------------------------------------------------------------------
+# 17a-17k. The Codex child environment and the Codex `-c` overrides (Gate 7 foundation)
+# ------------------------------------------------------------------------------------------------
+#
+# Gate 7 has not passed and no Codex process has run. Everything below tests the two pure builders
+# against synthetic input; none of it is evidence that Codex accepts the override.
+
+CODEX_ENDPOINT = "http://127.0.0.1:4318"
+
+
+def test_codex_environment_builder_adds_nothing_and_removes_only_telemetry():
+    base = {**HOSTILE_ENVIRONMENT, **UNRELATED_ENVIRONMENT}
+    built = agent_telemetry.build_codex_child_environment(base, endpoint=CODEX_ENDPOINT)
+
+    # Codex is configured by `-c`, so there is no approved block and nothing is added at all.
+    assert agent_telemetry.CODEX_CHILD_ENVIRONMENT_KEYS == frozenset()
+    assert set(built) - set(base) == set()
+    for key, value in UNRELATED_ENVIRONMENT.items():
+        assert built[key] == value, key
+    assert {key for key in built if is_neutralized_key(key)} == set()
+    joined = " ".join(f"{key}={value}" for key, value in built.items())
+    for sentinel in LEAK_SENTINELS:
+        if sentinel in " ".join(UNRELATED_ENVIRONMENT.values()):
+            continue
+        assert sentinel not in joined, sentinel
+
+
+def test_codex_environment_builder_mutates_neither_os_environ_nor_the_supplied_mapping():
+    before_environ = dict(os.environ)
+    base = {**HOSTILE_ENVIRONMENT, **UNRELATED_ENVIRONMENT}
+    before_base = dict(base)
+
+    built = agent_telemetry.build_codex_child_environment(base, endpoint=CODEX_ENDPOINT)
+
+    assert base == before_base
+    assert dict(os.environ) == before_environ
+    assert built is not base
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "otel_exporter_otlp_endpoint",
+        "Otel_Exporter_Otlp_Headers",
+        "OTEL_LOGS_EXPORTER",
+        "OTEL_SDK_DISABLED",
+        "CLAUDE_CODE_OTEL_FLUSH_TIMEOUT_MS",
+    ],
+)
+def test_codex_environment_removes_inherited_otel_configuration_case_insensitively(key):
+    """Codex 0.146.0 embeds an OTLP exporter that reads these; an inherited one is a destination."""
+    built = agent_telemetry.build_codex_child_environment(
+        {key: "https://collector.evil.invalid:4317", "PATH": "/usr/bin"}, endpoint=CODEX_ENDPOINT
+    )
+    assert key not in built
+    assert built == {"PATH": "/usr/bin"}
+
+
+@pytest.mark.parametrize("key", ["TRACEPARENT", "TRACESTATE", "TraceParent", "tracestate"])
+def test_codex_environment_removes_inherited_trace_context(key):
+    built = agent_telemetry.build_codex_child_environment(
+        {key: "00-" + "a" * 32 + "-" + "b" * 16 + "-01", "PATH": "/usr/bin"},
+        endpoint=CODEX_ENDPOINT,
+    )
+    assert built == {"PATH": "/usr/bin"}
+
+
+def test_codex_environment_preserves_an_existing_codex_home_exactly():
+    """Contract section 4: Forge neither sets nor relocates the Codex home."""
+    home = r"C:\Users\operator\.codex"
+    built = agent_telemetry.build_codex_child_environment(
+        {"CODEX_HOME": home, "OTEL_TRACES_EXPORTER": "console"}, endpoint=CODEX_ENDPOINT
+    )
+    assert built["CODEX_HOME"] == home
+    assert built == {"CODEX_HOME": home}
+
+
+def test_codex_environment_leaves_a_missing_codex_home_missing():
+    built = agent_telemetry.build_codex_child_environment({"PATH": "/usr/bin"}, endpoint=CODEX_ENDPOINT)
+    assert "CODEX_HOME" not in built
+    assert not any(key.upper() == "CODEX_HOME" for key in built)
+
+
+def test_codex_environment_leaves_authentication_variables_untouched():
+    """A canary that cannot authenticate is a canary that proves nothing; these must survive."""
+    credentials = {
+        "CODEX_HOME": r"C:\Users\operator\.codex",
+        "OPENAI_API_KEY": "sk-operator-key",
+        "USERPROFILE": r"C:\Users\operator",
+        "APPDATA": r"C:\Users\operator\AppData\Roaming",
+    }
+    built = agent_telemetry.build_codex_child_environment(
+        {**credentials, **HOSTILE_ENVIRONMENT}, endpoint=CODEX_ENDPOINT
+    )
+    for key, value in credentials.items():
+        assert built[key] == value, key
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://10.0.0.5:4318",
+        "https://127.0.0.1:4318",
+        "http://collector.example.invalid:4318",
+        "http://127.0.0.1",
+        "http://user:pass@127.0.0.1:4318",
+        "http://127.0.0.1:4318/v1/traces",
+        "",
+    ],
+)
+def test_codex_builders_accept_only_a_loopback_collector(endpoint):
+    with pytest.raises(ValueError):
+        agent_telemetry.build_codex_child_environment({}, endpoint=endpoint)
+    with pytest.raises(ValueError):
+        agent_telemetry.build_codex_otel_overrides(context(), endpoint=endpoint)
+
+
+@pytest.mark.parametrize("endpoint", ["http://127.0.0.1:4318", "http://localhost:14318"])
+def test_codex_builders_accept_loopback_endpoints(endpoint):
+    assert agent_telemetry.build_codex_child_environment({}, endpoint=endpoint) == {}
+    overrides = agent_telemetry.build_codex_otel_overrides(context(), endpoint=endpoint)
+    assert sum(1 for item in overrides if endpoint in item) == 2
+
+
+def _override_values(overrides: tuple[str, ...]) -> dict[str, str]:
+    assert len(overrides) % 2 == 0
+    assert overrides[::2] == ("-c",) * (len(overrides) // 2), "every value must have its own -c"
+    return dict(item.split("=", 1) for item in overrides[1::2])
+
+
+def test_codex_overrides_are_an_immutable_vector_of_separate_arguments():
+    overrides = agent_telemetry.build_codex_otel_overrides(context(), endpoint=CODEX_ENDPOINT)
+    assert isinstance(overrides, tuple)
+    assert all(isinstance(item, str) for item in overrides)
+    # No element may carry an embedded space that a shim could re-split on, and none may be a joined
+    # `-c key=value` pair.
+    assert [item for item in overrides if " " in item] == []
+    assert tuple(_override_values(overrides)) == agent_telemetry.CODEX_OTEL_OVERRIDE_KEYS
+
+
+def test_codex_overrides_disable_logs_and_prompt_logging():
+    values = _override_values(
+        agent_telemetry.build_codex_otel_overrides(context(), endpoint=CODEX_ENDPOINT)
+    )
+    assert values["otel.exporter"] == '"none"'
+    assert values["otel.log_user_prompt"] == "false"
+    assert agent_telemetry.CODEX_LOGS_EXPORTER == "none"
+
+
+def test_codex_overrides_send_traces_and_metrics_only_to_the_loopback_collector():
+    values = _override_values(
+        agent_telemetry.build_codex_otel_overrides(context(), endpoint=CODEX_ENDPOINT)
+    )
+    for key in ("otel.trace_exporter", "otel.metrics_exporter"):
+        assert values[key] == (
+            '{otlp-http={endpoint="http://127.0.0.1:4318",protocol="binary",headers={}}}'
+        ), key
+    assert values["otel.environment"] == '"forge-canary"'
+    # Exactly one destination appears anywhere in the vector, and it is the loopback Collector.
+    assert " ".join(values.values()).count("http://") == 2
+    assert "otel.tracestate" not in values
+    assert agent_telemetry.CODEX_FORBIDDEN_OVERRIDE_KEYS & set(values) == frozenset()
+
+
+def test_codex_overrides_carry_both_canonical_correlation_attributes_and_no_third():
+    fresh = context(SAMPLE_TRACEPARENT)
+    values = _override_values(
+        agent_telemetry.build_codex_otel_overrides(fresh, endpoint=CODEX_ENDPOINT)
+    )
+    attributes = values["otel.span_attributes"]
+
+    assert attributes == (
+        '{"forge.invocation.id"="%s","forge.telemetry.contract.version"="1.0"}' % fresh.invocation_id
+    )
+    assert attributes.count("=") == 2, "exactly two attributes, and no third"
+    assert agent_telemetry.CODEX_SPAN_ATTRIBUTE_KEYS == (ATTR_INVOCATION_ID, ATTR_CONTRACT_VERSION)
+    # A traceparent is never forwarded to Codex: contract section 4 admits inbound context only.
+    assert SAMPLE_TRACEPARENT not in " ".join(values.values())
+
+
+def test_codex_overrides_use_the_canonical_invocation_id_format():
+    """One identifier format across both providers. A second format is a second thing to review."""
+    fresh = new_invocation_context()
+    values = _override_values(
+        agent_telemetry.build_codex_otel_overrides(fresh, endpoint=CODEX_ENDPOINT)
+    )
+    embedded = values["otel.span_attributes"].split('"forge.invocation.id"="', 1)[1].split('"', 1)[0]
+
+    assert embedded == fresh.invocation_id
+    assert is_valid_invocation_id(embedded)
+    assert len(embedded) == INVOCATION_ID_CHARS == 32
+    claude = build_claude_child_environment({}, fresh)["OTEL_RESOURCE_ATTRIBUTES"]
+    assert fresh.invocation_id in claude, "both providers carry the same value, in the same format"
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        InvocationContext(invocation_id="not-hex"),
+        InvocationContext(invocation_id=new_invocation_id().upper()),
+        InvocationContext(invocation_id=new_invocation_id(), contract_version="2.0"),
+        InvocationContext(invocation_id='x" ,user.email="a'),
+    ],
+)
+def test_codex_overrides_fail_closed_on_a_context_they_cannot_render(invalid):
+    with pytest.raises(ValueError):
+        agent_telemetry.build_codex_otel_overrides(invalid, endpoint=CODEX_ENDPOINT)
+
+
+def test_codex_override_values_are_never_escaped_into_safety():
+    """A value that would need escaping came from somewhere the builder does not accept input."""
+    for hostile in ('a"b', "a\\b", "a b", "a\nb", "", "x" * 201):
+        with pytest.raises(ValueError):
+            agent_telemetry._toml_string(hostile)
+    assert agent_telemetry._toml_string("http://127.0.0.1:4318") == '"http://127.0.0.1:4318"'
+
+
+def test_codex_overrides_carry_no_task_project_or_operator_material():
+    values = " ".join(
+        _override_values(
+            agent_telemetry.build_codex_otel_overrides(context(), endpoint=CODEX_ENDPOINT)
+        ).values()
+    )
+    for material in HOSTILE_MATERIAL.values():
+        assert material not in values
+
+
+# ------------------------------------------------------------------------------------------------
 # 18. Nothing is wired
 # ------------------------------------------------------------------------------------------------
 

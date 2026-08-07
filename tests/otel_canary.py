@@ -112,6 +112,54 @@ class SpanAccounting:
 
 
 @dataclass(frozen=True)
+class MetricAccounting:
+    """The metric points the Collector took in, and how many left through the certified exporter.
+
+    Metrics are a second signal with its own counters, and a span accounting says nothing about
+    them. An agent canary that enables metrics needs both, because a metric point that the receiver
+    accepted and the exporter never sent is the same unexplained loss a missing span would be.
+    """
+
+    accepted: int
+    exported: int
+    refused: int
+    send_failed: int
+
+    @property
+    def unresolved(self) -> int:
+        return self.accepted - self.exported - self.refused - self.send_failed
+
+    @property
+    def balanced(self) -> bool:
+        return self.unresolved == 0
+
+
+COUNTER_ACCEPTED_POINTS = "otelcol_receiver_accepted_metric_points"
+COUNTER_REFUSED_POINTS = "otelcol_receiver_refused_metric_points"
+COUNTER_SENT_POINTS = "otelcol_exporter_sent_metric_points"
+COUNTER_SEND_FAILED_POINTS = "otelcol_exporter_send_failed_metric_points"
+
+
+def read_metric_accounting(port: int) -> MetricAccounting:
+    """Read the metric-point totals from the Collector's own loopback internal telemetry.
+
+    There is no `filtered` term. `filter/unredactable` drops metric *data points* under its own
+    span-oriented counter name, so a deliberate metric drop shows up as an unresolved remainder
+    rather than being explained away — which is the honest default for a signal whose deliberate
+    drops this repository has not yet characterised.
+    """
+    series = certification.scrape_internal_metrics(port)
+    return MetricAccounting(
+        accepted=certification.counter_total(series, COUNTER_ACCEPTED_POINTS),
+        exported=certification.counter_total(series, COUNTER_SENT_POINTS, exporter="debug"),
+        refused=certification.counter_total(series, COUNTER_REFUSED_POINTS),
+        send_failed=certification.counter_total(
+            series, COUNTER_SEND_FAILED_POINTS, exporter="debug"
+        ),
+    )
+
+
+@dataclass(frozen=True)
 class PrivacyCheck:
     """The result of inspecting what the exporter actually printed.
 
@@ -137,6 +185,11 @@ class CanaryReport:
     # What the privacy check was run against. Kept so a reviewer can re-derive the check's verdict
     # from the same bytes rather than trusting it; `render` never prints it.
     output: str = ""
+    # Whatever a caller's `probe` read from the Collector's internal telemetry once the counters had
+    # settled and before the process was stopped. `None` when no probe was supplied, or when the run
+    # never reached a settled state. `render` never prints it: a probe is caller-defined, so this
+    # module cannot promise what it holds is safe to display.
+    probe: object | None = None
 
     @property
     def passed(self) -> bool:
@@ -372,13 +425,21 @@ def otlp_payload_agent(payloads: Sequence[tuple[str, dict]]) -> Callable[[dict, 
 
 
 def subprocess_agent(
-    argv: Sequence[str], environment: Mapping[str, str], *, timeout: float = 900.0
+    argv: Sequence[str],
+    environment: Mapping[str, str],
+    *,
+    timeout: float = 900.0,
+    on_timeout: Callable[[], None] | None = None,
 ) -> Callable[[dict, Path], int]:
     """An agent that launches a real child process and always reaps it.
 
     Nothing in this module builds a Claude command line or a Claude environment. Both are the
     caller's, and the caller is the command-line entry point below, which will not assemble either
     without a named human approval.
+
+    ``on_timeout`` is called once if the child outlives ``timeout``, before it is terminated. The
+    return code of a terminated child is not distinguishable from an ordinary failure, so a caller
+    that must report "it timed out" rather than "it failed" needs to be told here.
     """
 
     def agent(ports: dict, workdir: Path) -> int:
@@ -396,6 +457,8 @@ def subprocess_agent(
         try:
             return process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            if on_timeout is not None:
+                on_timeout()
             return _terminate(process)
         finally:
             if process.poll() is None:
@@ -434,12 +497,19 @@ def run_canary(
     config: dict | None = None,
     startup_timeout: float = 60.0,
     settle_timeout: float = 180.0,
+    probe: Callable[[dict], object] | None = None,
 ) -> CanaryReport:
     """Start a Collector, run ``agent`` against it, and account for every span it accepted.
 
     ``config`` is the complete Collector configuration to run. Omit it for the shipped configuration
     plus the bounded diagnostic, which is what a canary uses; supply one to run a deliberately
     weakened variant, which is what the negative controls do.
+
+    ``probe`` is called once with the ports mapping after the counters settle and before the
+    Collector is stopped — the only window in which its internal telemetry endpoint still answers.
+    A canary that needs a total this module does not read (metric points, say) asks for it there
+    rather than starting a second Collector. A probe that raises is recorded as an error, never
+    swallowed, and never prevents the Collector from being reaped.
 
     The Collector is stopped and reaped on every path, including a failing agent, a Collector that
     never became ready, and an exception from anywhere in the body. The report is assembled in a
@@ -465,6 +535,7 @@ def run_canary(
     accounting: SpanAccounting | None = None
     agent_returncode: int | None = None
     collector_returncode: int | None = None
+    probed: object | None = None
     settled = False
 
     flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -504,6 +575,11 @@ def run_canary(
                 )
             except (urllib.error.URLError, OSError, TimeoutError) as error:
                 errors.append(f"internal telemetry could not be read: {error}")
+            if probe is not None:
+                try:
+                    probed = probe(ports)
+                except Exception as error:  # noqa: BLE001 - recorded, never swallowed
+                    errors.append(f"the probe raised {type(error).__name__}: {error}")
         except Exception as error:  # noqa: BLE001 - the report is the deliverable, not a traceback
             errors.append(f"{type(error).__name__}: {error}")
         finally:
@@ -532,6 +608,7 @@ def run_canary(
         agent_returncode=agent_returncode,
         errors=tuple(errors),
         output=output,
+        probe=probed,
     )
 
 

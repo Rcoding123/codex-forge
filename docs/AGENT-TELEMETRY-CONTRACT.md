@@ -246,6 +246,18 @@ sensitive. An identifier "derived from the task ID" fails this contract even if 
 - Until a dedicated contract test passes (Gate 7/8), the Codex correlation mechanism **MUST** be
   described everywhere — code, docs, commit messages — as **proposed**, not active.
 
+**Gate 7 foundation, added 2026-08-06.** `agent_telemetry.build_codex_otel_overrides()` now emits the
+proposed `-c` fragment — `otel.exporter="none"`, `otel.log_user_prompt=false`, an OTLP/HTTP binary
+`trace_exporter` and `metrics_exporter` addressing a loopback Collector, `otel.environment`, and
+`otel.span_attributes` carrying exactly the two reserved attributes — and
+`agent_telemetry.build_codex_child_environment()` returns a child environment with inherited
+telemetry configuration removed and **nothing added**, `CODEX_HOME` preserved exactly as the caller
+held it. `tests/otel_codex_canary.py` is the approval-gated harness that would run it.
+
+None of that is evidence. **No Codex process has run**, `--strict-config` has accepted nothing, and
+the exporter-table nesting, the presence of a `headers` field on it, and whether `endpoint` is a base
+or a full signal URL all remain **[UNRESOLVED]**. The mechanism stays **proposed**.
+
 ---
 
 ## 5 — Signal policy
@@ -628,10 +640,19 @@ Notes that make the ordering meaningful:
   evidence about Claude: **no supervised inventory run has been made**, the manifest approves
   nothing, names nobody, and carries the review state `candidate`, and the harness refuses to return
   a PASS verdict while that is so. See [Section 16](#16--field-inventory).
+- **The Gate 7 harness exists; Gate 7 has not passed.** `tests/otel_codex_canary.py` builds the
+  child environment, the `-c` override vector, and the exact Codex argument vector for one minimal
+  canary, and produces the `forge.codex.telemetry-canary/1` report. **No Codex process has run under
+  it.** One supervised Codex request remains required, and it is the only thing that can decide
+  whether `--strict-config` accepts the override at all. The harness starts nothing without
+  `--approved-by`. See [Section 17](#17--codex-canary).
+- **Gate 7 does not begin Gate 8.** One invocation is not an inspection of the fields it carried.
+  Gate 8 needs its own manifest, its own supervised run, and its own human.
 
 Gate 1 is the approval of this document. Gates 2–5 have passed. Gate 6 has its apparatus and none of
-its evidence; everything after it is unbuilt. Native Claude and Codex telemetry remain disabled:
-Gate 5 authorized one supervised run, not an enabled exporter.
+its evidence; Gate 7 now has its apparatus and none of its evidence either; everything after them is
+unbuilt. Native Claude and Codex telemetry remain disabled: Gate 5 authorized one supervised run, not
+an enabled exporter, and no Codex run has been authorized at all.
 
 ---
 
@@ -654,8 +675,8 @@ before treating that as more than it is. Every other item remains **[REQUIRED]**
 | 7 | Valid W3C `TRACEPARENT` — well-formed, and derived from the active `forge.phase` span **[CERTIFIED]** | 4 |
 | 8 | Claude parentage under `forge.phase` — **[CERTIFIED] for `claude_code.interaction`** by the supervised canary; **[BLOCKED] for `claude_code.llm_request`**, which `filter/unredactable` drops for links | 5, 6 |
 | 9 | **No traceparent propagation to Anthropic** — `CLAUDE_CODE_PROPAGATE_TRACEPARENT` is never enabled **[CERTIFIED]** | 4 |
-| 10 | Codex `-c` strict-config acceptance — the override is accepted and does not fail the invocation | 7 |
-| 11 | Windows shim quoting — the override survives the shim without splitting or mangling | 7 |
+| 10 | Codex `-c` strict-config acceptance — the override is accepted and does not fail the invocation **[REQUIRED]** — a builder exists; no Codex process has accepted its output | 7 |
+| 11 | Windows shim quoting — the override survives the shim without splitting or mangling **[REQUIRED]** — the canary goes through the same `_build_process_command` shim `CodexRunner` uses, and no element of the vector contains a backslash, an embedded quote, or whitespace | 7 |
 | 12 | Collector redaction of **span attributes** **[CERTIFIED]** | 3 |
 | 13 | Collector redaction of **span events** **[CERTIFIED]** | 3 |
 | 14 | Collector redaction of **metric attributes** **[CERTIFIED]** | 3 |
@@ -681,6 +702,12 @@ before treating that as more than it is. Every other item remains **[REQUIRED]**
 | 32 | **The JSON and Markdown reports are deterministic and describe the same inventory** **[CERTIFIED]** | 6 |
 | 33 | **The inventory run starts nothing without `--approved-by`**, launches an exact approved argument vector, refuses bypass flags and conflicting commands, refuses to overwrite an existing output directory, and reaps the Collector and child on every failure path **[CERTIFIED]** | 6 |
 | 34 | **Every observed Claude field is inspected and approved by a human** — the manifest names the reviewer, no observed field is UNAPPROVED, and the verdict is PASS | 6 |
+| 35 | **The Codex child environment adds nothing and removes only telemetry** — inherited `OTEL_*` names go case-insensitively, `TRACEPARENT` and `TRACESTATE` go, `CODEX_HOME` is preserved exactly when present and absent when not, authentication variables survive, and neither `os.environ` nor the supplied mapping is mutated **[CERTIFIED]** | 7 |
+| 36 | **The Codex override vector disables logs and addresses only loopback** — `otel.exporter` is `none`, `otel.log_user_prompt` is `false`, traces and metrics name one validated loopback endpoint, both correlation attributes are configured and no third, `otel.tracestate` is never written, and a value that would need escaping is refused **[CERTIFIED]** | 7 |
+| 37 | **The Codex canary vector is exact** — separate argv elements, `read-only` sandbox, `never` approval policy, `--ephemeral`, `--strict-config`, `--ignore-user-config` without replacing `CODEX_HOME`, the reused worker-feature disables, and the exact canary prompt; bypass flags, writable sandboxes, and conflicting commands are refused by name **[CERTIFIED]** | 7 |
+| 38 | **The Codex canary starts nothing without `--approved-by`**, `--dry-run` starts nothing and prints no environment value, an existing output directory is refused before a Collector starts, and the Collector and child are reaped on every path including a timeout **[CERTIFIED]** | 7 |
+| 39 | **The Gate 7 report fails closed** — malformed JSONL, a reply other than exactly `CANARY_OK`, a nonzero span or metric-point remainder, an absent or non-matching correlation attribute, any log record or logs pipeline, a privacy finding, or a forbidden value in the report each produce FAIL, and the invocation identifier never appears in the report **[CERTIFIED]** | 7 |
+| 40 | **One supervised Codex canary passes** — `--strict-config` accepts the override, traces and metrics reach the Collector, `forge.invocation.id` correlates them to that invocation, and every count balances | 7 |
 
 ### What "certified at the helper level" means for items 1–7 and 9
 
@@ -711,8 +738,16 @@ interaction level — it is **not** an inspection of the fields that span carrie
 certified in the same narrow sense: they certify that the **inventory harness** behaves, against
 synthetic payloads and the Gate 3 hostile ones. **Item 34 — the actual Gate 6 requirement — remains
 [REQUIRED].** It is the one item in this table that no amount of test code can satisfy, because it
-asks for a human's judgement about a field set nobody has observed yet. Gates 7–8 are where they
-were, since no Codex run has approached them.
+asks for a human's judgement about a field set nobody has observed yet.
+
+Items 35–39 are certified in that same narrow sense, and the distinction matters more for Codex than
+it did for Claude. They certify the **builders and the harness**, against synthetic Collector
+payloads: that the environment builder adds nothing and preserves `CODEX_HOME`, that the override
+vector is what this document says it is, that the argument vector is exact and its refusals hold,
+and that the report fails closed on every Gate 7 condition. **They certify nothing about Codex.** The
+one item that would — item 40, the supervised run — remains **[REQUIRED]**, and items 10 and 11 with
+it: no `codex` process has parsed the override, so `--strict-config` acceptance and Windows shim
+survival are both still open. Gate 8 is where it was.
 
 ---
 
@@ -723,7 +758,15 @@ MUST say so explicitly.
 
 ### Codex
 
-- Exact strict-config nesting for `-c` telemetry overrides.
+- Exact strict-config nesting for `-c` telemetry overrides. A proposed form is now written down and
+  emitted by `build_codex_otel_overrides()`, which narrows the question to three parts, all open:
+  whether an exporter variant is an externally tagged table (`{otlp-http={…}}`), whether `headers` is
+  a field of it and an empty table is accepted, and whether `endpoint` is a base URL to which
+  `/v1/traces` and `/v1/metrics` are appended or a full signal URL. Only a supervised run answers
+  these; a proposal is not an answer.
+- Whether the Windows shim (`cmd /d /s /c` around an npm `.cmd` shim) passes an override containing
+  `{`, `}`, `"`, and `=` through to Codex intact. The vector avoids backslashes, embedded quotes, and
+  whitespace for this reason, which reduces the risk without settling it.
 - Whether custom span attributes reach **all** request spans, or only some.
 - Whether account identity appears on Codex **trace** resources (it is known to appear in logs).
 - Served-model visibility.
@@ -1053,6 +1096,73 @@ One run, separately supervised, and not part of the slice that built the harness
 - **Native agent metrics remain observational evidence only.**
 - **It enables nothing.** Approving a field is not approving an exporter; that is Gate 10's business
   and needs its own approval.
+
+---
+
+## 17 — Codex canary
+
+Gate 7's subject. Added with the harness that would satisfy it, and **not** satisfied by it: at the
+time of writing no Codex process has run under this contract, and the section below describes a run
+that has not happened.
+
+### Why Codex needs its own gate
+
+Approving the Claude canary approved nothing here. Two differences are structural, not incidental:
+
+- **Configuration is per invocation.** Codex is configured by `-c` overrides
+  ([Section 4](#codex-correlation)), not by environment variable. `--strict-config` makes a wrong key
+  fail the invocation rather than be ignored — which is a feature, because it means the canary is a
+  real test of the override rather than a hope that it took effect.
+- **Content lives on the logs signal.** Codex's own event definitions carry `prompt`, `user.email`,
+  and `user.account_id` on logs. Codex's logs exporter **MUST** remain `none`
+  ([Section 5](#5--signal-policy)), and the Collector **MUST** continue to declare no logs pipeline
+  beneath it. Both barriers, as always, and neither excuses the other.
+
+### The supervised run
+
+One run, separately supervised, and not part of the slice that built the harness. It **MUST**:
+
+- require an explicit `--approved-by` value and start **nothing** without it — no Collector, no Codex
+  process, no output directory;
+- build the child environment through `build_codex_child_environment` and the overrides through
+  `build_codex_otel_overrides`, and no second builder;
+- **preserve `CODEX_HOME` exactly**, creating, replacing, redirecting, or deleting nothing, and
+  isolate configuration through `--ignore-user-config` instead;
+- run Codex in a **fresh empty temporary directory outside the repository**, removed on every path;
+- hold the invocation as an **argument vector**, never a command string, using `read-only` sandbox and
+  `never` approval policy, `--ephemeral`, `--strict-config`, `--skip-git-repo-check`, and the same
+  one-shot canary prompt the Claude canary uses. `--dangerously-bypass-approvals-and-sandbox`, its
+  `--yolo` alias, `--full-auto`, the `workspace-write` and `danger-full-access` sandboxes, any other
+  approval policy, any other prompt, and any operator-supplied `otel.*` override **MUST** be refused
+  by name;
+- refuse to overwrite an existing output directory;
+- bound the run by an explicit timeout, and reap the Collector and Codex on every path;
+- parse Codex's JSONL and require **exactly one** visible assistant response equal to `CANARY_OK`,
+  treating a malformed line as failure.
+
+### What it MUST report, and what it MUST NOT
+
+The report **MUST** distinguish the canary process result, the telemetry transport result, the
+correlation result, the span accounting ([Section 15](#15--span-accounting)), the metric-point
+accounting, the privacy check, the limitations, and the verdict. It **MUST** fail when the unresolved
+remainder of either accounting is nonzero, when either correlation attribute is absent, when a log
+record or a logs pipeline is observed, and when any forbidden value reaches the rendered report.
+
+It **MUST NOT** print the invocation identifier. The correlation result is that a valid value was
+present and that it matched the value the harness held — never the value itself. A 32-character
+hexadecimal run in a rendered report is a leak whether or not anyone recognizes what it identifies.
+
+### What a Codex canary does not change
+
+- **It is not a field inventory.** Gate 8 governs what Codex telemetry may *keep*, and needs its own
+  manifest, its own supervised run, and its own human. One invocation is not an inspection.
+- **Normal Forge execution stays unwired.** No production module imports the builders, `CodexRunner`
+  emits no `-c otel` override and no `OTEL_*` variable, and native Codex telemetry remains disabled
+  outside the harness.
+- **Forge persisted usage remains authoritative** ([Section 8](#8--token-semantics)). Traces and
+  metrics are observational; accounting, budgets, retries, task state, schemas, and the public JSON
+  contract are untouched.
+- **Nothing here reports cost or quota.** See [Section 13](#both).
 
 ---
 

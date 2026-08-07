@@ -7,9 +7,10 @@ slice would need in order to observe a Claude or Codex invocation. This module i
 **Nothing here is wired into normal Forge execution.** No production module imports it, and
 `CodexRunner.run()` still builds the same arguments and environment as before. The supervised
 Claude canary exercised these helpers only through the approval-gated canary harness. Native
-Claude and Codex telemetry remain disabled in normal execution, and no Codex `-c` override is
-implemented. Gate 5 has passed; Gate 6 field inspection remains incomplete, and Gate 7 requires
-separate human approval before any Codex canary.
+Claude and Codex telemetry remain disabled in normal execution. Gate 5 has passed; Gate 6 field
+inspection remains incomplete. The Codex helpers below are the Gate 7 *foundation*: **Gate 7 has
+not passed**, no Codex canary has run, and nothing here has been accepted by a real
+`codex --strict-config` invocation.
 
 What the module provides:
 
@@ -24,6 +25,13 @@ What the module provides:
   environment with inherited agent-telemetry configuration removed, then exactly the approved Claude
   settings applied. It never touches `os.environ`, the mapping it was handed, or any global agent
   configuration.
+* `build_codex_child_environment()` — the same neutralization with **no approved block at all**.
+  Codex is configured per invocation through `-c`, so the child gets no `OTEL_*` variable to read;
+  the only job the environment builder has is taking inherited ones away. `CODEX_HOME` is preserved
+  exactly as the caller held it and is never created, replaced, redirected, or deleted.
+* `build_codex_otel_overrides()` — the exact immutable `-c` argv fragment for one Codex invocation:
+  logs off, prompt logging off, traces and metrics to a loopback Collector over OTLP/HTTP, and the
+  two correlation attributes. **Proposed, not active** — see the caveats on that function.
 
 Fail-closed choices worth knowing before editing:
 
@@ -526,3 +534,217 @@ def build_claude_child_environment(
         raise RuntimeError(f"approved block must never set: {', '.join(sorted(forbidden))}.")
     child.update(approved)
     return child
+
+
+# --------------------------------------------------------------------------------------------
+# Codex child environment
+# --------------------------------------------------------------------------------------------
+
+# Empty, and that is the design. Contract section 4 requires Codex to be configured through a
+# per-invocation `-c` override, so there is no approved environment block to apply and no variable
+# for the child to read. The builder only *removes*.
+#
+# Removing is not optional. Codex 0.146.0 embeds an OTLP exporter that reads the standard
+# `OTEL_EXPORTER_OTLP_*` variables and falls back to `http://localhost:4318`; an inherited endpoint,
+# header, or protocol variable in the parent would therefore reach the exporter underneath the `-c`
+# configuration, which is exactly the destination substitution contract section 7 exists to prevent.
+CODEX_CHILD_ENVIRONMENT_KEYS: frozenset[str] = frozenset()
+
+
+def build_codex_child_environment(
+    base_environment: Mapping[str, str], *, endpoint: str
+) -> dict[str, str]:
+    """Return a new environment dictionary for a Codex child process.
+
+    Pure. `os.environ` is not read and not written, `base_environment` is not mutated, no global
+    Codex configuration is touched, `~/.codex/config.toml` is neither read nor written, and no
+    authentication file is opened, moved, or inspected.
+
+    **This function launches nothing, and no production path calls it.** It returns a dictionary.
+
+    The result is the supplied environment with inherited agent-telemetry configuration removed —
+    every `OTEL_*` and `CLAUDE_CODE_OTEL_*` name compared case-insensitively, plus `TRACEPARENT`,
+    `TRACESTATE`, and the Claude switches — and **nothing added**. Everything else survives
+    byte-for-byte, including `PATH` and including `CODEX_HOME`:
+
+    * A caller that had `CODEX_HOME` set gets exactly that value back, unchanged.
+    * A caller that had no `CODEX_HOME` gets no `CODEX_HOME`.
+
+    Contract section 4 forbids setting it either way. `CODEX_HOME` selects credential, history, and
+    session storage; relocating it is not a telemetry mechanism, and Codex's own
+    `--ignore-user-config` still authenticates out of `CODEX_HOME`, so a redirect would break login
+    rather than isolate telemetry.
+
+    `endpoint` is the loopback Collector the caller intends to point the child at. It is validated
+    and then deliberately **not written anywhere**: the endpoint travels in the `-c` override built
+    by :func:`build_codex_otel_overrides`, and validating it here means a caller cannot assemble a
+    child environment for a Collector that is not on this machine and discover the problem later.
+    """
+    validate_loopback_endpoint(endpoint)
+
+    child: dict[str, str] = {}
+    for key, value in base_environment.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise TypeError("environment keys and values must be strings.")
+        if is_neutralized_key(key):
+            continue
+        child[key] = value
+    return child
+
+
+# --------------------------------------------------------------------------------------------
+# Codex per-invocation `-c` overrides
+# --------------------------------------------------------------------------------------------
+#
+# Codex 0.146.0 carries its OpenTelemetry configuration in a `[otel]` table with these keys, read
+# from the binary's own configuration surface: `exporter` (logs), `trace_exporter`,
+# `metrics_exporter`, `log_user_prompt`, `environment`, `span_attributes`, and `tracestate`. An
+# exporter is one of the unit variant `none` or a single-key table naming `otlp-http` or `otlp-grpc`.
+#
+# What this builder writes, and why each line is the value it is:
+#
+# * `exporter = "none"` — the **logs** pipeline, and the one that must never be enabled. Codex's
+#   content-bearing events are logs: the binary's own event definitions put `prompt`,
+#   `user.email`, and `user.account_id` on that signal. Contract section 5 forbids it outright, and
+#   the Collector has no logs pipeline to receive it even if this line were wrong.
+# * `log_user_prompt = false` — belt to that brace. Even a logs exporter turned on by mistake would
+#   not be handed the prompt text.
+# * `trace_exporter` / `metrics_exporter` — OTLP/HTTP with the binary protobuf encoding, to the
+#   validated loopback Collector, with an explicitly empty header table. Empty rather than absent
+#   for the reason contract section 7 gives: a header is how telemetry acquires a second
+#   destination, so the setting is claimed and emptied rather than left for a default to fill.
+# * `environment = "forge-canary"` — a constant. It is not derived from a project, a task, a branch,
+#   a path, or a host name, so it can carry nothing.
+# * `span_attributes` — exactly the two attributes contract sections 4 and 10 reserve, and no third.
+#
+# `tracestate` is never written. It is unbounded vendor text, and contract section 4 admits inbound
+# trace context only.
+#
+# **Unproven until the supervised run.** Three things here are read off the 0.146.0 binary's
+# configuration surface rather than off a successful invocation, and `--strict-config` rejects any
+# key this version does not recognize:
+#
+#   1. the exact nesting of an exporter variant — `{otlp-http={...}}` as an externally tagged table;
+#   2. whether `headers` is accepted on that variant, and whether an empty table is accepted;
+#   3. whether `endpoint` is a base URL to which the exporter appends `/v1/traces` and `/v1/metrics`,
+#      or a full signal URL. The bundled exporter appends those paths when it reads a *base* endpoint
+#      from the environment, which is why the base form is what this builder emits.
+#
+# None of the three may be described as accepted until one supervised `codex` run has accepted it.
+
+CODEX_OTEL_ENVIRONMENT = "forge-canary"
+
+# OTLP/HTTP rather than gRPC: the Collector answers both on loopback, and HTTP is the transport whose
+# wire format is inspectable from the Collector side without a second client library.
+CODEX_OTEL_HTTP_PROTOCOL = "binary"
+CODEX_LOGS_EXPORTER = "none"
+
+# Every `[otel]` key this builder writes, in the order it writes them. A reviewer can diff this
+# tuple against the emitted vector without reading the function.
+CODEX_OTEL_OVERRIDE_KEYS = (
+    "otel.exporter",
+    "otel.log_user_prompt",
+    "otel.trace_exporter",
+    "otel.metrics_exporter",
+    "otel.environment",
+    "otel.span_attributes",
+)
+
+# Keys this builder must never write. `otel.tracestate` is unbounded vendor text; the other two are
+# the content switches whose defaults must not be relaxed by a Forge-supplied override.
+CODEX_FORBIDDEN_OVERRIDE_KEYS = frozenset({"otel.tracestate"})
+
+# The two correlation attributes, and there is no third. `span_attributes` is a free-form map, which
+# is precisely why the set that may go into it is pinned here.
+CODEX_SPAN_ATTRIBUTE_KEYS = (ATTR_INVOCATION_ID, ATTR_CONTRACT_VERSION)
+
+# What a TOML basic string may contain here. Not an escaping routine: every value this builder emits
+# comes from a validated, bounded source, so a value that would *need* escaping is a value that came
+# from somewhere this builder does not accept input from. Refusing it is the fail-closed answer, and
+# it is also what keeps the emitted argument safe through Windows shim quoting — there is no
+# backslash, no embedded quote, and no whitespace for a shim to re-split on.
+_TOML_SAFE = re.compile(r"[0-9A-Za-z._:/=~+-]{1,200}")
+
+
+def _toml_string(value: str) -> str:
+    """Render one TOML basic string, refusing anything that would need escaping."""
+    if not isinstance(value, str) or _TOML_SAFE.fullmatch(value) is None:
+        raise ValueError(
+            "a Codex configuration override value must be 1-200 characters drawn from "
+            "[0-9A-Za-z._:/=~+-]; refusing to escape anything else."
+        )
+    return f'"{value}"'
+
+
+def _toml_inline_table(pairs: tuple[tuple[str, str], ...]) -> str:
+    """Render `{key="value",...}` with every key quoted, so a dotted key stays one key."""
+    return "{" + ",".join(f"{_toml_string(key)}={_toml_string(value)}" for key, value in pairs) + "}"
+
+
+def _codex_otlp_http_exporter(endpoint: str) -> str:
+    """Render one externally tagged `otlp-http` exporter table."""
+    return (
+        "{otlp-http={"
+        f"endpoint={_toml_string(endpoint)},"
+        f"protocol={_toml_string(CODEX_OTEL_HTTP_PROTOCOL)},"
+        "headers={}"
+        "}}"
+    )
+
+
+def build_codex_otel_overrides(
+    context: InvocationContext, *, endpoint: str = DEFAULT_COLLECTOR_ENDPOINT
+) -> tuple[str, ...]:
+    """Return the exact `-c` argv fragment for one Codex invocation. Pure; launches nothing.
+
+    The result is a flat tuple of **separate argv elements** — `("-c", "otel.exporter=\\"none\\"",
+    ...)` — never a command string. Codex splits an override at its first `=`, so a value may contain
+    as many more as it likes; what it may not survive is a shell joining or re-splitting the pair,
+    which is why nothing here is ever concatenated with a space.
+
+    Invalid input fails closed with `ValueError`: a malformed invocation id, a contract version other
+    than the one this module implements, a non-loopback endpoint, or any value outside the bounded
+    alphabet raises rather than producing an override a reviewer would have to inspect to trust.
+
+    This is **proposed, not active** (contract section 4). No production path calls it, and no Codex
+    process has accepted its output.
+    """
+    if not isinstance(context, InvocationContext):
+        raise TypeError("context must be an InvocationContext.")
+    if not is_valid_invocation_id(context.invocation_id):
+        raise ValueError(
+            f"invocation id must be {INVOCATION_ID_CHARS} lowercase hexadecimal characters."
+        )
+    if context.contract_version != AGENT_TELEMETRY_CONTRACT_VERSION:
+        raise ValueError(
+            f"contract version must be {AGENT_TELEMETRY_CONTRACT_VERSION!r}; "
+            f"got {context.contract_version!r}."
+        )
+    validated_endpoint = validate_loopback_endpoint(endpoint)
+    exporter = _codex_otlp_http_exporter(validated_endpoint)
+
+    values = {
+        "otel.exporter": _toml_string(CODEX_LOGS_EXPORTER),
+        "otel.log_user_prompt": "false",
+        "otel.trace_exporter": exporter,
+        "otel.metrics_exporter": exporter,
+        "otel.environment": _toml_string(CODEX_OTEL_ENVIRONMENT),
+        "otel.span_attributes": _toml_inline_table(
+            (
+                (ATTR_INVOCATION_ID, context.invocation_id),
+                (ATTR_CONTRACT_VERSION, context.contract_version),
+            )
+        ),
+    }
+    # Guards an editing mistake in the block above rather than any input, exactly as the Claude
+    # builder does: a forbidden key added there is the one class of change no input-driven test sees.
+    forbidden = CODEX_FORBIDDEN_OVERRIDE_KEYS & set(values)
+    if forbidden:
+        raise RuntimeError(f"Codex overrides must never set: {', '.join(sorted(forbidden))}.")
+    if tuple(values) != CODEX_OTEL_OVERRIDE_KEYS:
+        raise RuntimeError("the emitted override keys drifted from CODEX_OTEL_OVERRIDE_KEYS.")
+
+    fragment: list[str] = []
+    for key in CODEX_OTEL_OVERRIDE_KEYS:
+        fragment += ["-c", f"{key}={values[key]}"]
+    return tuple(fragment)

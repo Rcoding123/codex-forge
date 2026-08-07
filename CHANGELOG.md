@@ -21,6 +21,15 @@ All notable changes to Codex Forge are documented here. This project follows sem
   it does not, and each run emits a `candidate-manifest.yaml` a reviewer can merge without reading
   the Collector log. **Gate 6 has not passed**: no supervised inventory run has been made, the
   manifest approves nothing, and the harness refuses a PASS verdict until a human is named in it.
+- Gate 7 Codex telemetry-canary foundation: a pure Codex child-environment builder that removes
+  inherited `OTEL_*`, `TRACEPARENT`, and `TRACESTATE` while adding nothing and preserving `CODEX_HOME`
+  exactly; a pure builder for the proposed per-invocation `-c otel` override vector (logs exporter
+  `none`, prompt logging off, OTLP/HTTP binary traces and metrics to a loopback Collector, and the two
+  canonical correlation attributes); and `tests/otel_codex_canary.py`, the approval-gated harness that
+  would run one minimal Codex request and report the `forge.codex.telemetry-canary/1` result. **Gate 7
+  has not passed**: no Codex process has run, `--strict-config` has accepted nothing, one supervised
+  request remains required, and the Codex correlation mechanism stays proposed. Normal Forge execution
+  is unchanged and native Codex telemetry remains disabled outside the harness.
 
 ## [0.2.0] - 2026-08-02
 
