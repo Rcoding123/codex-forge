@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .config import ForgeConfig
 from .db import ForgeDB
-from .gitops import commit_task, prepare_worktree, write_patch
+from .gitops import changed_files_between, commit_task, current_commit, prepare_worktree, write_patch
 from .knowledge import KnowledgeStore
 from .models import Project, Task, TaskState, ValidationResult
 from .prompts import implementation_prompt, review_prompt, validation_failure_summary
@@ -217,6 +217,10 @@ class Orchestrator:
             raise RuntimeError(f"Project missing for task {task.id}: {task.project_id}")
         artifact_dir = ensure_dir(self.config.evidence_root / project.name / task.id / f"attempt-{task.attempts:02d}")
         branch, worktree = prepare_worktree(project, task, self.config.workspace_root)
+        # Capture the branch snapshot before any worker runs. Repairs and later controller attempts
+        # reuse the worktree, but terminal evidence must retain this task base rather than the most
+        # recent model phase as its comparison point.
+        base_commit = current_commit(worktree)
         self.db.update_task(task.id, branch=branch, worktree_path=worktree)
         task.branch = branch
         task.worktree_path = worktree
@@ -347,8 +351,9 @@ class Orchestrator:
 
         with self.telemetry.phase_span(phase_name=PHASE_EVIDENCE, role=ROLE_CONTROLLER) as span:
             patch_path = artifact_dir / "changes.patch"
-            write_patch(worktree, patch_path)
             commit_hash = commit_task(worktree, task) if project.auto_commit else None
+            write_patch(worktree, patch_path, base_commit, commit_hash)
+            final_changed_files = changed_files_between(worktree, base_commit, commit_hash)
             if project.auto_push and commit_hash:
                 from .gitops import _git
                 _git(worktree, "push", "-u", "origin", branch, timeout=1200)
@@ -356,6 +361,9 @@ class Orchestrator:
             final_result = {
                 **result.final,
                 "status": "completed",
+                # Phase results retain the model's incremental claim. Terminal evidence is instead
+                # the complete Git truth integration will compare: approved base -> final candidate.
+                "changed_files": final_changed_files,
                 "controller_validation": [self._validation_to_dict(item) for item in validation_results],
                 "review": review_final,
                 # Retained so a completed task records which sandbox the independent review actually
