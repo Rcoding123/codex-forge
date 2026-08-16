@@ -558,6 +558,11 @@ def build_orchestrator(
     )
     monkeypatch.setattr("codex_forge.orchestrator.write_patch", lambda *args: None)
     monkeypatch.setattr("codex_forge.orchestrator.commit_task", lambda *args: "deadbeef")
+    monkeypatch.setattr("codex_forge.orchestrator.current_commit", lambda *args: "base")
+    monkeypatch.setattr(
+        "codex_forge.orchestrator.changed_files_between",
+        lambda *args: COMPLETED_IMPLEMENTATION_FINAL["changed_files"],
+    )
 
     def validations(commands, **kwargs):
         return [

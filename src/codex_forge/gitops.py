@@ -80,10 +80,53 @@ def changed_files(worktree: Path) -> list[str]:
     return files
 
 
-def write_patch(worktree: Path, destination: Path) -> None:
+def current_commit(worktree: Path) -> str:
+    return _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+
+def changed_files_between(worktree: Path, base: str, candidate: str | None = None) -> list[str]:
+    """Return the paths in the authoritative base-to-candidate Git diff.
+
+    A committed candidate is compared directly to ``base``. Projects with automatic commits
+    disabled retain the historical worktree behavior, including intent-to-add entries for
+    untracked files.
+    """
+    if candidate is None:
+        _git(worktree, "add", "-N", ".", check=False)
+        revision = base
+    else:
+        revision = f"{base}..{candidate}"
+
+    result = _git(worktree, "diff", "--name-status", "-z", revision, "--", check=False)
+    if result.returncode != 0:
+        raise GitError(result.stderr or result.stdout)
+
+    fields = iter(field for field in result.stdout.split("\0") if field)
+    files: list[str] = []
+    for status in fields:
+        first = next(fields, None)
+        if first is None:
+            raise GitError("git diff --name-status returned an incomplete path record.")
+        if status.startswith(("R", "C")):
+            second = next(fields, None)
+            if second is None:
+                raise GitError("git diff --name-status returned an incomplete rename record.")
+            files.append(second)
+        else:
+            files.append(first)
+    return files
+
+
+def write_patch(worktree: Path, destination: Path, base: str = "HEAD", candidate: str | None = None) -> None:
     ensure_dir(destination.parent)
-    _git(worktree, "add", "-N", ".", check=False)
-    result = _git(worktree, "diff", "--binary", "HEAD", check=False)
+    if candidate is None:
+        _git(worktree, "add", "-N", ".", check=False)
+        revision = base
+    else:
+        revision = f"{base}..{candidate}"
+    result = _git(worktree, "diff", "--binary", revision, "--", check=False)
+    if result.returncode != 0:
+        raise GitError(result.stderr or result.stdout)
     destination.write_text(result.stdout, encoding="utf-8")
 
 

@@ -83,6 +83,8 @@ The implementation worker emits schema-constrained machine-readable output. Forg
 
 Review is a separate Codex run with a read-only role. Follow-up reviews receive prior findings and are scoped to those findings instead of repeating full implementation exploration. A blocking review finding must be repaired and re-reviewed before final validation and commit.
 
+Implementation and repair phase results remain immutable descriptions of those individual model runs. The controller captures the task branch's Git base before implementation begins. On terminal success it does not reuse the latest phase's changed-file claim: it derives both `task-result.json.changed_files` and `changes.patch` from that base to the final candidate commit. Terminal evidence therefore describes the complete candidate snapshot even when later attempts only repaired a subset of files.
+
 ## Limits and loop resistance
 
 Forge enforces complementary bounds:
