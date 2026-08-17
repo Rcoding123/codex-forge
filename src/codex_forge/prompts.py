@@ -98,6 +98,15 @@ OBJECTIVE:
 ACCEPTANCE:
 {acceptance}
 
+ACCEPTANCE CONFORMANCE
+The acceptance criteria above are the task contract. Tests are evidence for the specification;
+tests do not redefine the specification. Compare the final candidate against every acceptance
+criterion exactly as written, independently of what candidate-authored tests assert. Report each
+criterion in `acceptance_criteria` with the criterion text copied verbatim, whether the candidate
+meets it, and the concrete evidence you checked. A candidate that does not satisfy a criterion
+requires `changes_required` with a finding naming that criterion, even when every candidate-authored
+test passes; tests that encode a contract contradicting a criterion are themselves a defect.
+
 {follow_up}
 
 Return `changes_required` only for actionable defects that should block completion. Include exact file and line when available.

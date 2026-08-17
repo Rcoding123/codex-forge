@@ -4,6 +4,19 @@
   "properties": {
     "verdict": {"type": "string", "enum": ["pass", "changes_required"]},
     "summary": {"type": "string"},
+    "acceptance_criteria": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "criterion": {"type": "string"},
+          "met": {"type": "boolean"},
+          "evidence": {"type": "string"}
+        },
+        "required": ["criterion", "met", "evidence"],
+        "additionalProperties": false
+      }
+    },
     "findings": {
       "type": "array",
       "items": {
@@ -20,6 +33,6 @@
       }
     }
   },
-  "required": ["verdict", "summary", "findings"],
+  "required": ["verdict", "summary", "acceptance_criteria", "findings"],
   "additionalProperties": false
 }
