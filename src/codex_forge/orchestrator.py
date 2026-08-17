@@ -4,6 +4,7 @@ import json
 import hashlib
 import time
 import traceback
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -297,7 +298,7 @@ class Orchestrator:
         )
         if blocked is not None:
             return self._fail_review_infrastructure(task, artifact_dir, blocked)
-        review_final = review.final
+        review_final = enforce_acceptance_conformance(task, review.final)
 
         review_cycle = 0
         while review_final.get("verdict") == "changes_required" and review_cycle < self.config.max_repair_cycles:
@@ -338,7 +339,7 @@ class Orchestrator:
             )
             if blocked is not None:
                 return self._fail_review_infrastructure(task, artifact_dir, blocked)
-            review_final = review.final
+            review_final = enforce_acceptance_conformance(task, review.final)
 
         if review_final.get("verdict") != "pass":
             self._retry_or_fail(task, json.dumps(review_final, ensure_ascii=False))
@@ -607,6 +608,78 @@ class Orchestrator:
 
 class TaskUsageBudgetExceeded(RuntimeError):
     pass
+
+
+def _normalized_criterion(text: object) -> str:
+    """Whitespace-collapsed NFC form used only to match a reviewer's echo to the stored criterion."""
+    return " ".join(unicodedata.normalize("NFC", str(text)).split())
+
+
+def acceptance_conformance_findings(task: Task, review_final: dict) -> list[dict]:
+    """Findings for acceptance criteria the review did not confirm the candidate meets.
+
+    The task's acceptance criteria are the contract the operator approved. Tests are evidence
+    for the specification; tests do not redefine the specification. A criterion the review
+    reported unmet, or did not report against at all, must therefore block completion even when
+    every candidate-authored test passes and the reviewer's overall verdict says `pass`.
+    """
+    reported: dict[str, dict] = {}
+    for entry in review_final.get("acceptance_criteria") or []:
+        if isinstance(entry, dict) and isinstance(entry.get("criterion"), str):
+            reported[_normalized_criterion(entry["criterion"])] = entry
+    findings: list[dict] = []
+    for criterion in task.acceptance:
+        entry = reported.get(_normalized_criterion(criterion))
+        if entry is None:
+            findings.append(
+                {
+                    "severity": "high",
+                    "file": None,
+                    "line": None,
+                    "issue": f"Acceptance criterion not verified by review: {criterion}",
+                    "required_fix": (
+                        "Verify the candidate against this acceptance criterion exactly as "
+                        "written and repair any nonconformance."
+                    ),
+                }
+            )
+        elif entry.get("met") is not True:
+            issue = f"Unmet acceptance criterion: {criterion}"
+            evidence = entry.get("evidence")
+            if isinstance(evidence, str) and evidence.strip():
+                issue = f"{issue} Reviewer evidence: {evidence.strip()}"
+            findings.append(
+                {
+                    "severity": "critical",
+                    "file": None,
+                    "line": None,
+                    "issue": issue,
+                    "required_fix": (
+                        "Change the candidate to satisfy this acceptance criterion exactly as "
+                        "written, including any candidate-authored tests that encode a "
+                        "different contract."
+                    ),
+                }
+            )
+    return findings
+
+
+def enforce_acceptance_conformance(task: Task, review_final: dict) -> dict:
+    """Refuse a review outcome that leaves any acceptance criterion unmet or unexamined.
+
+    The returned dict is the effective review result the controller acts on. When every
+    criterion is confirmed met the reviewer's result passes through untouched; otherwise the
+    verdict is forced to `changes_required` and each unconfirmed criterion becomes a finding,
+    so repair receives the exact contract text instead of only the candidate's own test truth.
+    """
+    unconfirmed = acceptance_conformance_findings(task, review_final)
+    if not unconfirmed:
+        return review_final
+    return {
+        **review_final,
+        "verdict": "changes_required",
+        "findings": [*(review_final.get("findings") or []), *unconfirmed],
+    }
 
 
 def _noncompletion_outcome(final: dict) -> str:
