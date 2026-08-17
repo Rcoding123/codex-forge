@@ -20,6 +20,37 @@ Keep the final structured response concise; detailed logs already live on disk.
 """.strip()
 
 
+def _contract_sections(task: Task) -> str:
+    """The specification contract beyond the objective, rendered verbatim.
+
+    Scope and out-of-scope bound the task; architecture decisions and constraints are binding
+    implementation requirements. Every present field is reproduced exactly as persisted — never
+    summarized — and an absent field contributes no section, so tasks submitted before these
+    fields existed render exactly as they always did.
+    """
+    sections: list[str] = []
+    if task.scope:
+        sections.append(f"SCOPE\n{task.scope}")
+    if task.out_of_scope:
+        sections.append(f"OUT OF SCOPE\n{task.out_of_scope}")
+    if task.architecture_decisions:
+        decisions = "\n".join(f"- {item}" for item in task.architecture_decisions)
+        sections.append(f"ARCHITECTURE DECISIONS (binding)\n{decisions}")
+    if task.constraints:
+        constraints = "\n".join(f"- {item}" for item in task.constraints)
+        sections.append(f"CONSTRAINTS (binding)\n{constraints}")
+    if not sections:
+        return ""
+    hierarchy = (
+        "TASK CONTRACT\n"
+        "Scope and out-of-scope bound what this task may change. Architecture decisions and "
+        "constraints are binding implementation requirements; implement them exactly as written. "
+        "Acceptance criteria state what must be demonstrably true. Tests are evidence for this "
+        "contract; tests do not redefine it."
+    )
+    return "\n\n".join([hierarchy, *sections])
+
+
 def implementation_prompt(
     project: Project,
     task: Task,
@@ -33,6 +64,8 @@ def implementation_prompt(
     learned = json.dumps(patterns, indent=2, ensure_ascii=False) if patterns else "None."
     failure = previous_failure or "None."
     review = json.dumps(review_findings or [], indent=2, ensure_ascii=False)
+    contract = _contract_sections(task)
+    contract_block = f"\n\n{contract}" if contract else ""
     return f"""
 {BASE_POLICY}
 
@@ -48,7 +81,7 @@ TASK
 - Tags: {', '.join(task.tags) or 'none'}
 
 OBJECTIVE
-{task.objective}
+{task.objective}{contract_block}
 
 ACCEPTANCE CRITERIA
 {acceptance}
@@ -77,6 +110,33 @@ def review_prompt(
     previous_findings: list[dict] | None = None,
 ) -> str:
     acceptance = "\n".join(f"- {item}" for item in task.acceptance)
+    contract = _contract_sections(task)
+    contract_block = f"\n\n{contract}" if contract else ""
+    validation_block = ""
+    if task.validation_commands:
+        validations = "\n".join(f"- `{item}`" for item in task.validation_commands)
+        validation_block = (
+            "\n\nAUTHORITATIVE VALIDATION:\n"
+            f"{validations}\n"
+            "The validation commands above are deterministic evidence requirements; the controller\n"
+            "executes them exactly as written. Validation commands and tests are evidence for the\n"
+            "specification; they do not redefine the specification."
+        )
+    binding_block = ""
+    if task.architecture_decisions or task.constraints:
+        binding_conformance = """
+BINDING REQUIREMENT CONFORMANCE
+The architecture decisions and constraints above are binding implementation requirements, exactly
+like acceptance criteria. Compare the final candidate against each of them exactly as written and
+report every one in `binding_requirements` with the requirement text copied verbatim into `text`,
+whether the candidate meets it in `met`, and the concrete evidence you checked in `evidence`.
+Report each requirement exactly once and report nothing else in `binding_requirements`: no
+paraphrases, no reworded variants, no entries that are not in the contract above.
+A candidate that does not satisfy a binding requirement requires `changes_required` with a finding
+naming that requirement, even when every candidate-authored test passes. Scope and out-of-scope are
+reviewer context: report work that crosses those boundaries as ordinary findings.
+""".strip()
+        binding_block = f"\n\n{binding_conformance}"
     follow_up = ""
     if previous_findings:
         follow_up = f"""
@@ -93,19 +153,21 @@ Do not report style preferences unless they create a concrete defect.
 
 TASK {task.id}: {task.title}
 OBJECTIVE:
-{task.objective}
+{task.objective}{contract_block}
 
 ACCEPTANCE:
-{acceptance}
+{acceptance}{validation_block}
 
 ACCEPTANCE CONFORMANCE
 The acceptance criteria above are the task contract. Tests are evidence for the specification;
 tests do not redefine the specification. Compare the final candidate against every acceptance
 criterion exactly as written, independently of what candidate-authored tests assert. Report each
 criterion in `acceptance_criteria` with the criterion text copied verbatim, whether the candidate
-meets it, and the concrete evidence you checked. A candidate that does not satisfy a criterion
+meets it, and the concrete evidence you checked. Report each criterion exactly once and report
+nothing else in `acceptance_criteria`: no paraphrases, no reworded variants, no entries that are
+not in the acceptance list above. A candidate that does not satisfy a criterion
 requires `changes_required` with a finding naming that criterion, even when every candidate-authored
-test passes; tests that encode a contract contradicting a criterion are themselves a defect.
+test passes; tests that encode a contract contradicting a criterion are themselves a defect.{binding_block}
 
 {follow_up}
 

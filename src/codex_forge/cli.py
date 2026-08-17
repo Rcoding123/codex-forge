@@ -105,6 +105,10 @@ def build_parser() -> argparse.ArgumentParser:
     task_add.add_argument("--title", required=True)
     task_add.add_argument("--objective", required=True)
     task_add.add_argument("--acceptance", action="append", default=[])
+    task_add.add_argument("--decision", action="append", default=[])
+    task_add.add_argument("--constraint", action="append", default=[])
+    task_add.add_argument("--scope")
+    task_add.add_argument("--out-of-scope")
     task_add.add_argument("--validation", action="append", default=[])
     task_add.add_argument("--tag", action="append", default=[])
     task_add.add_argument("--depends-on", action="append", default=[])
@@ -298,6 +302,10 @@ def cmd_task_add(
         risk=DEFAULT_RISK if args.risk is None else args.risk,
         tags=args.tag,
         dependencies=dependencies,
+        architecture_decisions=args.decision,
+        constraints=args.constraint,
+        scope=args.scope or "",
+        out_of_scope=args.out_of_scope or "",
         max_attempts=DEFAULT_MAX_ATTEMPTS if args.max_attempts is None else args.max_attempts,
     )
     db.add_task(task)

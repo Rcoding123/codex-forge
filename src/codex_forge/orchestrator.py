@@ -4,7 +4,6 @@ import json
 import hashlib
 import time
 import traceback
-import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -166,6 +165,10 @@ class Orchestrator:
             risk=str(data.get("risk", "medium")),
             tags=list(data.get("tags") or []),
             dependencies=dependencies,
+            architecture_decisions=list(data.get("architecture_decisions") or []),
+            constraints=list(data.get("constraints") or []),
+            scope=str(data.get("scope") or ""),
+            out_of_scope=str(data.get("out_of_scope") or ""),
             max_attempts=int(data.get("max_attempts", 3)),
         )
         self.db.add_task(task)
@@ -298,7 +301,7 @@ class Orchestrator:
         )
         if blocked is not None:
             return self._fail_review_infrastructure(task, artifact_dir, blocked)
-        review_final = enforce_acceptance_conformance(task, review.final)
+        review_final = enforce_specification_conformance(task, review.final)
 
         review_cycle = 0
         while review_final.get("verdict") == "changes_required" and review_cycle < self.config.max_repair_cycles:
@@ -339,7 +342,7 @@ class Orchestrator:
             )
             if blocked is not None:
                 return self._fail_review_infrastructure(task, artifact_dir, blocked)
-            review_final = enforce_acceptance_conformance(task, review.final)
+            review_final = enforce_specification_conformance(task, review.final)
 
         if review_final.get("verdict") != "pass":
             self._retry_or_fail(task, json.dumps(review_final, ensure_ascii=False))
@@ -610,42 +613,95 @@ class TaskUsageBudgetExceeded(RuntimeError):
     pass
 
 
-def _normalized_criterion(text: object) -> str:
-    """Whitespace-collapsed NFC form used only to match a reviewer's echo to the stored criterion."""
-    return " ".join(unicodedata.normalize("NFC", str(text)).split())
+def _contract_item_findings(
+    items: list[str] | tuple[str, ...], entries: list, *, text_key: str, label: str
+) -> list[dict]:
+    """Findings unless the report is an exact bijection of the contract, met with evidence.
 
-
-def acceptance_conformance_findings(task: Task, review_final: dict) -> list[dict]:
-    """Findings for acceptance criteria the review did not confirm the candidate meets.
-
-    The task's acceptance criteria are the contract the operator approved. Tests are evidence
-    for the specification; tests do not redefine the specification. A criterion the review
-    reported unmet, or did not report against at all, must therefore block completion even when
-    every candidate-authored test passes and the reviewer's overall verdict says `pass`.
+    The report must be a one-to-one representation of the expected contract: every stored item
+    reported exactly once, verbatim, and nothing else reported at all. Matching is verbatim:
+    task intake already normalized the stored contract text, so review conformance compares the
+    reviewer's echo to that exact string — no Unicode normalization, whitespace collapsing, or
+    paraphrase acceptance happens here, and an echo that differs in any way is not coverage.
+    A duplicate is itself invalid review evidence, whether the copies agree or contradict each
+    other, so entries are never collapsed into a map where a later duplicate could hide an
+    earlier contradiction. An entry whose text is not a contract item is rejected, never
+    ignored: a paraphrased or contradictory extra version of an item must surface as a finding
+    even when the verbatim entry it shadows is reported met with green-test evidence. Only for
+    an exact entry do met/evidence apply: met must be true and evidence non-empty.
     """
-    reported: dict[str, dict] = {}
-    for entry in review_final.get("acceptance_criteria") or []:
-        if isinstance(entry, dict) and isinstance(entry.get("criterion"), str):
-            reported[_normalized_criterion(entry["criterion"])] = entry
+    heading = label[:1].upper() + label[1:]
     findings: list[dict] = []
-    for criterion in task.acceptance:
-        entry = reported.get(_normalized_criterion(criterion))
-        if entry is None:
+    expected = list(items)
+    expected_set = set(expected)
+    if len(entries) != len(expected):
+        findings.append(
+            {
+                "severity": "high",
+                "file": None,
+                "line": None,
+                "issue": (
+                    f"{heading} report is not one-to-one with the contract: "
+                    f"{len(entries)} report entries for {len(expected)} contract items."
+                ),
+                "required_fix": (
+                    f"Report every {label} exactly once, echoed exactly as written, "
+                    "and report nothing else."
+                ),
+            }
+        )
+    for entry in entries:
+        text = entry.get(text_key) if isinstance(entry, dict) else None
+        if isinstance(text, str) and text in expected_set:
+            continue
+        reported = text if isinstance(text, str) else repr(entry)
+        contradicts = isinstance(entry, dict) and entry.get("met") is not True
+        findings.append(
+            {
+                "severity": "critical" if contradicts else "high",
+                "file": None,
+                "line": None,
+                "issue": f"{heading} report does not match any contract item: {reported}",
+                "required_fix": (
+                    f"Report only the task's stored {label} texts, each echoed exactly as "
+                    "written; a paraphrase, reformatting, or additional version of an item "
+                    "is not part of the contract and cannot be reviewed in its place."
+                ),
+            }
+        )
+    for item in expected:
+        matches = [
+            entry for entry in entries if isinstance(entry, dict) and entry.get(text_key) == item
+        ]
+        if not matches:
             findings.append(
                 {
                     "severity": "high",
                     "file": None,
                     "line": None,
-                    "issue": f"Acceptance criterion not verified by review: {criterion}",
+                    "issue": f"{heading} not verified by review: {item}",
                     "required_fix": (
-                        "Verify the candidate against this acceptance criterion exactly as "
+                        f"Verify the candidate against this {label} exactly as "
                         "written and repair any nonconformance."
                     ),
                 }
             )
-        elif entry.get("met") is not True:
-            issue = f"Unmet acceptance criterion: {criterion}"
-            evidence = entry.get("evidence")
+        elif len(matches) > 1:
+            findings.append(
+                {
+                    "severity": "high",
+                    "file": None,
+                    "line": None,
+                    "issue": f"{heading} reported {len(matches)} times by review: {item}",
+                    "required_fix": (
+                        f"Report this {label} exactly once; duplicate reports are invalid "
+                        "review evidence even when they agree."
+                    ),
+                }
+            )
+        elif matches[0].get("met") is not True:
+            issue = f"Unmet {label}: {item}"
+            evidence = matches[0].get("evidence")
             if isinstance(evidence, str) and evidence.strip():
                 issue = f"{issue} Reviewer evidence: {evidence.strip()}"
             findings.append(
@@ -655,24 +711,86 @@ def acceptance_conformance_findings(task: Task, review_final: dict) -> list[dict
                     "line": None,
                     "issue": issue,
                     "required_fix": (
-                        "Change the candidate to satisfy this acceptance criterion exactly as "
+                        f"Change the candidate to satisfy this {label} exactly as "
                         "written, including any candidate-authored tests that encode a "
                         "different contract."
                     ),
                 }
             )
+        else:
+            evidence = matches[0].get("evidence")
+            if not (isinstance(evidence, str) and evidence.strip()):
+                findings.append(
+                    {
+                        "severity": "high",
+                        "file": None,
+                        "line": None,
+                        "issue": f"{heading} reported met without evidence: {item}",
+                        "required_fix": (
+                            f"Verify the candidate against this {label} with concrete evidence "
+                            "and repair any nonconformance."
+                        ),
+                    }
+                )
     return findings
 
 
-def enforce_acceptance_conformance(task: Task, review_final: dict) -> dict:
-    """Refuse a review outcome that leaves any acceptance criterion unmet or unexamined.
+def acceptance_conformance_findings(task: Task, review_final: dict) -> list[dict]:
+    """Findings for acceptance criteria the review did not confirm the candidate meets.
 
-    The returned dict is the effective review result the controller acts on. When every
-    criterion is confirmed met the reviewer's result passes through untouched; otherwise the
-    verdict is forced to `changes_required` and each unconfirmed criterion becomes a finding,
-    so repair receives the exact contract text instead of only the candidate's own test truth.
+    The task's acceptance criteria are the contract the operator approved. Tests are evidence
+    for the specification; tests do not redefine the specification. The report must be an exact
+    bijection of the stored criteria: a criterion reported unmet, reported without evidence,
+    reported more than once, not reported against at all, or accompanied by any entry that is
+    not itself a stored criterion — verbatim, exactly as stored — must block completion even
+    when every candidate-authored test passes and the reviewer's overall verdict says `pass`.
     """
-    unconfirmed = acceptance_conformance_findings(task, review_final)
+    return _contract_item_findings(
+        task.acceptance,
+        review_final.get("acceptance_criteria") or [],
+        text_key="criterion",
+        label="acceptance criterion",
+    )
+
+
+def binding_conformance_findings(task: Task, review_final: dict) -> list[dict]:
+    """Findings for binding requirements the review did not confirm the candidate meets.
+
+    Architecture decisions and constraints are binding implementation requirements — the same
+    contract authority as acceptance criteria, stated as requirements on how the work is done
+    rather than on what must be demonstrably true. The review reports the itemized union of both
+    in `binding_requirements` as an exact bijection of the stored texts; a requirement reported
+    unmet, reported without evidence, reported more than once, not reported against at all, or
+    accompanied by any entry that is not itself a stored requirement — including a paraphrase or
+    reformatting that no longer matches the stored text byte for byte — blocks completion even
+    when every candidate-authored test passes and the reviewer's overall verdict says `pass`.
+    """
+    return _contract_item_findings(
+        (*task.architecture_decisions, *task.constraints),
+        review_final.get("binding_requirements") or [],
+        text_key="text",
+        label="binding requirement",
+    )
+
+
+def enforce_specification_conformance(task: Task, review_final: dict) -> dict:
+    """Refuse a review outcome that leaves any part of the task contract unmet or unexamined.
+
+    This is the single conformance choke point: acceptance criteria and binding requirements
+    (architecture decisions and constraints) are enforced here, in that order, and nowhere else.
+    The returned dict is the effective review result the controller acts on. The effective
+    verdict is decided only after every conformance finding from both report kinds is known:
+    if any exists, the verdict is `changes_required`, and no property of the report — a met
+    flag, candidate-test evidence, or the reviewer's own verdict — is consulted again to
+    restore `pass`. Only a report that is an exact met-with-evidence bijection of the whole
+    contract passes the reviewer's result through untouched; otherwise each conformance finding
+    is appended, so repair receives the exact contract text instead of only the candidate's own
+    test truth.
+    """
+    unconfirmed = [
+        *acceptance_conformance_findings(task, review_final),
+        *binding_conformance_findings(task, review_final),
+    ]
     if not unconfirmed:
         return review_final
     return {

@@ -17,6 +17,19 @@
         "additionalProperties": false
       }
     },
+    "binding_requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": {"type": "string"},
+          "met": {"type": "boolean"},
+          "evidence": {"type": "string"}
+        },
+        "required": ["text", "met", "evidence"],
+        "additionalProperties": false
+      }
+    },
     "findings": {
       "type": "array",
       "items": {

@@ -46,6 +46,10 @@ class Task:
     risk: str = "medium"
     tags: list[str] = field(default_factory=list)
     dependencies: list[str] = field(default_factory=list)
+    architecture_decisions: list[str] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
+    scope: str = ""
+    out_of_scope: str = ""
     attempts: int = 0
     max_attempts: int = 3
     branch: str | None = None

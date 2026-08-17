@@ -8,6 +8,12 @@ acceptance:
   - The project compiles with the repository's documented build workflow.
   - The Add-On opens without placing or modifying orders.
   - New code is separated from existing protected NinjaScript code.
+scope: The Add-On shell and its standalone analyzer window.
+out_of_scope: No trading, order placement, or changes to protected NinjaScript code.
+architecture_decisions:
+  - The analyzer opens as a standalone window, not as a chart overlay.
+constraints:
+  - No new NuGet package dependencies.
 validation:
   - dotnet test --nologo
 risk: medium
