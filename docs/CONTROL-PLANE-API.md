@@ -321,8 +321,8 @@ Submitted text is normalized before it is stored or hashed, so that a client ret
 in insignificant ways is recognized as the same request:
 
 - Text is Unicode NFC-normalized and stripped of leading and trailing whitespace.
-- List values (acceptance criteria, validation commands, tags, dependencies) are normalized
-  element-wise and de-duplicated, preserving first-occurrence order.
+- List values (acceptance criteria, architecture decisions, constraints, validation commands, tags,
+  dependencies) are normalized element-wise and de-duplicated, preserving first-occurrence order.
 - `risk` is lowercased.
 - Text that renders as blank — empty, whitespace only, or composed only of invisible formatting
   characters — is rejected rather than stored.
@@ -344,12 +344,32 @@ characters `\ / : " | ? *`, and must not begin with `-` or `.`. Entries in `depe
 tasks and must satisfy the same rules. Forge does not require a dependency to exist yet; a task with
 dependencies is created in `BACKLOG` and becomes `READY` once every dependency completes.
 
+### Specification contract fields
+
+Beyond the objective and acceptance criteria, a submission may carry the rest of the
+implementation-binding specification:
+
+- `--decision` (repeatable) — an architecture decision. Binding: implementation must satisfy it
+  exactly as written, and the independent review must confirm each one verbatim before the task
+  can complete.
+- `--constraint` (repeatable) — a constraint, with the same binding force as a decision.
+- `--scope` (single value) — what the task may change.
+- `--out-of-scope` (single value) — what the task must not touch.
+
+All four are optional. Decisions and constraints follow the acceptance-criteria limits (up to 50
+entries of up to 1,000 characters); scope and out-of-scope follow the objective limit (20,000
+characters, multi-line). The text is stored, fingerprinted, and rendered into worker prompts
+verbatim — never summarized. Decisions and constraints are not copied into acceptance criteria:
+acceptance criteria state what must be demonstrably true, while decisions and constraints bind how
+the work is done. Tasks submitted before these fields existed remain readable and behave exactly
+as before.
+
 ### Idempotency
 
 Submission is safe to retry. Forge computes a fingerprint over the material content of a request —
-project, title, objective, acceptance criteria, validation commands, tags, dependencies, risk,
-priority, and maximum attempts — and compares it against any task already stored under the same
-identifier.
+project, title, objective, acceptance criteria, architecture decisions, constraints, scope,
+out-of-scope, validation commands, tags, dependencies, risk, priority, and maximum attempts — and
+compares it against any task already stored under the same identifier.
 
 | Situation | Result |
 |---|---|
@@ -358,9 +378,10 @@ identifier.
 | The identifier was supplied by the client and holds a different request | `TASK_ID_CONFLICT` |
 | The identifier was derived and holds a different request | `DUPLICATE_TASK_ID` |
 
-Order matters for acceptance criteria and validation commands, because validation commands run in
-the order given and stop at the first failure. Tags and dependencies are unordered, so resubmitting
-them in a different order is still the same request.
+Order matters for acceptance criteria, architecture decisions, constraints, and validation
+commands, because validation commands run in the order given and stop at the first failure, and
+the binding fields are contract text whose identity must never drift. Tags and dependencies are
+unordered, so resubmitting them in a different order is still the same request.
 
 A client that retries after a timeout, a dropped connection, or an ambiguous failure will never
 create a duplicate task: it receives either the task it created or a conflict, never a second task.
@@ -403,6 +424,10 @@ registered on a project are unaffected.
       "attempt_count": 0,
       "max_attempts": 3,
       "acceptance_criteria": ["Existing and new tests pass."],
+      "architecture_decisions": ["Report rows are ordered by report id."],
+      "constraints": ["Python standard library only."],
+      "scope": "The report export path.",
+      "out_of_scope": "No changes to report ingestion.",
       "validation_commands": ["python -m pytest"],
       "tags": [],
       "dependencies": [],
@@ -429,6 +454,10 @@ registered on a project are unaffected.
       "title": "Add deterministic report export",
       "objective": "Implement CSV export for the existing report model.",
       "acceptance_criteria": ["Existing and new tests pass."],
+      "architecture_decisions": ["Report rows are ordered by report id."],
+      "constraints": ["Python standard library only."],
+      "scope": "The report export path.",
+      "out_of_scope": "No changes to report ingestion.",
       "validation_commands": ["python -m pytest"],
       "tags": [],
       "dependencies": [],
@@ -493,9 +522,10 @@ Field notes:
 
 - `data.created` is `true` only when this call inserted the task. A retry of an identical request
   returns `false` with the same `task_id` and `created_at`.
-- The `task` object is the `task show` object with `acceptance_criteria`, `validation_commands`,
-  `tags`, `dependencies`, `priority`, `planned_branch`, and `planned_worktree` added. Every field
-  documented for `task show` is present and carries the same meaning.
+- The `task` object is the `task show` object with `acceptance_criteria`, `architecture_decisions`,
+  `constraints`, `scope`, `out_of_scope`, `validation_commands`, `tags`, `dependencies`,
+  `priority`, `planned_branch`, and `planned_worktree` added. Every field documented for
+  `task show` is present and carries the same meaning.
 - `branch` and `worktree` report persisted state and are therefore `null` until the controller
   prepares the isolated worktree. `planned_branch` and `planned_worktree` are the deterministic
   values the controller will use. Submission never creates a branch, a worktree, or a directory.

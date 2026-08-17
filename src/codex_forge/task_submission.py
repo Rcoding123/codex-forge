@@ -35,6 +35,9 @@ MAX_OBJECTIVE_CHARS = 20_000
 MAX_TASK_ID_CHARS = 64
 MAX_ACCEPTANCE_ITEMS = 50
 MAX_ACCEPTANCE_CHARS = 1_000
+MAX_BINDING_ITEMS = 50
+MAX_BINDING_CHARS = 1_000
+MAX_SCOPE_CHARS = 20_000
 MAX_VALIDATION_ITEMS = 20
 MAX_VALIDATION_CHARS = 500
 MAX_TAG_ITEMS = 30
@@ -86,6 +89,10 @@ class TaskRequest:
     priority: int
     max_attempts: int
     task_id: str | None
+    architecture_decisions: tuple[str, ...] = ()
+    constraints: tuple[str, ...] = ()
+    scope: str = ""
+    out_of_scope: str = ""
     defaults_applied: tuple[str, ...] = ()
 
 
@@ -147,6 +154,13 @@ def _require_text(
         details={"field": field_name},
     )
     return normalized
+
+
+def _optional_text(value: Any, *, field_name: str, maximum: int) -> str:
+    """Normalize a field that may be omitted entirely; supplied text must still be visible."""
+    if value is None:
+        return ""
+    return _require_text(value, field_name=field_name, maximum=maximum, allow_whitespace=True)
 
 
 def _normalize_string_list(
@@ -320,6 +334,22 @@ def build_task_request(args: argparse.Namespace) -> TaskRequest:
         max_items=MAX_ACCEPTANCE_ITEMS,
         max_chars=MAX_ACCEPTANCE_CHARS,
     )
+    architecture_decisions = _normalize_string_list(
+        getattr(args, "decision", None),
+        field_name="architecture_decisions",
+        max_items=MAX_BINDING_ITEMS,
+        max_chars=MAX_BINDING_CHARS,
+    )
+    constraints = _normalize_string_list(
+        getattr(args, "constraint", None),
+        field_name="constraints",
+        max_items=MAX_BINDING_ITEMS,
+        max_chars=MAX_BINDING_CHARS,
+    )
+    scope = _optional_text(getattr(args, "scope", None), field_name="scope", maximum=MAX_SCOPE_CHARS)
+    out_of_scope = _optional_text(
+        getattr(args, "out_of_scope", None), field_name="out_of_scope", maximum=MAX_SCOPE_CHARS
+    )
     validation_commands = _normalize_validation_commands(getattr(args, "validation", None))
     tags = _normalize_string_list(
         getattr(args, "tag", None), field_name="tags", max_items=MAX_TAG_ITEMS, max_chars=MAX_TAG_CHARS
@@ -371,6 +401,14 @@ def build_task_request(args: argparse.Namespace) -> TaskRequest:
 
     if not acceptance:
         defaults.append("acceptance_criteria")
+    if not architecture_decisions:
+        defaults.append("architecture_decisions")
+    if not constraints:
+        defaults.append("constraints")
+    if not scope:
+        defaults.append("scope")
+    if not out_of_scope:
+        defaults.append("out_of_scope")
     if not validation_commands:
         defaults.append("validation_commands")
     if not tags:
@@ -392,6 +430,10 @@ def build_task_request(args: argparse.Namespace) -> TaskRequest:
         priority=priority,
         max_attempts=max_attempts,
         task_id=task_id,
+        architecture_decisions=architecture_decisions,
+        constraints=constraints,
+        scope=scope,
+        out_of_scope=out_of_scope,
         defaults_applied=tuple(defaults),
     )
 
@@ -408,6 +450,10 @@ def _fingerprint(
     risk: str,
     priority: int,
     max_attempts: int,
+    architecture_decisions: Iterable[str],
+    constraints: Iterable[str],
+    scope: str,
+    out_of_scope: str,
 ) -> str:
     """Hash the material content of a task so identical retries are recognizable.
 
@@ -415,8 +461,10 @@ def _fingerprint(
     so no additional database column is required to make submission idempotent.
 
     Acceptance criteria and validation commands keep their order, because validation commands run
-    in the order given and stop at the first failure. Tags and dependencies are unordered sets, so
-    they are sorted here to keep a reordered retry from reading as a different request.
+    in the order given and stop at the first failure. Architecture decisions and constraints are
+    binding requirements and keep their order too, so the same task identity can never represent
+    two different binding contracts. Tags and dependencies are unordered sets, so they are sorted
+    here to keep a reordered retry from reading as a different request.
     """
     material = {
         "project_id": project_id,
@@ -429,6 +477,10 @@ def _fingerprint(
         "risk": _normalize_text(risk).lower(),
         "priority": priority,
         "max_attempts": max_attempts,
+        "architecture_decisions": [_normalize_text(item) for item in architecture_decisions],
+        "constraints": [_normalize_text(item) for item in constraints],
+        "scope": _normalize_text(scope),
+        "out_of_scope": _normalize_text(out_of_scope),
     }
     return hashlib.sha256(json_dumps(material).encode("utf-8")).hexdigest()
 
@@ -445,6 +497,10 @@ def request_fingerprint(request: TaskRequest, project: Project) -> str:
         risk=request.risk,
         priority=request.priority,
         max_attempts=request.max_attempts,
+        architecture_decisions=request.architecture_decisions,
+        constraints=request.constraints,
+        scope=request.scope,
+        out_of_scope=request.out_of_scope,
     )
 
 
@@ -460,6 +516,10 @@ def task_fingerprint(task: Task) -> str:
         risk=task.risk,
         priority=task.priority,
         max_attempts=task.max_attempts,
+        architecture_decisions=task.architecture_decisions,
+        constraints=task.constraints,
+        scope=task.scope,
+        out_of_scope=task.out_of_scope,
     )
 
 
@@ -541,6 +601,10 @@ def _normalized_request_payload(request: TaskRequest, project: Project, task_id:
         "title": request.title,
         "objective": request.objective,
         "acceptance_criteria": list(request.acceptance),
+        "architecture_decisions": list(request.architecture_decisions),
+        "constraints": list(request.constraints),
+        "scope": request.scope,
+        "out_of_scope": request.out_of_scope,
         "validation_commands": [redact_command(command) for command in request.validation_commands],
         "tags": list(request.tags),
         "dependencies": list(request.dependencies),
@@ -559,6 +623,10 @@ def _defaults_payload(
         "priority": request.priority,
         "max_attempts": request.max_attempts,
         "acceptance_criteria": list(request.acceptance),
+        "architecture_decisions": list(request.architecture_decisions),
+        "constraints": list(request.constraints),
+        "scope": request.scope,
+        "out_of_scope": request.out_of_scope,
         "validation_commands": list(request.validation_commands),
         "tags": list(request.tags),
         "dependencies": list(request.dependencies),
@@ -590,6 +658,10 @@ def _task_payload(
         schema_version=schema_version,
     )
     payload["acceptance_criteria"] = list(task.acceptance)
+    payload["architecture_decisions"] = list(task.architecture_decisions)
+    payload["constraints"] = list(task.constraints)
+    payload["scope"] = task.scope
+    payload["out_of_scope"] = task.out_of_scope
     payload["validation_commands"] = [redact_command(command) for command in task.validation_commands]
     payload["tags"] = list(task.tags)
     payload["dependencies"] = list(task.dependencies)
@@ -612,6 +684,10 @@ def _preview_task(request: TaskRequest, project: Project, task_id: str, state: T
         risk=request.risk,
         tags=list(request.tags),
         dependencies=list(request.dependencies),
+        architecture_decisions=list(request.architecture_decisions),
+        constraints=list(request.constraints),
+        scope=request.scope,
+        out_of_scope=request.out_of_scope,
         max_attempts=request.max_attempts,
     )
 

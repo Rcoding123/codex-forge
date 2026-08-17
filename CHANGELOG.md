@@ -4,7 +4,32 @@ All notable changes to Codex Forge are documented here. This project follows sem
 
 ## [Unreleased]
 
-### Fixed
+### Added
+
+- The task-add contract carries the full implementation-binding specification: `--decision`
+  (repeatable), `--constraint` (repeatable), `--scope`, and `--out-of-scope` flow through request
+  validation, the idempotency fingerprint, persistence (additive `architecture_decisions_json`,
+  `constraints_json`, `scope`, and `out_of_scope` columns), and both worker prompts verbatim.
+  Architecture decisions and constraints are binding requirements: the review result reports each
+  one verbatim in `binding_requirements` (`text`/`met`/`evidence`), and the specification
+  conformance gate — the same choke point that enforces acceptance criteria — fails closed for both
+  report kinds. Each report must be an exact bijection of the stored contract: every item reported
+  exactly once, echoed verbatim — review matching never normalizes Unicode, collapses whitespace,
+  or accepts a paraphrase — with `met` true and non-empty evidence, and nothing else reported at
+  all. A missing, duplicated, unmet, evidence-less, or unexpected entry — including a paraphrased
+  or contradictory extra version of an otherwise exactly-reported item — forces `changes_required`
+  with a finding naming the exact text, and a duplicate is itself invalid review evidence even when
+  the copies agree. The effective verdict is decided only after every conformance finding is known:
+  green candidate-authored tests, a `met` flag, or the reviewer's own `pass` verdict can never
+  override a conformance finding. The review prompt also carries the task's validation commands
+  verbatim as deterministic evidence requirements for the specification, never a redefinition of
+  it. Tasks submitted before these fields existed remain fully readable and reviewable: old rows
+  migrate additively, empty binding fields require no conformance report, and historical
+  prompt/evidence artifacts are never rewritten — while a future review or retry of an old task
+  intentionally uses the current, stronger review prompt rather than a byte-frozen historical
+  baseline. A canonical
+  Shared Chat -> Forge boundary fixture is pinned by SHA-256 under `tests/fixtures/` for
+  byte-identical mirroring.
 
 - Review phases no longer run under a sandbox that cannot launch a command. Codex enforces the
   `read-only` and `workspace-write` sandboxes on Windows with a restricted token, which cannot reach

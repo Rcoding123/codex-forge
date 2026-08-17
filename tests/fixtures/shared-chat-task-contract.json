@@ -1,0 +1,92 @@
+{
+  "fixture": "shared-chat-forge-task-contract",
+  "version": 1,
+  "description": "Canonical Shared Chat -> Forge task-add boundary contract. This file is mirrored byte-identically in the Shared Chat repository so both sides review the same boundary without a cross-checkout dependency. Any change to this file changes its pinned SHA-256 and must be mirrored deliberately.",
+  "project": "signal-shelf",
+  "task_id": "SC-R1-BOUNDARY-CONTRACT",
+  "title": "Signal Shelf CLI",
+  "objective": "Record operational signals with add, list, search, and stats commands.",
+  "scope": "The signal-shelf command-line interface and its SQLite persistence.",
+  "out_of_scope": "No web UI, no network transport, and no changes outside signal_shelf/.",
+  "architecture_decisions": [
+    "Supported levels are low, medium, and high.",
+    "Signals persist in a single SQLite database file."
+  ],
+  "constraints": [
+    "Python standard library only; no new runtime dependencies."
+  ],
+  "acceptance_criteria": [
+    "add accepts exactly the levels low, medium, and high; any other --level value, including info, warning, and critical, is rejected with exit code 2.",
+    "stats by_level always contains exactly the keys low, medium, and high, including zero counts."
+  ],
+  "validation_commands": [
+    "python -m pytest -q"
+  ],
+  "risk": "medium",
+  "max_attempts": 3,
+  "expected_argv": [
+    "task",
+    "add",
+    "--project",
+    "signal-shelf",
+    "--title",
+    "Signal Shelf CLI",
+    "--objective",
+    "Record operational signals with add, list, search, and stats commands.",
+    "--scope",
+    "The signal-shelf command-line interface and its SQLite persistence.",
+    "--out-of-scope",
+    "No web UI, no network transport, and no changes outside signal_shelf/.",
+    "--decision",
+    "Supported levels are low, medium, and high.",
+    "--decision",
+    "Signals persist in a single SQLite database file.",
+    "--constraint",
+    "Python standard library only; no new runtime dependencies.",
+    "--acceptance",
+    "add accepts exactly the levels low, medium, and high; any other --level value, including info, warning, and critical, is rejected with exit code 2.",
+    "--acceptance",
+    "stats by_level always contains exactly the keys low, medium, and high, including zero counts.",
+    "--validation",
+    "python -m pytest -q",
+    "--risk",
+    "medium",
+    "--max-attempts",
+    "3",
+    "--id",
+    "SC-R1-BOUNDARY-CONTRACT",
+    "--json"
+  ],
+  "expected_request": {
+    "project": "signal-shelf",
+    "title": "Signal Shelf CLI",
+    "objective": "Record operational signals with add, list, search, and stats commands.",
+    "acceptance_criteria": [
+      "add accepts exactly the levels low, medium, and high; any other --level value, including info, warning, and critical, is rejected with exit code 2.",
+      "stats by_level always contains exactly the keys low, medium, and high, including zero counts."
+    ],
+    "architecture_decisions": [
+      "Supported levels are low, medium, and high.",
+      "Signals persist in a single SQLite database file."
+    ],
+    "constraints": [
+      "Python standard library only; no new runtime dependencies."
+    ],
+    "scope": "The signal-shelf command-line interface and its SQLite persistence.",
+    "out_of_scope": "No web UI, no network transport, and no changes outside signal_shelf/.",
+    "validation_commands": [
+      "python -m pytest -q"
+    ],
+    "tags": [],
+    "dependencies": [],
+    "risk": "medium",
+    "priority": 100,
+    "max_attempts": 3,
+    "task_id": "SC-R1-BOUNDARY-CONTRACT",
+    "defaults_applied": [
+      "priority",
+      "tags",
+      "dependencies"
+    ]
+  }
+}

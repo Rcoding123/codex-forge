@@ -39,6 +39,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     risk TEXT NOT NULL DEFAULT 'medium',
     tags_json TEXT NOT NULL,
     dependencies_json TEXT NOT NULL,
+    architecture_decisions_json TEXT NOT NULL DEFAULT '[]',
+    constraints_json TEXT NOT NULL DEFAULT '[]',
+    scope TEXT NOT NULL DEFAULT '',
+    out_of_scope TEXT NOT NULL DEFAULT '',
     attempts INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 3,
     branch TEXT,
@@ -105,6 +109,16 @@ class ForgeDB:
             self._add_column_if_missing(
                 connection, "tasks", "identical_failures", "INTEGER NOT NULL DEFAULT 0"
             )
+            self._add_column_if_missing(
+                connection, "tasks", "architecture_decisions_json", "TEXT NOT NULL DEFAULT '[]'"
+            )
+            self._add_column_if_missing(
+                connection, "tasks", "constraints_json", "TEXT NOT NULL DEFAULT '[]'"
+            )
+            self._add_column_if_missing(connection, "tasks", "scope", "TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(
+                connection, "tasks", "out_of_scope", "TEXT NOT NULL DEFAULT ''"
+            )
             self._add_column_if_missing(connection, "runs", "effort", "TEXT NOT NULL DEFAULT 'medium'")
 
     @staticmethod
@@ -165,9 +179,10 @@ class ForgeDB:
                 """
                 INSERT INTO tasks(
                     id,project_id,title,objective,acceptance_json,validation_json,state,priority,risk,
-                    tags_json,dependencies_json,attempts,max_attempts,branch,worktree_path,last_error,
+                    tags_json,dependencies_json,architecture_decisions_json,constraints_json,scope,
+                    out_of_scope,attempts,max_attempts,branch,worktree_path,last_error,
                     failure_fingerprint,identical_failures,result_json,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     task.id,
@@ -181,6 +196,10 @@ class ForgeDB:
                     task.risk,
                     json_dumps(task.tags),
                     json_dumps(task.dependencies),
+                    json_dumps(task.architecture_decisions),
+                    json_dumps(task.constraints),
+                    task.scope,
+                    task.out_of_scope,
                     task.attempts,
                     task.max_attempts,
                     task.branch,
@@ -429,6 +448,12 @@ class ForgeDB:
             risk=row["risk"],
             tags=json_loads(row["tags_json"], []),
             dependencies=json_loads(row["dependencies_json"], []),
+            # `.get` with a default: rows persisted before these columns existed, and databases not
+            # yet migrated by `initialize`, must stay readable as tasks with no binding contract.
+            architecture_decisions=json_loads(row.get("architecture_decisions_json"), []),
+            constraints=json_loads(row.get("constraints_json"), []),
+            scope=row.get("scope") or "",
+            out_of_scope=row.get("out_of_scope") or "",
             attempts=int(row["attempts"]),
             max_attempts=int(row["max_attempts"]),
             branch=row.get("branch"),

@@ -30,7 +30,7 @@ from codex_forge.db import ForgeDB
 from codex_forge.models import Project, Task, TaskState
 from codex_forge.orchestrator import (
     acceptance_conformance_findings,
-    enforce_acceptance_conformance,
+    enforce_specification_conformance,
 )
 from codex_forge.prompts import review_prompt
 from codex_forge.telemetry import OUTCOME_COMPLETED, OUTCOME_REVIEW_CHANGES_REQUIRED
@@ -226,7 +226,7 @@ def test_a_conforming_candidate_with_green_tests_still_completes(tmp_path: Path,
 
 
 def test_an_unmet_criterion_forces_changes_required_and_names_the_criterion():
-    effective = enforce_acceptance_conformance(make_task(CRITERIA), OVERWEIGHTED_PASS_FINAL)
+    effective = enforce_specification_conformance(make_task(CRITERIA), OVERWEIGHTED_PASS_FINAL)
     assert effective["verdict"] == "changes_required"
     issues = [finding["issue"] for finding in effective["findings"]]
     assert any(LEVEL_CRITERION in issue and "Unmet acceptance criterion" in issue for issue in issues)
@@ -246,7 +246,7 @@ def test_a_paraphrased_criterion_echo_does_not_count_as_coverage():
         ],
         "findings": [],
     }
-    effective = enforce_acceptance_conformance(make_task([LEVEL_CRITERION]), paraphrased)
+    effective = enforce_specification_conformance(make_task([LEVEL_CRITERION]), paraphrased)
     assert effective["verdict"] == "changes_required"
     assert any(
         LEVEL_CRITERION in finding["issue"] and "not verified" in finding["issue"]
@@ -254,7 +254,8 @@ def test_a_paraphrased_criterion_echo_does_not_count_as_coverage():
     )
 
 
-def test_whitespace_wrapping_differences_do_not_reject_a_faithful_echo():
+def test_a_whitespace_altered_echo_is_not_coverage():
+    """Verbatim means verbatim: a rewrapped echo is no longer the stored criterion text."""
     wrapped_echo = {
         "verdict": "pass",
         "summary": "Verified.",
@@ -267,18 +268,22 @@ def test_whitespace_wrapping_differences_do_not_reject_a_faithful_echo():
         ],
         "findings": [],
     }
-    effective = enforce_acceptance_conformance(make_task([LEVEL_CRITERION]), wrapped_echo)
-    assert effective["verdict"] == "pass"
-    assert acceptance_conformance_findings(make_task([LEVEL_CRITERION]), wrapped_echo) == []
+    effective = enforce_specification_conformance(make_task([LEVEL_CRITERION]), wrapped_echo)
+    assert effective["verdict"] == "changes_required"
+    assert acceptance_conformance_findings(make_task([LEVEL_CRITERION]), wrapped_echo) != []
+    assert any(
+        LEVEL_CRITERION in finding["issue"] and "not verified" in finding["issue"]
+        for finding in effective["findings"]
+    )
 
 
 def test_a_fully_confirmed_review_result_passes_through_unchanged():
-    effective = enforce_acceptance_conformance(make_task(CRITERIA), CONFORMING_PASS_FINAL)
+    effective = enforce_specification_conformance(make_task(CRITERIA), CONFORMING_PASS_FINAL)
     assert effective == CONFORMING_PASS_FINAL
 
 
 def test_a_task_without_criteria_keeps_the_reviewer_verdict():
-    effective = enforce_acceptance_conformance(make_task([]), BLIND_PASS_FINAL)
+    effective = enforce_specification_conformance(make_task([]), BLIND_PASS_FINAL)
     assert effective == BLIND_PASS_FINAL
 
 
