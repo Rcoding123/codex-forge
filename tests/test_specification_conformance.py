@@ -77,14 +77,18 @@ OVERWEIGHTED_PASS_FINAL = {
             "evidence": "stats emits info/warning/critical keys.",
         },
     ],
+    "binding_requirements": [],
     "findings": [],
 }
 
-# The verdict shape the live reviewer actually returned: pass, nothing examined per criterion.
+# A blind reviewer: schema-valid pass, nothing examined per criterion. (The live fw5a reviewer
+# returned this with the criteria keys absent; the strict output schema now forces them to
+# exist, so an empty examination is the blind shape that can still arrive.)
 BLIND_PASS_FINAL = {
     "verdict": "pass",
     "summary": "No blocking defects found.",
     "acceptance_criteria": [],
+    "binding_requirements": [],
     "findings": [],
 }
 
@@ -95,6 +99,7 @@ CONFORMING_PASS_FINAL = {
         {"criterion": item, "met": True, "evidence": "Verified against the final candidate."}
         for item in CRITERIA
     ],
+    "binding_requirements": [],
     "findings": [],
 }
 

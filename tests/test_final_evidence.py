@@ -68,6 +68,8 @@ class ScriptedRunner:
             final = {
                 "verdict": "changes_required",
                 "summary": "One repair remains.",
+                "acceptance_criteria": [],
+                "binding_requirements": [],
                 "findings": [
                     {
                         "severity": "medium",
@@ -82,7 +84,13 @@ class ScriptedRunner:
             (worktree / "base.txt").write_text("final repair\n", encoding="utf-8")
             final = completed_result(["base.txt"], "review repair")
         else:
-            final = {"verdict": "pass", "summary": "Candidate is complete.", "findings": []}
+            final = {
+                "verdict": "pass",
+                "summary": "Candidate is complete.",
+                "acceptance_criteria": [],
+                "binding_requirements": [],
+                "findings": [],
+            }
 
         artifact = Path(artifact_dir)
         artifact.mkdir(parents=True, exist_ok=True)

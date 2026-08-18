@@ -105,6 +105,67 @@ All notable changes to Codex Forge are documented here. This project follows sem
   phase is recorded — and one in-flight phase can still overshoot the remainder, because neither the
   runner nor codex-cli 0.146.0 exposes a per-request token cap.
 
+### Fixed
+
+- `review-result.schema.json` satisfies the strict structured-output rules the review transport's
+  provider enforces: `binding_requirements` was declared in `properties` but missing from
+  top-level `required`, so every review request was refused with `invalid_json_schema` before any
+  model answer existed (live acceptance run fw5a, task SC-R1-c12b3cbc38cb6cd526266c8e). The field
+  is required in the review OUTPUT while an empty `[]` remains the valid report for a task with no
+  architecture decisions or constraints; historical stored review evidence is never rewritten. A
+  reusable STRUCTURAL strict-schema regression (`tests/strict_schema.py` via
+  `tests/test_review_transport.py`) validates every schema passed to `codex exec --output-schema`
+  recursively for required/property closure and `additionalProperties: false`, catching exactly
+  this defect class — a property absent from `required` — at any nesting depth. The helper makes
+  no claim about which schema keywords the provider supports: the repo holds no authoritative
+  allowlist, so keyword support is proven only by the live transport, whose refusal the controller
+  classifies safely.
+  Separate static budget tests pin the schema documents inside the most restrictive numeric limits
+  the provider has documented (nesting depth, property count, enum values, name/enum string
+  length). Neither is a substitute for live-provider certification.
+
+### Changed
+
+- A review request the transport could not execute at all — a provider API rejection such as an
+  invalid structured-output schema, or a transport-level Codex CLI failure — is classified
+  `REVIEW_INFRASTRUCTURE_BLOCKED`, never as an implementation failure. Bounded retry is preserved
+  under the ordinary attempt and identical-failure limits, but loop detection no longer erases the
+  owning failure class: the terminal `last_error` keeps the `REVIEW_INFRASTRUCTURE_BLOCKED` prefix
+  with the loop information behind it, no repair phase runs because no semantic review verdict
+  exists, and the task is never completed on this path. Raw provider output has exactly one owner:
+  the event stream and stderr artifacts the runner already retained keep the provider's verbatim
+  rejection, and no provider-generated string — error code, type, param, message, request ID —
+  is ever copied into durable state. `review-infrastructure-block.json` (reason
+  `review_transport_failed`) carries only controller facts: the stable classification, the process
+  exit code, the numeric HTTP status when the provider's error event carried one (admitted only as
+  a JSON integer), and pointers to the raw artifacts. The database `last_error` carries only the
+  deterministic controller summary (classification, exit code, numeric status). Failure
+  classification is autonomous: the identical-failure fingerprint is built solely from the
+  canonical controller tuple (phase, reason, exit code, numeric HTTP status), so a provider
+  failure Forge has never seen — a rate limit, an authentication refusal, a malformed response, an
+  outage, an unknown error code — is bounded automatically, and no operator-maintained
+  certification table, allowlist or manual classification step exists anywhere. Volatile provider
+  text (paths, request IDs, secrets, novel codes) can neither defeat loop detection nor split one
+  failure class into many.
+
+- A semantic review exists if and only if the reviewer run's raw final output passes the single
+  production decode/validation gate into a valid ReviewResult — process exit 0 proves nothing by
+  itself. A review whose exit-0 output is missing, empty, malformed JSON, or invalid against the
+  shipped review-result schema is classified `REVIEW_INFRASTRUCTURE_BLOCKED` with the
+  controller-owned reason `review_output_unusable` and a controller-named kind
+  (`missing_output` / `invalid_json` / `schema_invalid`): no semantic blocking_reason, no
+  finding, no repair phase, no candidate-quality conclusion, and never a completed task. The old
+  path where raw reviewer final text or stderr became a semantic `blocking_reason` for a review
+  phase is gone — the runner's fabricated in-memory final is never consulted for review
+  semantics. Identity and durable state follow the same law as transport failures: the
+  fingerprint is `phase=review | reason=review_output_unusable | kind | exit_code | status=None`,
+  `last_error` is the controller summary (`review output unusable; kind=…; exit_code=…`), and the
+  block record persists only reason, kind, exit code and evidence references, while the raw
+  final-output, event and stderr artifacts keep sole custody of the unusable bytes. Initial
+  review and re-review obey the same gate. Valid ReviewResults are untouched: a decoded
+  `changes_required` still enters the repair loop and a decoded conforming `pass` still
+  completes, with specification-conformance enforcement unchanged downstream of the gate.
+
 ## [0.2.0] - 2026-08-02
 
 ### Added

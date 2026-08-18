@@ -46,6 +46,6 @@
       }
     }
   },
-  "required": ["verdict", "summary", "acceptance_criteria", "findings"],
+  "required": ["verdict", "summary", "acceptance_criteria", "binding_requirements", "findings"],
   "additionalProperties": false
 }

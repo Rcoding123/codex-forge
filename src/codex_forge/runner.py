@@ -34,6 +34,16 @@ SANDBOX_PROBE_TIMEOUT_SECONDS = 120
 
 BLOCK_SANDBOX_UNLAUNCHABLE = "sandbox_launch_unavailable"
 BLOCK_COMMANDS_NEVER_EXECUTED = "review_commands_never_executed"
+BLOCK_REVIEW_TRANSPORT_FAILED = "review_transport_failed"
+BLOCK_REVIEW_OUTPUT_UNUSABLE = "review_output_unusable"
+
+# Controller-owned failure kinds for a review run whose process exited 0 but whose final output
+# never became a valid ReviewResult. Forge itself names which decode step failed; no reviewer
+# byte and no parser prose participates in the kind, so these are safe for durable state and
+# for failure identity.
+REVIEW_OUTPUT_MISSING = "missing_output"
+REVIEW_OUTPUT_INVALID_JSON = "invalid_json"
+REVIEW_OUTPUT_SCHEMA_INVALID = "schema_invalid"
 
 # Evidence stays useful without becoming unbounded: enough failing commands to identify the runner,
 # each cut to a length a reader can scan.
@@ -98,9 +108,23 @@ class ReviewInfrastructureBlock:
     commands: tuple[str, ...]
     detail: str
     evidence: dict[str, str]
+    http_status: int | None = None
+    kind: str | None = None
 
     def summary(self) -> str:
         codes = ", ".join(str(code) for code in self.exit_codes) or "none recorded"
+        if self.reason == BLOCK_REVIEW_OUTPUT_UNUSABLE:
+            return (
+                f"The review transport completed but produced no usable structured review result "
+                f"(reason {self.reason}, kind {self.kind}, exit codes {codes}), so nothing was "
+                f"said about the candidate. {self.detail}"
+            )
+        if self.reason == BLOCK_REVIEW_TRANSPORT_FAILED:
+            return (
+                f"The review provider transport could not execute the review request at all "
+                f"(reason {self.reason}, exit codes {codes}), so nothing was said about the "
+                f"candidate. {self.detail}"
+            )
         return (
             f"The review command runner could not execute any command "
             f"(reason {self.reason}, requested sandbox {self.requested_sandbox}, "
@@ -109,7 +133,7 @@ class ReviewInfrastructureBlock:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "error_code": "REVIEW_INFRASTRUCTURE_BLOCKED",
             "reason": self.reason,
             "requested_sandbox": self.requested_sandbox,
@@ -120,6 +144,11 @@ class ReviewInfrastructureBlock:
             "evidence": dict(self.evidence),
             "summary": self.summary(),
         }
+        if self.http_status is not None:
+            data["http_status"] = self.http_status
+        if self.kind is not None:
+            data["kind"] = self.kind
+        return data
 
 
 def _bounded_command(command: object) -> str:
@@ -197,6 +226,152 @@ def detect_review_infrastructure_block(
             "stderr": str(result.stderr_path),
         },
     )
+
+
+def transport_http_status(result: CodexRunResult) -> int | None:
+    """The numeric HTTP status of a refused run, if the provider's error event carried one.
+
+    This is the only fact read out of provider output for durable use, and it is admitted under
+    a strict numeric type check: a status counts only as a JSON integer, so no provider-generated
+    string can ride through this path. Everything else the provider said — error codes, types,
+    params, messages, request IDs — stays in the raw event stream and stderr artifacts the runner
+    retained, which are the only owners of verbatim provider text. The last ``error`` event wins
+    because it is the provider's own statement of why the request never produced an answer.
+    """
+    try:
+        stream = result.jsonl_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    last_error: str | None = None
+    for line in stream.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "error" and isinstance(event.get("message"), str):
+            last_error = event["message"]
+    if not last_error:
+        return None
+    try:
+        payload = json.loads(last_error)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    status = payload.get("status")
+    if isinstance(status, int) and not isinstance(status, bool):
+        return status
+    return None
+
+
+def decode_review_result(
+    result: CodexRunResult, schema: dict[str, Any]
+) -> tuple[dict[str, Any] | None, str | None]:
+    """The single transition from untrusted reviewer bytes to a trusted semantic ReviewResult.
+
+    A semantic review exists if and only if this function returns one: the reviewer's final
+    output file must exist, be non-empty, parse as JSON, and satisfy the same review-result
+    schema document the transport already enforces. Process exit 0 proves nothing by itself.
+
+    On failure the return value is ``(None, kind)`` where ``kind`` is a controller-owned token
+    naming which decode step failed — never any reviewer byte, parser message, or path. The raw
+    final output stays in its artifact file, which remains the only owner of the unusable text.
+    """
+    try:
+        raw = result.final_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None, REVIEW_OUTPUT_MISSING
+    if not raw.strip():
+        return None, REVIEW_OUTPUT_MISSING
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, REVIEW_OUTPUT_INVALID_JSON
+    if not isinstance(payload, dict) or not _instance_conforms(payload, schema):
+        return None, REVIEW_OUTPUT_SCHEMA_INVALID
+    return payload, None
+
+
+def _instance_conforms(instance: object, schema: dict[str, Any]) -> bool:
+    """Whether `instance` satisfies `schema`, for the keyword subset the transported schemas use.
+
+    Deliberately boolean: a validation failure must contribute nothing describable to durable
+    state, so no violation prose is ever produced. The supported keywords — `type` (including
+    list form), `enum`, `properties`, `required`, `additionalProperties: false`, `items` — are
+    exactly the set `schemas/*.schema.json` use; tests pin that the shipped documents stay
+    inside it by exercising this gate against them.
+    """
+    declared = schema.get("type")
+    if declared is not None:
+        names = declared if isinstance(declared, list) else [declared]
+        if not any(_is_json_type(instance, name) for name in names):
+            return False
+    if "enum" in schema and instance not in schema["enum"]:
+        return False
+    if isinstance(instance, dict):
+        properties = schema.get("properties") or {}
+        if any(key not in instance for key in schema.get("required") or []):
+            return False
+        if schema.get("additionalProperties") is False and any(
+            key not in properties for key in instance
+        ):
+            return False
+        return all(
+            _instance_conforms(value, properties[key])
+            for key, value in instance.items()
+            if key in properties
+        )
+    if isinstance(instance, list) and "items" in schema:
+        return all(_instance_conforms(item, schema["items"]) for item in instance)
+    return True
+
+
+def _is_json_type(value: object, name: str) -> bool:
+    if name == "object":
+        return isinstance(value, dict)
+    if name == "array":
+        return isinstance(value, list)
+    if name == "string":
+        return isinstance(value, str)
+    if name == "boolean":
+        return isinstance(value, bool)
+    if name == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if name == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if name == "null":
+        return value is None
+    return False
+
+
+class ReviewTransportError(RuntimeError):
+    """The review transport could not execute the review request at all.
+
+    Raised when the Codex CLI exits non-zero for a review phase: a provider API rejection (for
+    example an invalid structured-output schema refused before any model answer), a transport-level
+    CLI failure, or an equivalent inability of the review infrastructure to run. It deliberately
+    subclasses ``RuntimeError`` so any handler that predates it treats it exactly like the generic
+    phase failure it replaces. It is not a review verdict: nothing was said about the candidate.
+
+    ``http_status`` is the numeric HTTP status when the provider's error event carried one — the
+    only provider-derived fact admitted into durable state. The provider's verbatim output stays
+    only in the retained event stream and stderr artifacts that ``evidence`` points at.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        phase: str,
+        exit_code: int | None,
+        http_status: int | None,
+        evidence: dict[str, str],
+    ):
+        super().__init__(message)
+        self.phase = phase
+        self.exit_code = exit_code
+        self.http_status = http_status
+        self.evidence = evidence
 
 
 def _build_process_command(executable: str, arguments: list[str]) -> list[str]:
