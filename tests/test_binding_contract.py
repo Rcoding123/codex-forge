@@ -74,11 +74,14 @@ OVERWEIGHTED_BINDING_PASS_FINAL = {
     "findings": [],
 }
 
-# The verdict shape a pre-extension reviewer returns: pass, no binding requirements examined.
+# A blind reviewer: schema-valid pass whose binding examination is empty. (The transport's
+# strict output schema forces the key to exist; declining to examine anything is the shape that
+# can still arrive.)
 BLIND_BINDING_PASS_FINAL = {
     "verdict": "pass",
     "summary": "No blocking defects found.",
     "acceptance_criteria": [],
+    "binding_requirements": [],
     "findings": [],
 }
 

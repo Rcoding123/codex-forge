@@ -32,6 +32,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from codex_forge.cli import package_root
 from codex_forge.config import ForgeConfig, TelemetryConfig
 from codex_forge.control_plane import _safe_task_error
 from codex_forge.models import CodexRunResult, Project, Task, TaskState, ValidationResult
@@ -144,6 +145,8 @@ CANARY_BLOCKED_FINAL = {
 GENUINE_CHANGES_REQUIRED_FINAL = {
     "verdict": "changes_required",
     "summary": "`is_blank` mishandles a non-breaking space.",
+    "acceptance_criteria": [],
+    "binding_requirements": [],
     "findings": [
         {
             "severity": "medium",
@@ -154,7 +157,13 @@ GENUINE_CHANGES_REQUIRED_FINAL = {
         }
     ],
 }
-PASSING_REVIEW_FINAL = {"verdict": "pass", "summary": "Looks correct.", "findings": []}
+PASSING_REVIEW_FINAL = {
+    "verdict": "pass",
+    "summary": "Looks correct.",
+    "acceptance_criteria": [],
+    "binding_requirements": [],
+    "findings": [],
+}
 COMPLETED_IMPLEMENTATION_FINAL = {
     "status": "completed",
     "summary": "Added `is_blank`.",
@@ -520,6 +529,8 @@ def build_orchestrator(
     orchestrator = object.__new__(Orchestrator)
     orchestrator.db = db
     orchestrator.runner = runner
+    # The trusted review gate loads the shipped review-result schema through this root.
+    orchestrator.package_root = package_root()
     orchestrator.telemetry = build_telemetry(TelemetryConfig())
     orchestrator.knowledge = SimpleNamespace(
         relevant=lambda *args: [], add_patterns=lambda *args: None

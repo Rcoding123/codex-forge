@@ -11,13 +11,19 @@ from .config import ForgeConfig
 from .db import ForgeDB
 from .gitops import changed_files_between, commit_task, current_commit, prepare_worktree, write_patch
 from .knowledge import KnowledgeStore
-from .models import Project, Task, TaskState, ValidationResult
+from .models import CodexRunResult, Project, Task, TaskState, ValidationResult
 from .prompts import implementation_prompt, review_prompt, validation_failure_summary
 from .runner import (
+    BLOCK_REVIEW_OUTPUT_UNUSABLE,
+    BLOCK_REVIEW_TRANSPORT_FAILED,
     CodexRunner,
+    decode_review_result,
     ReviewInfrastructureBlock,
+    ReviewTransportError,
+    SandboxResolution,
     detect_review_infrastructure_block,
     sandbox_infrastructure_block,
+    transport_http_status,
 )
 from .telemetry import (
     ATTR_ATTEMPT_TERMINATED_BY,
@@ -284,24 +290,29 @@ class Orchestrator:
             return self._fail_review_infrastructure(
                 task, artifact_dir, sandbox_infrastructure_block(resolution)
             )
-        review = self._run_codex_phase(
-            task,
-            project,
-            artifact_dir,
-            phase="review",
-            model=self._review_model(task),
-            effort=self._review_effort(task),
-            prompt=review_prompt(project, task, worktree),
-            schema="review-result.schema.json",
-            sandbox=resolution.sandbox,
-            role=ROLE_REVIEWER,
-        )
+        try:
+            review = self._run_codex_phase(
+                task,
+                project,
+                artifact_dir,
+                phase="review",
+                model=self._review_model(task),
+                effort=self._review_effort(task),
+                prompt=review_prompt(project, task, worktree),
+                schema="review-result.schema.json",
+                sandbox=resolution.sandbox,
+                role=ROLE_REVIEWER,
+            )
+        except ReviewTransportError as error:
+            return self._retry_or_fail_review_transport(task, artifact_dir, resolution, error)
         blocked = detect_review_infrastructure_block(
             review, requested_sandbox=resolution.requested, sandbox=resolution.sandbox
         )
         if blocked is not None:
             return self._fail_review_infrastructure(task, artifact_dir, blocked)
-        review_final = enforce_specification_conformance(task, review.final)
+        review_final, unusable = self._trusted_review_final(task, artifact_dir, resolution, review)
+        if review_final is None:
+            return unusable
 
         review_cycle = 0
         while review_final.get("verdict") == "changes_required" and review_cycle < self.config.max_repair_cycles:
@@ -325,24 +336,29 @@ class Orchestrator:
             validation_results = self._validate(task, worktree, artifact_dir, commands, suffix=f"review-repair-{review_cycle}")
             if not self._all_passed(validation_results):
                 continue
-            review = self._run_codex_phase(
-                task,
-                project,
-                artifact_dir,
-                phase=f"review-{review_cycle + 1}",
-                model=self._review_model(task),
-                effort=self._review_effort(task),
-                prompt=review_prompt(project, task, worktree, previous_findings=findings),
-                schema="review-result.schema.json",
-                sandbox=resolution.sandbox,
-                role=ROLE_REVIEWER,
-            )
+            try:
+                review = self._run_codex_phase(
+                    task,
+                    project,
+                    artifact_dir,
+                    phase=f"review-{review_cycle + 1}",
+                    model=self._review_model(task),
+                    effort=self._review_effort(task),
+                    prompt=review_prompt(project, task, worktree, previous_findings=findings),
+                    schema="review-result.schema.json",
+                    sandbox=resolution.sandbox,
+                    role=ROLE_REVIEWER,
+                )
+            except ReviewTransportError as error:
+                return self._retry_or_fail_review_transport(task, artifact_dir, resolution, error)
             blocked = detect_review_infrastructure_block(
                 review, requested_sandbox=resolution.requested, sandbox=resolution.sandbox
             )
             if blocked is not None:
                 return self._fail_review_infrastructure(task, artifact_dir, blocked)
-            review_final = enforce_specification_conformance(task, review.final)
+            review_final, unusable = self._trusted_review_final(task, artifact_dir, resolution, review)
+            if review_final is None:
+                return unusable
 
         if review_final.get("verdict") != "pass":
             self._retry_or_fail(task, json.dumps(review_final, ensure_ascii=False))
@@ -438,10 +454,26 @@ class Orchestrator:
                 # Recorded before raising so the span carries the specific cause; the raised text
                 # itself is never attached, because it embeds a stderr tail.
                 span.set_error_code(ERROR_CODEX_EXIT_NONZERO)
-                raise RuntimeError(
+                message = (
                     f"Codex phase {phase} failed with exit {result.exit_code}: "
                     f"{tail_text(result.stderr_path.read_text(encoding='utf-8', errors='replace'))}"
                 )
+                if role == ROLE_REVIEWER:
+                    # A reviewer whose request the transport refused has said nothing about the
+                    # candidate. The typed raise lets the review call sites keep that fact; every
+                    # other phase keeps the generic failure it always had.
+                    raise ReviewTransportError(
+                        message,
+                        phase=phase,
+                        exit_code=result.exit_code,
+                        http_status=transport_http_status(result),
+                        evidence={
+                            "events": str(result.jsonl_path),
+                            "final": str(result.final_path),
+                            "stderr": str(result.stderr_path),
+                        },
+                    )
+                raise RuntimeError(message)
             span.set_outcome(OUTCOME_OK)
             return result
 
@@ -498,6 +530,172 @@ class Orchestrator:
         )
         return OUTCOME_REVIEW_INFRASTRUCTURE_BLOCKED
 
+    def _retry_or_fail_review_transport(
+        self,
+        task: Task,
+        artifact_dir: Path,
+        resolution: SandboxResolution,
+        error: ReviewTransportError,
+    ) -> str:
+        """Bounded retry for a review the transport could not execute, classified as infrastructure.
+
+        The provider refused or failed the review request itself — an invalid structured-output
+        schema rejected before any model answer, an API error, a transport-level CLI failure — so
+        nothing was said about the candidate. Unlike a sandbox that can never launch a command on
+        this host, a transport fault can be transient, so the ordinary attempt and identical-failure
+        bounds still apply. What never changes is the owning failure class: every stored error for
+        this path carries the `REVIEW_INFRASTRUCTURE_BLOCKED` prefix, including the terminal one
+        loop detection writes, so no amount of retrying reads an environment fault as a finding
+        about the candidate's code. No repair phase follows and the task is never completed on this
+        path: there is no semantic review verdict to repair from or to complete against.
+
+        Classification is autonomous and uses controller facts only. Durable state — the block
+        record, `last_error`, and the identical-failure fingerprint — is built solely from what
+        the controller itself observed: the review phase, the `review_transport_failed` reason,
+        the process exit code, and the numeric HTTP status when the provider's error event carried
+        one. No provider-generated string (error code, type, param, message, request ID)
+        participates anywhere durable: there is no allowlist to certify, no code to classify, and
+        nothing for an operator to maintain when the provider invents a new failure. A rejection
+        Forge has never seen — a rate limit, an authentication refusal, a malformed response, an
+        outage, an unknown error code — lands in the same bounded retry class as every other
+        rejection with the same exit code and status, automatically. The provider's verbatim
+        output stays in the raw event/stderr artifacts the runner retained, which the block's
+        evidence map points at and which remain the only owners of provider text.
+        """
+        # `phase` is the constant review phase, not `error.phase`: a first review and a re-review
+        # refused the same way are the same failure class, and the fingerprint must say so. The
+        # identity slots are fixed-arity, with absent facts rendered as None, so a failure with no
+        # status can never collide with one whose status happens to format the same way.
+        identity = [
+            "phase=review",
+            f"reason={BLOCK_REVIEW_TRANSPORT_FAILED}",
+            f"exit_code={error.exit_code}",
+            f"status={error.http_status}",
+        ]
+        summary = ["review transport failed"]
+        if error.exit_code is not None:
+            summary.append(f"exit_code={error.exit_code}")
+        if error.http_status is not None:
+            summary.append(f"status={error.http_status}")
+        stable_summary = "; ".join(summary)
+        block = ReviewInfrastructureBlock(
+            reason=BLOCK_REVIEW_TRANSPORT_FAILED,
+            requested_sandbox=resolution.requested,
+            sandbox=resolution.sandbox,
+            exit_codes=(error.exit_code,) if error.exit_code is not None else (),
+            commands=(),
+            detail=(
+                f"{stable_summary}. The provider's verbatim output is retained in the attempt's "
+                "review event log and stderr log."
+            ),
+            evidence=dict(error.evidence),
+            http_status=error.http_status,
+        )
+        (artifact_dir / REVIEW_INFRASTRUCTURE_BLOCK_FILENAME).write_text(
+            json.dumps(block.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        self._retry_or_fail(
+            task,
+            stable_summary,
+            classification=REVIEW_INFRASTRUCTURE_BLOCKED,
+            fingerprint_source="|".join(identity),
+        )
+        return OUTCOME_REVIEW_INFRASTRUCTURE_BLOCKED
+
+    def _review_result_schema(self) -> dict:
+        """The review-result schema document, loaded once from the same file the transport ships."""
+        schema = getattr(self, "_review_result_schema_document", None)
+        if schema is None:
+            path = self.package_root / "schemas" / "review-result.schema.json"
+            schema = json.loads(path.read_text(encoding="utf-8"))
+            self._review_result_schema_document = schema
+        return schema
+
+    def _trusted_review_final(
+        self, task: Task, artifact_dir: Path, resolution: SandboxResolution, review: CodexRunResult
+    ) -> tuple[dict | None, str | None]:
+        """The only door from a completed review run into review semantics.
+
+        A semantic review exists if and only if `decode_review_result` produced one from the
+        run's raw final-output bytes; the runner's in-memory `final` — which fabricates a
+        blocked-shaped dict from raw text when the file is missing or malformed — is deliberately
+        never consulted for a review phase. On success the conformance-enforced review is
+        returned. On failure the attempt is classified through the unusable-output
+        infrastructure path and the terminal outcome comes back instead: no semantic
+        blocking_reason, no finding, no repair, no candidate-quality conclusion.
+        """
+        decoded, kind = decode_review_result(review, self._review_result_schema())
+        if decoded is None:
+            return None, self._retry_or_fail_review_output_unusable(
+                task, artifact_dir, resolution, review, kind
+            )
+        return enforce_specification_conformance(task, decoded), None
+
+    def _retry_or_fail_review_output_unusable(
+        self,
+        task: Task,
+        artifact_dir: Path,
+        resolution: SandboxResolution,
+        review: CodexRunResult,
+        kind: str | None,
+    ) -> str:
+        """Bounded retry for a review whose exit-0 output never became a valid ReviewResult.
+
+        The reviewer process completed, but no semantic review exists: the final output was
+        missing, empty, malformed, or failed the review-result schema. That is a protocol fault
+        of the review infrastructure, owned by `REVIEW_INFRASTRUCTURE_BLOCKED` exactly like a
+        transport refusal — nothing was said about the candidate, so no repair phase follows and
+        the task is never completed on this path.
+
+        Classification uses controller facts only: the review phase, the
+        `review_output_unusable` reason, the controller-named decode kind, and the process exit
+        code. No reviewer byte, parser message, path or request ID participates in `last_error`,
+        the block record, or the identical-failure fingerprint; the raw final output, event
+        stream and stderr artifacts the runner retained stay the only owners of the unusable
+        text, and the block's evidence map points at them. Two malformed outputs with different
+        volatile content but the same controller-observable failure are therefore the same
+        bounded failure class, and loop detection still terminates the retrying.
+        """
+        summary = f"review output unusable; kind={kind}"
+        if review.exit_code is not None:
+            summary += f"; exit_code={review.exit_code}"
+        # Fixed-arity identity, absent facts rendered as None — the same law as the transport
+        # fingerprint, with the reason keeping the two classes disjoint.
+        identity = [
+            "phase=review",
+            f"reason={BLOCK_REVIEW_OUTPUT_UNUSABLE}",
+            f"kind={kind}",
+            f"exit_code={review.exit_code}",
+            "status=None",
+        ]
+        block = ReviewInfrastructureBlock(
+            reason=BLOCK_REVIEW_OUTPUT_UNUSABLE,
+            requested_sandbox=resolution.requested,
+            sandbox=resolution.sandbox,
+            exit_codes=(review.exit_code,) if review.exit_code is not None else (),
+            commands=(),
+            detail=(
+                f"{summary}. The reviewer's raw final output, event stream and stderr are "
+                "retained in the attempt's raw artifacts."
+            ),
+            evidence={
+                "events": str(review.jsonl_path),
+                "final": str(review.final_path),
+                "stderr": str(review.stderr_path),
+            },
+            kind=kind,
+        )
+        (artifact_dir / REVIEW_INFRASTRUCTURE_BLOCK_FILENAME).write_text(
+            json.dumps(block.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        self._retry_or_fail(
+            task,
+            summary,
+            classification=REVIEW_INFRASTRUCTURE_BLOCKED,
+            fingerprint_source="|".join(identity),
+        )
+        return OUTCOME_REVIEW_INFRASTRUCTURE_BLOCKED
+
     def _handle_noncompletion(self, task: Task, final: dict) -> bool:
         status = final.get("status")
         if status == "completed":
@@ -516,10 +714,23 @@ class Orchestrator:
         self._retry_or_fail(task, str(reason))
         return True
 
-    def _retry_or_fail(self, task: Task, error: str) -> None:
+    def _retry_or_fail(
+        self,
+        task: Task,
+        error: str,
+        *,
+        classification: str | None = None,
+        fingerprint_source: str | None = None,
+    ) -> None:
+        # A caller that owns a canonical stable identity for its failure class passes it as
+        # `fingerprint_source`, keeping the human summary and the identical-failure identity
+        # separate; every other caller keeps the historical behavior of hashing the normalized
+        # error text. Either way the bounds and the loop detection are the same.
         bounded_error = tail_text(error, self.config.max_output_chars)
         normalized = " ".join(bounded_error.split())
-        fingerprint = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        fingerprint = hashlib.sha256(
+            (fingerprint_source if fingerprint_source is not None else normalized).encode("utf-8")
+        ).hexdigest()
         identical_failures = task.identical_failures + 1 if task.failure_fingerprint == fingerprint else 1
         loop_detected = identical_failures >= self.config.max_identical_failures
         state = (
@@ -529,6 +740,11 @@ class Orchestrator:
         )
         if loop_detected:
             bounded_error = f"LOOP_DETECTED after {identical_failures} identical failures.\n{bounded_error}"
+        if classification:
+            # The class stays at the very front of `last_error`: `control_plane._safe_task_error`
+            # matches on the prefix, and loop detection may add information but never gets to
+            # replace the owning failure class with its own.
+            bounded_error = f"{classification}: {bounded_error}"
         self.db.update_task(
             task.id,
             state=state,
