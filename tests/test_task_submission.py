@@ -10,6 +10,7 @@ from codex_forge.cli import main
 from codex_forge.config import ForgeConfig, load_config
 from codex_forge.db import ForgeDB
 from codex_forge.models import Project, TaskState
+from codex_forge.utils import derived_worktree_path
 
 
 UNICODE_PROJECT = "Démon-工具"
@@ -504,11 +505,11 @@ def test_a_lost_insert_race_with_an_identical_request_adopts_the_winning_task(
     _register_project(db, tmp_path)
     original_add_task = ForgeDB.add_task
 
-    def racing_add_task(self: ForgeDB, task) -> None:
+    def racing_add_task_guarded(self: ForgeDB, task, guard) -> None:
         original_add_task(self, task)
         raise sqlite3.IntegrityError("UNIQUE constraint failed: tasks.id")
 
-    monkeypatch.setattr(ForgeDB, "add_task", racing_add_task)
+    monkeypatch.setattr(ForgeDB, "add_task_guarded", racing_add_task_guarded)
     exit_code, document, _, _ = _run_json(
         config, capsys, *_submit_arguments(**{"--id": "TASK-RACE"}), "--json"
     )
@@ -526,12 +527,12 @@ def test_a_lost_insert_race_with_a_different_request_reports_a_conflict(
     _register_project(db, tmp_path)
     original_add_task = ForgeDB.add_task
 
-    def racing_add_task(self: ForgeDB, task) -> None:
+    def racing_add_task_guarded(self: ForgeDB, task, guard) -> None:
         task.objective = "A racing writer stored something else."
         original_add_task(self, task)
         raise sqlite3.IntegrityError("UNIQUE constraint failed: tasks.id")
 
-    monkeypatch.setattr(ForgeDB, "add_task", racing_add_task)
+    monkeypatch.setattr(ForgeDB, "add_task_guarded", racing_add_task_guarded)
     exit_code, document, _, _ = _run_json(
         config, capsys, *_submit_arguments(**{"--id": "TASK-RACE-CONFLICT"}), "--json"
     )
@@ -877,7 +878,7 @@ def test_windows_paths_round_trip_through_json(tmp_path: Path, capsys):
     )
 
     planned = document["data"]["task"]["planned_worktree"]
-    expected = str(config.workspace_root / project.name / "task-winpath")
+    expected = str(derived_worktree_path(config.workspace_root, project.name, "TASK-WINPATH"))
     assert planned == expected
     if "\\" in expected:
         assert "\\\\" in stdout, "backslashes must be JSON-escaped, not emitted raw"

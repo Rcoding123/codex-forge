@@ -148,6 +148,7 @@ class Orchestrator:
 
     def _task_from_yaml(self, data: dict) -> None:
         from .models import Task
+        from .task_submission import _normalize_task_id, insert_task_guarded
         from .utils import stable_id
 
         project_name = str(data["project"])
@@ -156,7 +157,12 @@ class Orchestrator:
             raise ValueError(f"Unknown project: {project_name}")
         title = str(data["title"])
         objective = str(data["objective"])
-        task_id = str(data.get("id") or stable_id("TASK", f"{project.id}:{title}:{objective}"))
+        # Inbox submissions pass through the same id authority as both CLI submission paths: the
+        # shared normalizer refuses unsafe and aliasing ids, and the guarded insert refuses ids
+        # colliding with a live case variant or retained evidence inside the insert transaction.
+        task_id = _normalize_task_id(data.get("id")) or stable_id(
+            "TASK", f"{project.id}:{title}:{objective}"
+        )
         dependencies = list(data.get("dependencies") or [])
         state = TaskState.BACKLOG if dependencies else TaskState.READY
         task = Task(
@@ -177,7 +183,7 @@ class Orchestrator:
             out_of_scope=str(data.get("out_of_scope") or ""),
             max_attempts=int(data.get("max_attempts", 3)),
         )
-        self.db.add_task(task)
+        insert_task_guarded(self.db, self.config, project, task)
 
     def _execute_task(self, task: Task) -> None:
         """Execute one attempt of a task, traced as forge.task -> forge.attempt -> forge.phase.

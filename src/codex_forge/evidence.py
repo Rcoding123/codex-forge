@@ -25,6 +25,7 @@ from .config import ForgeConfig
 from .control_plane import SUPPORTED_SCHEMA_VERSIONS, redact_secret_arguments
 from .db import ForgeDB
 from .models import Task
+from .utils import windows_alias_key, windows_safe_component
 
 
 EVIDENCE_LIST_COMMAND = "task.evidence.list"
@@ -44,7 +45,6 @@ _ARTIFACT_ID_HEX = 32
 _ARTIFACT_ID_PATTERN = re.compile(rf"^{_ARTIFACT_ID_PREFIX}[0-9a-f]{{{_ARTIFACT_ID_HEX}}}$")
 
 _FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-_UNSAFE_NAME_CHARACTERS = frozenset('\x00:/\\')
 
 # Evidence layout, as written by orchestrator.py, runner.py, and validation.py:
 #
@@ -130,6 +130,7 @@ class EvidenceArtifact:
     classification: ArtifactClass
     size_bytes: int
     modified_at: str | None
+    identity: tuple[int, int] | None = None
 
     @property
     def display_name(self) -> str:
@@ -313,10 +314,22 @@ def excluded_kind(group: str | None, name: str) -> str:
 
 
 def _safe_component(value: str) -> bool:
-    """Reject a path component that could traverse, escape, or name an alternate data stream."""
-    if not value or value in {".", ".."}:
-        return False
-    return not any(character in _UNSAFE_NAME_CHARACTERS for character in value)
+    """Reject a path component that could traverse, escape, alias, or name a device or stream.
+
+    Delegates to the one shared Windows-safe component validator used for project names and task
+    ids everywhere in Forge.
+    """
+    return windows_safe_component(value)
+
+
+def _alias_key(value: str) -> str:
+    """Delegates to the one shared Windows physical-name alias key."""
+    return windows_alias_key(value)
+
+
+def safe_path_component(value: str) -> bool:
+    """True when the value can be trusted as a single path component under a Forge root."""
+    return _safe_component(value)
 
 
 def _is_reparse_point(info: os.stat_result) -> bool:
@@ -509,6 +522,14 @@ def _build_artifact(
         relative = resolved.relative_to(resolved_root).as_posix()
     except ValueError:
         return None
+    try:
+        # A DirEntry stat carries no (device, inode) on Windows; capture identity explicitly so
+        # later reads can prove they open the discovered file.
+        identity_info = os.lstat(resolved)
+    except OSError:
+        return None
+    if not _is_plain_file(identity_info):
+        return None
     return EvidenceArtifact(
         artifact_id=compute_artifact_id(task_id, relative),
         relative_path=relative,
@@ -518,6 +539,7 @@ def _build_artifact(
         classification=classification,
         size_bytes=info.st_size,
         modified_at=_iso_mtime(info),
+        identity=_directory_identity(identity_info),
     )
 
 
@@ -540,14 +562,18 @@ class ArtifactBytes:
     The whole artifact is retained rather than only the returnable prefix, because redaction must
     see complete secrets. Truncating first would let a secret that straddles the return limit
     survive as an unmatched — and therefore unredacted — prefix.
+
+    `modified_at` is derived from the same descriptor the bytes and hash came from, so every
+    field here describes one coherent snapshot of the opened file.
     """
 
     data: bytes
     original_size_bytes: int
     sha256: str
+    modified_at: str | None
 
 
-def _read_bounded(path: Path) -> ArtifactBytes:
+def _read_bounded(path: Path, expected_identity: tuple[int, int] | None = None) -> ArtifactBytes:
     """Read an artifact with a hard bound, proving it did not change underneath us.
 
     The file is opened for shared reading only and is never locked, so the controller stays free to
@@ -573,6 +599,12 @@ def _read_bounded(path: Path) -> ArtifactBytes:
             "ARTIFACT_UNSAFE_TYPE",
             "The artifact is not a regular file.",
             {"scope": "artifact"},
+        )
+    if expected_identity is not None and _directory_identity(link_info) != expected_identity:
+        raise EvidenceError(
+            "ARTIFACT_CHANGED_DURING_READ",
+            "The artifact is not the file that was discovered. Retry the request.",
+            {"scope": "artifact", "retryable": True},
         )
 
     try:
@@ -645,7 +677,12 @@ def _read_bounded(path: Path) -> ArtifactBytes:
             "The artifact changed while it was being read. Retry the request.",
             {"scope": "artifact", "retryable": True},
         )
-    return ArtifactBytes(data=bytes(kept), original_size_bytes=total, sha256=digest.hexdigest())
+    return ArtifactBytes(
+        data=bytes(kept),
+        original_size_bytes=total,
+        sha256=digest.hexdigest(),
+        modified_at=_iso_mtime(after),
+    )
 
 
 def _identity(info: os.stat_result) -> tuple[int, int] | None:
@@ -881,7 +918,357 @@ def _require_schema(schema_version: str | None) -> None:
         )
 
 
-def _load_task(config: ForgeConfig, task_id: str) -> tuple[Task, str | None]:
+def _scan_race() -> EvidenceError:
+    return EvidenceError(
+        "FILESYSTEM_ERROR",
+        "The evidence tree could not be proven stable and canonically contained while it was "
+        "being scanned for retained evidence. Retry the request.",
+        {"scope": "directory", "retryable": True},
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _ScannedDirectory:
+    """A directory participating in a retained-evidence scan, pinned before it is enumerated.
+
+    A lexical path cannot be trusted across an enumeration — the directory can be swapped
+    underneath the scan — so the (device, inode) identity and canonical path are captured first
+    and re-proven after the children have been read.
+
+    Accepted limitation: this detects a swap that persists past the enumeration, not a full ABA
+    — rename the directory away, let the scan read a decoy, restore the original before the
+    re-check. Closing that window needs enumeration through a held directory handle, and
+    Windows offers no portable pinned-handle (dirfd) traversal. The retained-evidence scans are
+    therefore hardened against, not proof against, a local writer racing the scan; this is
+    recorded in the changelog as an accepted local-filesystem race limitation.
+    """
+
+    identity: tuple[int, int]
+    canonical: str
+
+
+def _captured_evidence_root(evidence_root: Path) -> _ScannedDirectory | None:
+    """Pin the evidence root before a retained-evidence scan; None when it does not exist.
+
+    The configured root may itself be a link, so it is followed — but the physical directory it
+    names is pinned, so a retarget or replacement during the scan is detected rather than
+    silently scanned across.
+    """
+    try:
+        info = os.stat(evidence_root)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _scan_race() from exc
+    identity = _identity(info)
+    if not stat.S_ISDIR(info.st_mode) or identity is None:
+        raise _scan_race()
+    try:
+        canonical = _canonical(evidence_root.resolve(strict=True))
+    except OSError as exc:
+        raise _scan_race() from exc
+    return _ScannedDirectory(identity=identity, canonical=canonical)
+
+
+def _captured_scan_directory(path: Path, root: _ScannedDirectory) -> _ScannedDirectory | None:
+    """Pin one project directory before its children are enumerated; None when it is missing.
+
+    The occupant must be a plain, identifiable directory that resolves strictly inside the
+    pinned evidence root. Anything else — a link or file holding the name, a missing identity,
+    or a resolution outside the root — fails the scan closed instead of shaping its answer.
+    """
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _scan_race() from exc
+    identity = _identity(info)
+    if not _is_plain_directory(info) or identity is None:
+        raise _scan_race()
+    try:
+        canonical = _canonical(path.resolve(strict=True))
+    except OSError as exc:
+        raise _scan_race() from exc
+    if canonical == root.canonical or not _canonically_within(canonical, root.canonical):
+        raise _scan_race()
+    return _ScannedDirectory(identity=identity, canonical=canonical)
+
+
+def _revalidate_scanned(path: Path, expected: _ScannedDirectory, *, follow: bool) -> None:
+    """Re-prove that a pinned scan directory is still the directory the enumeration walked."""
+    try:
+        info = os.stat(path) if follow else os.lstat(path)
+        canonical = _canonical(path.resolve(strict=True))
+    except OSError as exc:
+        raise _scan_race() from exc
+    plain = stat.S_ISDIR(info.st_mode) if follow else _is_plain_directory(info)
+    if not plain or _identity(info) != expected.identity or canonical != expected.canonical:
+        raise _scan_race()
+
+
+def _require_candidate_contained(candidate: Path, project_dir: _ScannedDirectory) -> None:
+    """Prove a matching task directory really lives strictly beneath its pinned project."""
+    try:
+        canonical = _canonical(candidate.resolve(strict=True))
+    except OSError as exc:
+        raise _scan_race() from exc
+    if canonical == project_dir.canonical or not _canonically_within(
+        canonical, project_dir.canonical
+    ):
+        raise _scan_race()
+
+
+def _retained_evidence_projects(config: ForgeConfig, task_id: str) -> tuple[list[str], list[str]]:
+    """Find retained evidence for a task id: exact directory matches, and physical aliases.
+
+    The scan looks exactly one level beneath the evidence root: each safe, plain project
+    directory is checked for a child directory naming the task id. Files, reparse points, and
+    unsafe project names are ignored, and the scan never recurses deeper. A directory that is
+    not an exact match but occupies the same Windows physical name (case variant, trailing dot
+    or space) is reported separately so callers fail closed instead of picking one alias.
+
+    Every enumerated directory is pinned by identity and canonical path before its children are
+    read and re-proven afterwards, and each candidate directory must resolve strictly inside
+    its pinned parent. A directory swapped and left swapped fails the scan closed; a full
+    rename-away/restore ABA inside one enumeration window is an accepted limitation (see
+    `_ScannedDirectory`).
+    """
+    if not _safe_component(task_id):
+        return [], []
+    root = _captured_evidence_root(config.evidence_root)
+    if root is None:
+        return [], []
+    key = _alias_key(task_id)
+    exact: list[str] = []
+    aliased: list[str] = []
+    for project_entry in _scandir(config.evidence_root):
+        if not _safe_component(project_entry.name):
+            continue
+        listed = _entry_stat(project_entry)
+        if listed is None or not _is_plain_directory(listed):
+            continue
+        project_path = Path(project_entry.path)
+        project_dir = _captured_scan_directory(project_path, root)
+        if project_dir is None:
+            continue
+        for task_entry in _scandir(project_path):
+            if _alias_key(task_entry.name) != key:
+                continue
+            task_info = _entry_stat(task_entry)
+            if task_info is None or not _is_plain_directory(task_info):
+                # The serving contract ignores files and links occupying an aliasing name;
+                # only plain directories are task evidence roots.
+                continue
+            _require_candidate_contained(Path(task_entry.path), project_dir)
+            if task_entry.name == task_id:
+                exact.append(project_entry.name)
+            else:
+                aliased.append(project_entry.name)
+        _revalidate_scanned(project_path, project_dir, follow=False)
+    _revalidate_scanned(config.evidence_root, root, follow=True)
+    return exact, aliased
+
+
+def _resolve_retained_project(config: ForgeConfig, task_id: str) -> str:
+    """Resolve the unique retained evidence project for a task id with no registry row.
+
+    The registry row always wins while it exists, so this fallback runs only for a deleted task.
+    Zero matches is TASK_NOT_FOUND; more than one match fails closed rather than guessing which
+    project's retained evidence the caller meant.
+    """
+    exact, aliased = _retained_evidence_projects(config, task_id)
+    if aliased:
+        raise EvidenceError(
+            "EVIDENCE_AMBIGUOUS",
+            "Retained evidence aliasing this task id's physical directory name exists; reads "
+            "fail closed rather than selecting one alias.",
+            {"task_id": task_id, "candidate_projects": sorted(set(exact + aliased))},
+        )
+    if not exact:
+        raise EvidenceError(
+            "TASK_NOT_FOUND",
+            "Task was not found.",
+            {"task_id": task_id},
+        )
+    if len(exact) > 1:
+        raise EvidenceError(
+            "EVIDENCE_AMBIGUOUS",
+            "Retained evidence for this task id exists under more than one project.",
+            {"task_id": task_id, "candidate_projects": sorted(exact)},
+        )
+    return exact[0]
+
+
+def retained_evidence_claim(config: ForgeConfig, project_name: str, task_id: str) -> str | None:
+    """Return the directory name that already claims this task id's evidence root, if any.
+
+    Evidence roots are single-generation: a new task must not adopt a deleted task's retained
+    artifacts, and on a case-insensitive filesystem a case-variant id names the same directory.
+
+    The project directory is pinned by identity and canonical containment before it is
+    enumerated and re-proven afterwards, so a directory swapped and left swapped can never hide
+    a claim and clear the way for an insertion over retained evidence; a full
+    rename-away/restore ABA inside one enumeration window is an accepted limitation (see
+    `_ScannedDirectory`). An occupant of an alias-matching name that cannot be proven a plain,
+    contained directory fails closed for the same reason.
+    """
+    if not _safe_component(project_name) or not _safe_component(task_id):
+        return None
+    root = _captured_evidence_root(config.evidence_root)
+    if root is None:
+        return None
+    project_path = config.evidence_root / project_name
+    project_dir = _captured_scan_directory(project_path, root)
+    if project_dir is None:
+        return None
+    key = _alias_key(task_id)
+    claim: str | None = None
+    for entry in _scandir(project_path):
+        if _alias_key(entry.name) != key:
+            continue
+        info = _entry_stat(entry)
+        if info is None or not _is_plain_directory(info):
+            raise _scan_race()
+        _require_candidate_contained(Path(entry.path), project_dir)
+        if claim is None:
+            claim = entry.name
+    _revalidate_scanned(project_path, project_dir, follow=False)
+    _revalidate_scanned(config.evidence_root, root, follow=True)
+    return claim
+
+
+def _canonical(path: Path) -> str:
+    """Windows-normalized canonical form for containment comparison."""
+    return os.path.normcase(str(path))
+
+
+def _canonically_within(candidate: str, root: str) -> bool:
+    return candidate == root or candidate.startswith(root + os.sep)
+
+
+def _directory_identity(info: os.stat_result) -> tuple[int, int]:
+    return (info.st_dev, info.st_ino)
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedRoot:
+    """A task evidence root whose directory-chain identity was captured at verification.
+
+    A bare lexical path cannot be trusted across time — a directory can be swapped for a link
+    after verification — so reads carry this object and re-validate against the captured
+    (device, inode) identities and canonical roots before every enumeration, open, and return.
+    """
+
+    root: Path
+    canonical_root: str
+    canonical_evidence: str
+    project_identity: tuple[int, int]
+    root_identity: tuple[int, int]
+
+
+def _revalidate_root(verified: _VerifiedRoot) -> None:
+    """Re-prove the verified chain still names the same physical plain directories."""
+    for candidate, expected in (
+        (verified.root.parent, verified.project_identity),
+        (verified.root, verified.root_identity),
+    ):
+        try:
+            info = os.lstat(candidate)
+        except OSError as exc:
+            raise EvidenceError(
+                "ARTIFACT_OUTSIDE_EVIDENCE_ROOT",
+                "The task evidence root changed while it was being served and was refused.",
+                {"scope": "directory"},
+            ) from exc
+        if not _is_plain_directory(info) or _directory_identity(info) != expected:
+            raise EvidenceError(
+                "ARTIFACT_OUTSIDE_EVIDENCE_ROOT",
+                "The task evidence root changed while it was being served and was refused.",
+                {"scope": "directory"},
+            )
+
+
+def _verified_task_root(config: ForgeConfig, project_name: str, task_id: str) -> _VerifiedRoot | None:
+    """Verify the task evidence root and capture the identities later reads re-check.
+
+    The project and task directories must be plain directories (never links or reparse points),
+    and the root must resolve strictly inside the configured evidence root under
+    Windows-normalized canonical comparison. Returns None when no evidence directory exists.
+    """
+    root = task_evidence_root(config, project_name, task_id)
+    identities: list[tuple[int, int]] = []
+    for candidate in (root.parent, root):
+        try:
+            info = os.lstat(candidate)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise EvidenceError(
+                "FILESYSTEM_ERROR",
+                "The evidence directory could not be read.",
+                {"scope": "directory"},
+            ) from exc
+        if not _is_plain_directory(info):
+            raise EvidenceError(
+                "ARTIFACT_OUTSIDE_EVIDENCE_ROOT",
+                "The task evidence root is not a plain directory chain and was refused.",
+                {"task_id": task_id},
+            )
+        identities.append(_directory_identity(info))
+    try:
+        canonical_root = _canonical(root.resolve(strict=True))
+        canonical_evidence = _canonical(config.evidence_root.resolve(strict=True))
+    except OSError as exc:
+        raise EvidenceError(
+            "FILESYSTEM_ERROR",
+            "The evidence path could not be resolved.",
+            {"scope": "directory"},
+        ) from exc
+    if canonical_root == canonical_evidence or not _canonically_within(
+        canonical_root, canonical_evidence
+    ):
+        raise EvidenceError(
+            "ARTIFACT_OUTSIDE_EVIDENCE_ROOT",
+            "The task evidence root resolved outside the configured evidence root and was refused.",
+            {"task_id": task_id},
+        )
+    return _VerifiedRoot(
+        root=root,
+        canonical_root=canonical_root,
+        canonical_evidence=canonical_evidence,
+        project_identity=identities[0],
+        root_identity=identities[1],
+    )
+
+
+def _resolve_served(artifact: EvidenceArtifact, verified: _VerifiedRoot) -> Path:
+    """Resolve an artifact for serving, proven against the captured canonical roots.
+
+    The artifact is never resolved against a freshly resolved task root — that root could have
+    been swapped — only against the canonical identities captured at verification.
+    """
+    try:
+        resolved = artifact.absolute_path.resolve(strict=True)
+    except OSError as exc:
+        raise EvidenceError(
+            "FILESYSTEM_ERROR",
+            "The evidence path could not be resolved.",
+            {"scope": "artifact"},
+        ) from exc
+    canonical = _canonical(resolved)
+    if not _canonically_within(canonical, verified.canonical_evidence) or not _canonically_within(
+        canonical, verified.canonical_root
+    ):
+        raise EvidenceError(
+            "ARTIFACT_OUTSIDE_EVIDENCE_ROOT",
+            "The artifact resolved outside the evidence root and was refused.",
+            {"scope": "artifact"},
+        )
+    return resolved
+
+
+def _load_task(config: ForgeConfig, task_id: str) -> tuple[Task | None, str | None]:
     if not config.database_path.exists():
         raise EvidenceError(
             "CONFIGURATION_ERROR",
@@ -893,9 +1280,19 @@ def _load_task(config: ForgeConfig, task_id: str) -> tuple[Task, str | None]:
         db = ForgeDB(config.database_path)
         task = db.get_task(task_id)
         project_name = None
+        aliased_with = None
         if task is not None:
             project = db.get_project(task.project_id)
             project_name = project.name if project else None
+            key = _alias_key(task_id)
+            for sibling in db.list_tasks():
+                if (
+                    sibling.project_id == task.project_id
+                    and sibling.id != task_id
+                    and _alias_key(sibling.id) == key
+                ):
+                    aliased_with = sibling.id
+                    break
     except OSError as exc:
         raise EvidenceError(
             "FILESYSTEM_ERROR",
@@ -911,10 +1308,15 @@ def _load_task(config: ForgeConfig, task_id: str) -> tuple[Task, str | None]:
             {"task_id": task_id},
         ) from exc
     if task is None:
+        # No registry row: retained evidence on disk becomes the read authority.
+        return None, _resolve_retained_project(config, task_id)
+    if aliased_with is not None:
+        # Two live ids in one project occupy the same physical evidence directory on Windows;
+        # serving either would mix generations, so reads fail closed.
         raise EvidenceError(
-            "TASK_NOT_FOUND",
-            "Task was not found.",
-            {"task_id": task_id},
+            "EVIDENCE_AMBIGUOUS",
+            "The task id aliases another live task's physical directory name in this project.",
+            {"task_id": task_id, "aliased_with": aliased_with},
         )
     return task, project_name
 
@@ -928,10 +1330,16 @@ def _limits() -> dict[str, int]:
 
 @dataclass(frozen=True, slots=True)
 class _Probe:
-    """The result of one bounded, non-blocking metadata pass over an artifact."""
+    """The result of one bounded, non-blocking metadata pass over an artifact.
+
+    When a hash is reported, `size_bytes` and `modified_at` describe the same verified snapshot
+    the hash was computed from, never discovery-time metadata.
+    """
 
     sha256: str | None
     readable: bool
+    size_bytes: int | None = None
+    modified_at: str | None = None
 
 
 def _probe(artifact: EvidenceArtifact) -> _Probe:
@@ -954,6 +1362,10 @@ def _probe(artifact: EvidenceArtifact) -> _Probe:
         link_info = artifact.absolute_path.lstat()
         if not _is_plain_file(link_info):
             return _Probe(None, False)
+        if artifact.identity is not None and _directory_identity(link_info) != artifact.identity:
+            # Not the file discovery saw: it was replaced. Report no hash rather than one that
+            # describes a different file.
+            return _Probe(None, False)
         with artifact.absolute_path.open("rb") as handle:
             before = os.fstat(handle.fileno())
             if not _is_plain_file(before) or not _same_file(link_info, before):
@@ -975,11 +1387,21 @@ def _probe(artifact: EvidenceArtifact) -> _Probe:
         return _Probe(None, False)
     if _changed(before, after) or total != before.st_size:
         return _Probe(None, text)
-    return _Probe(digest.hexdigest(), text)
+    # One coherent snapshot: the size and mtime reported alongside the hash come from the same
+    # descriptor that produced it.
+    return _Probe(
+        digest.hexdigest(), text, size_bytes=before.st_size, modified_at=_iso_mtime(before)
+    )
 
 
 def _artifact_to_public(artifact: EvidenceArtifact, probe: _Probe | None = None) -> dict[str, Any]:
-    readable = artifact.size_bytes <= MAX_READABLE_BYTES
+    size = artifact.size_bytes
+    modified = artifact.modified_at
+    if probe is not None and probe.sha256 is not None and probe.size_bytes is not None:
+        # The hash, size, and mtime all describe the probe's single verified snapshot.
+        size = probe.size_bytes
+        modified = probe.modified_at
+    readable = size <= MAX_READABLE_BYTES
     return {
         "artifact_id": artifact.artifact_id,
         "artifact_kind": artifact.classification.kind,
@@ -987,14 +1409,37 @@ def _artifact_to_public(artifact: EvidenceArtifact, probe: _Probe | None = None)
         "media_type": artifact.classification.media_type,
         "attempt": artifact.attempt,
         "phase": artifact.phase,
-        "original_size_bytes": artifact.size_bytes,
+        "original_size_bytes": size,
         "sha256": probe.sha256 if probe else None,
-        "modified_at": artifact.modified_at,
+        "modified_at": modified,
         "content_available": (probe.readable if probe else readable),
-        "truncated_when_read": readable and artifact.size_bytes > MAX_ARTIFACT_BYTES,
+        "truncated_when_read": readable and size > MAX_ARTIFACT_BYTES,
         "redaction_required": True,
         "structured": artifact.classification.structured,
     }
+
+
+def _served_probe(artifact: EvidenceArtifact, verified: _VerifiedRoot) -> _Probe:
+    """Prove an artifact still lives inside the verified root before probing it.
+
+    The chain identity is re-checked and the artifact re-resolved against the canonical roots
+    captured at verification — never against a freshly resolved, possibly swapped task root. A
+    vanished artifact stays unprobeable; an escaped one is refused loudly.
+    """
+    _revalidate_root(verified)
+    try:
+        canonical = _canonical(artifact.absolute_path.resolve(strict=True))
+    except OSError:
+        return _Probe(None, False)
+    if not _canonically_within(canonical, verified.canonical_evidence) or not _canonically_within(
+        canonical, verified.canonical_root
+    ):
+        raise EvidenceError(
+            "ARTIFACT_OUTSIDE_EVIDENCE_ROOT",
+            "The artifact resolved outside the evidence root and was refused.",
+            {"scope": "artifact"},
+        )
+    return _probe(artifact)
 
 
 def evidence_list(
@@ -1009,21 +1454,32 @@ def evidence_list(
 
     artifacts: list[EvidenceArtifact] = []
     evidence_available = False
+    verified: _VerifiedRoot | None = None
     if project_name is not None:
-        root = task_evidence_root(config, project_name, task_id)
-        if root.is_dir():
-            artifacts = discover_artifacts(root, task_id)
+        verified = _verified_task_root(config, project_name, task_id)
+        if verified is not None:
+            artifacts = discover_artifacts(verified.root, task_id)
+            # Identities unchanged after enumeration proves discovery walked the verified
+            # directories, not a swapped-in link.
+            _revalidate_root(verified)
             evidence_available = True
 
-    public = [_artifact_to_public(artifact, _probe(artifact)) for artifact in artifacts]
+    public = [
+        _artifact_to_public(artifact, _served_probe(artifact, verified))
+        for artifact in artifacts
+    ]
     kinds = {artifact.classification.kind for artifact in artifacts}
     attempts = sorted({artifact.attempt for artifact in artifacts})
+    if verified is not None:
+        # The chain is proven one final time before the manifest leaves the process.
+        _revalidate_root(verified)
     return {
-        "task_id": task.id,
+        "task_id": task.id if task is not None else task_id,
         "project": project_name,
-        "task_state": task.state.value,
+        "task_registered": task is not None,
+        "task_state": task.state.value if task is not None else None,
         "evidence_available": evidence_available,
-        "attempt_count": task.attempts,
+        "attempt_count": task.attempts if task is not None else None,
         "attempts_with_evidence": attempts,
         "artifact_count": len(public),
         "availability": {
@@ -1064,15 +1520,15 @@ def evidence_show(
             {"task_id": task_id},
         )
 
-    root = task_evidence_root(config, project_name, task_id)
-    if not root.is_dir():
+    verified = _verified_task_root(config, project_name, task_id)
+    if verified is None:
         raise EvidenceError(
             "EVIDENCE_NOT_FOUND",
             "No evidence has been recorded for this task.",
             {"task_id": task_id},
         )
 
-    artifacts = discover_artifacts(root, task_id)
+    artifacts = discover_artifacts(verified.root, task_id)
     selected = next((item for item in artifacts if item.artifact_id == artifact_id), None)
     if selected is None:
         # An excluded artifact is indistinguishable from a missing one by identifier alone, so the
@@ -1083,10 +1539,14 @@ def evidence_show(
             {"task_id": task_id, "artifact_id": artifact_id},
         )
 
-    # Re-prove containment immediately before reading, not only at discovery time.
-    resolved = _resolve_within(selected.absolute_path, root)
+    # Re-prove the chain and the artifact immediately before reading, not only at discovery
+    # time: identities pin the physical directories, and the artifact resolves against the
+    # canonical roots captured at verification — never against a freshly resolved, possibly
+    # swapped task root.
+    _revalidate_root(verified)
+    resolved = _resolve_served(selected, verified)
 
-    raw = _read_bounded(resolved)
+    raw = _read_bounded(resolved, expected_identity=selected.identity)
     _reject_binary(raw.data)
     # Decode, scrub, and redact the COMPLETE artifact before any bound is applied. Truncating first
     # would leave a secret that spans the return limit as an unmatched, unredacted prefix.
@@ -1149,15 +1609,21 @@ def evidence_show(
     if formatted_text is not None:
         formatted_text, _ = _truncate_utf8(formatted_text, MAX_ARTIFACT_BYTES)
 
+    # Every snapshot-dependent field is overwritten from the read itself, so the returned
+    # metadata describes the file that was actually opened — never discovery-time state.
     manifest_entry = _artifact_to_public(selected)
     manifest_entry["sha256"] = raw.sha256
     manifest_entry["original_size_bytes"] = raw.original_size_bytes
+    manifest_entry["modified_at"] = raw.modified_at
+    manifest_entry["content_available"] = True
     manifest_entry["truncated_when_read"] = truncated
 
+    # The chain is proven one final time before any content leaves the process.
+    _revalidate_root(verified)
     return {
-        "task_id": task.id,
+        "task_id": task.id if task is not None else task_id,
         "project": project_name,
-        "task_state": task.state.value,
+        "task_state": task.state.value if task is not None else None,
         "artifact": manifest_entry,
         "content": {
             "encoding": "utf-8",

@@ -6,6 +6,145 @@ All notable changes to Codex Forge are documented here. This project follows sem
 
 ### Added
 
+- Forge-owned deletion primitives. `forge task delete <task-id>` removes one non-running task and
+  its owned `runs`/`decisions` rows in a single immediate transaction, refuses active execution
+  states with `TASK_ACTIVE` (deletion is not cancellation), retains evidence and the task branch,
+  and removes only the disposable worktree checkout. `forge project delete <project>` removes a
+  project only when it has no tasks and refuses with `PROJECT_NOT_EMPTY` otherwise, retaining
+  evidence and the repository. Both support `--json` (`task.delete`, `project.delete`); a cleanup
+  failure after the durable deletion commits is reported as `WORKTREE_CLEANUP_FAILED` or
+  `PROJECT_CLEANUP_FAILED` with `details.deleted: true`.
+
+- Retained evidence stays readable after deletion. `task evidence list` and `task evidence show`
+  resolve a task through its registry row while one exists; once the row is deleted, the retained
+  evidence tree becomes the read authority, scanned exactly one level beneath the evidence root
+  under the same path-safety rules as every other evidence access. A deleted task's responses
+  report `task_registered: false` with `task_state` and `attempt_count` `null`; a live manifest now
+  carries `task_registered: true`. When retained evidence for a deleted task id exists under more
+  than one project, both commands fail closed with the new `EVIDENCE_AMBIGUOUS` error (exit
+  code 2), whose details name only the task id and the candidate project names.
+
+- Deletion cleanup is ownership-proven, claimed, and fail-closed. Worktree and workspace removal
+  now delete only a proven disposable directory — a plain directory (never a link or reparse
+  point) resolving strictly inside the workspace root and disjoint from the repository — so a Git
+  discovery or removal failure can never fall through to deleting a repository or any other
+  non-disposable path, and success is a verified postcondition. Cleanup runs under a registry
+  write claim: a task id, checkout path, or project name (exact or case variant) that is live
+  again by the time the post-commit cleanup runs keeps its directory. Git subprocess timeouts
+  surface as structured cleanup failures. `project add` refuses names that are not a single safe
+  path component and names differing only by case from an existing project; `project delete`
+  refuses an identifier matching one project's id and another's name with the new
+  `PROJECT_AMBIGUOUS` error, and id matches deterministically win over name matches everywhere
+  else. Task submission refuses ids that would alias an on-disk generation — retained evidence of
+  a deleted task or a case-variant live task in the same project — with the new
+  `TASK_ID_COLLISION` error. Evidence reads re-verify the task root immediately before use (plain
+  directory chain, strict resolution inside the evidence root), closing the scan-to-use window on
+  swapped directories. Structured error details identify a project by id whenever its stored name
+  is not a safe path component.
+
+- Deletion hardening, second pass. Task worktree cleanup is owner-scoped: a checkout must resolve
+  strictly inside the deleted task's own project workspace and stay disjoint from every
+  registered repository, so task deletion can never remove another project's workspace, and
+  project deletion refuses a workspace holding a live foreign checkout or a registered
+  repository. Git worktree registration is read strictly and re-verified after removal — a locked
+  or unprunable registration is a reported cleanup failure, never a claimed success. Task-id and
+  project-name alias checks are atomic with their inserts under one immediate transaction; task
+  ids additionally refuse Windows aliases (trailing dots, reserved device names) on every
+  submission path including plain `task add`. Evidence serving re-proves each artifact's
+  containment against the configured evidence root immediately before hashing or reading,
+  refusing a task directory swapped for a link after verification. SQLite failures during
+  post-commit cleanup stay inside the deletion failure envelope with `details.deleted: true`.
+
+- Deletion hardening, third pass. Cleanup ownership is global: under the cleanup claim the
+  candidate must overlap — by equality, ancestry, descent, or resolved alias under
+  Windows-normalized canonical comparison — none of the protected set: every registered
+  repository, every other project's workspace, and every live task's effective checkout
+  (persisted, or the exact path `prepare_worktree` would derive). One shared derivation helper
+  now names checkout directories with a hash of the exact task id folded into the slug, so
+  slug-colliding ids can never share a directory, and `prepare_worktree`'s stale-directory
+  removal runs the same disposability proof. Git worktree removal and pruning are checked
+  operations with no raw-deletion fall-through — a locked worktree keeps both its directory and
+  registration — and completion is re-verified against the filesystem and a fresh registration
+  listing. One shared Windows-safe component validator now governs task ids and project names.
+  Evidence reads carry a verified-root object: directory (device, inode) identities and canonical
+  roots are captured at verification, re-checked before every enumeration, open, and response,
+  artifacts resolve only against the captured canonical roots, and opened files must match the
+  discovered file's identity — a directory-to-symlink swap in any window is refused. Aliased
+  state fails closed everywhere: a live case-variant sibling, a retained alias directory, and
+  Windows physical-name variants all refuse with `EVIDENCE_AMBIGUOUS` rather than selecting one
+  physical directory. Cleanup failure envelopes additionally absorb `RuntimeError`/`ValueError`
+  from path resolution.
+
+- Deletion hardening, fourth pass. The ownership sweep fails closed instead of skipping a legacy
+  project whose name is not a safe path component, and the protected set now includes the Forge
+  configuration roots — evidence, database, repositories, inbox, knowledge, and the configuration
+  file — so overlapping configured roots refuse cleanup rather than losing retained evidence or
+  controller state. Git worktree registrations are matched by resolved canonical path, clearing
+  the real registration even when the checkout is addressed through a directory symlink. All
+  insertion and reclamation guards use the shared Windows physical alias key, so legacy trailing-
+  dot aliases (`demo.`, `TASK-X.`) collide with their stripped names. `evidence list` re-proves
+  the verified root one final time before returning, and a reported hash now carries the size and
+  mtime of the same verified snapshot it was computed from. Every operation after a task's
+  registry deletion commits — including the project lookup — runs inside the deletion failure
+  boundary, so a database failure there still reports `deleted: true`. Error envelopes preserve a
+  supported requested schema version in parse, configuration, evidence, and generic failure
+  paths; unsupported versions keep the pinned `UNSUPPORTED_SCHEMA` contract.
+
+- Deletion hardening, fifth pass. Inbox submission flows through the same authority as both CLI
+  submission paths: `Orchestrator._task_from_yaml` normalizes an explicit id with the shared
+  task-id validator and inserts through the guarded atomic insert, so unsafe ids, Windows
+  case/trailing-dot aliases of live tasks, and ids reusing retained evidence are refused instead
+  of inserted raw. The retained-evidence scans pin every directory they enumerate — (device,
+  inode) identity and canonical path captured before enumeration and re-proven after it, with
+  each candidate proven to resolve strictly inside its pinned parent — so a directory swapped
+  and left swapped fails the scan closed instead of creating a false match, hiding ambiguity,
+  or clearing the way for an insertion over retained evidence; in the submission claim scan an
+  alias-named occupant that is not a plain contained directory fails closed too. (See the sixth
+  pass for the explicitly accepted ABA limitation of this pinning.) Project
+  workspace removal first inventories the repository's worktree registrations canonically and
+  clears each registered checkout inside the workspace only through checked Git operations — a
+  locked leftover checkout fails the cleanup closed with its directory and registration intact,
+  stale registrations are pruned, and the inventory is re-read — so project deletion never
+  deletes a registered checkout raw and never leaves stale Git registration metadata.
+  `remove_worktree` no longer reads a missing repository as "unregistered": an on-disk checkout
+  whose registration state cannot be verified is left untouched and reported as a cleanup
+  failure. `task evidence show` returns one coherent snapshot: the bounded read derives
+  `modified_at` from the same descriptor as the content, size, and hash, and the response
+  overwrites every snapshot-dependent artifact field so the metadata describes exactly the
+  opened file. Task-deletion error details carry `task_id` only when it passes the shared
+  safe-component validator; a path-shaped legacy or requested id is omitted from structured
+  details and reported on stderr only.
+
+- Deletion hardening, sixth pass. The project workspace is validated before any mutation:
+  workspace cleanup proves the workspace is a plain, non-reparse directory strictly inside the
+  workspace root and disjoint from every protected path before any Git inventory or removal
+  reads through it, then pins its physical identity and re-proves the pin before every Git
+  removal and before the final directory deletion — a symlinked or junction workspace fails
+  closed without touching its target. Cleanup ownership checks span every registered
+  repository: deleting an on-disk checkout (task delete) or a workspace (project delete)
+  requires every other registered repository to testify about ownership — a checkout registered
+  to another repository, or to more than one, is never touched; a repository that cannot
+  testify fails the cleanup closed; a directory that is verifiably not a Git repository holds
+  no registrations and vouches for nothing. A missing project workspace is reconciled rather
+  than skipped: stale registrations under the missing path are pruned and verified gone — a
+  locked stale registration fails closed — foreign registrations under it fail closed, and a
+  repository directory that no longer exists holds no registration metadata and needs no
+  check. Task submission refuses a poisoned project registration inside the same immediate
+  transaction as the insert with the new `PROJECT_UNSAFE` error (exit code 2): a stored project
+  name that is not a safe path component, or another registered project aliasing the same
+  Windows physical name, makes the workspace and evidence namespaces unprovable — and the same
+  guard runs on the inbox, plain `task add`, and JSON submission paths, including dry-run
+  previews.
+
+  Accepted limitation, stated explicitly: the retained-evidence scan's identity pinning detects
+  a directory swap that persists past the enumeration; it does not detect a full ABA — rename
+  the directory away, let one enumeration read a decoy, restore the original before the
+  re-check — because closing that window requires enumeration through a held directory handle,
+  and Windows offers no portable pinned-handle (dirfd) traversal. The retained-evidence scans
+  are therefore hardened against, not proof against, a local writer with evidence-root access
+  racing the scan. What the serving path ultimately returns is unaffected: an opened artifact
+  is verified against the discovered file's identity on the open descriptor itself.
+
 - The task-add contract carries the full implementation-binding specification: `--decision`
   (repeatable), `--constraint` (repeatable), `--scope`, and `--out-of-scope` flow through request
   validation, the idempotency fingerprint, persistence (additive `architecture_decisions_json`,

@@ -53,6 +53,8 @@ ERROR_EXIT_CODES: dict[str, int] = {
     "DATABASE_ERROR": 1,
     "EVIDENCE_NOT_FOUND": 2,
     "EVIDENCE_UNAVAILABLE": 2,
+    # Retained evidence for an unregistered task id exists under more than one project.
+    "EVIDENCE_AMBIGUOUS": 2,
     "ARTIFACT_NOT_FOUND": 2,
     "ARTIFACT_NOT_PUBLIC": 2,
     "ARTIFACT_OUTSIDE_EVIDENCE_ROOT": 2,
@@ -63,6 +65,21 @@ ERROR_EXIT_CODES: dict[str, int] = {
     # Retryable: the artifact was being written while it was read. The caller may repeat the call.
     "ARTIFACT_CHANGED_DURING_READ": 1,
     "FILESYSTEM_ERROR": 1,
+    "TASK_ACTIVE": 2,
+    "PROJECT_NOT_EMPTY": 2,
+    # The submitted task id names retained evidence of a deleted task, or differs only by case
+    # from a live task in the same project; either would alias one on-disk generation.
+    "TASK_ID_COLLISION": 2,
+    # The target project's registration cannot accept submissions: its stored name is not a safe
+    # path component, or another registered project aliases its Windows physical name, so its
+    # workspace and evidence namespaces cannot be proven single-generation.
+    "PROJECT_UNSAFE": 2,
+    # The identifier names one project's id and a different project's name.
+    "PROJECT_AMBIGUOUS": 2,
+    # The durable deletion committed but a disposable filesystem cleanup did not complete.
+    # `error.details.deleted` stays true; `data` is null on failure as everywhere else.
+    "WORKTREE_CLEANUP_FAILED": 1,
+    "PROJECT_CLEANUP_FAILED": 1,
 }
 
 

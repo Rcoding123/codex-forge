@@ -31,6 +31,52 @@ def stable_id(prefix: str, value: str, length: int = 10) -> str:
     return f"{prefix}-{digest}"
 
 
+WINDOWS_RESERVED_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{digit}" for digit in "123456789"}
+    | {f"LPT{digit}" for digit in "123456789"}
+)
+
+_UNSAFE_COMPONENT_CHARACTERS = frozenset('\x00:/\\<>"|?*')
+
+
+def windows_safe_component(value: str) -> bool:
+    r"""The one shared Windows-safe path-component validator for project names and task ids.
+
+    Rejects: empty, `.` and `..`; control characters; `/ \ : < > " | ? *`; leading or trailing
+    whitespace and trailing dots (Windows strips them, so `NAME.` and `NAME ` alias `NAME`); and
+    DOS device names with or without an extension (`CON.txt` still opens the console device).
+    """
+    if not value or value in {".", ".."}:
+        return False
+    if value != value.strip() or value.endswith("."):
+        return False
+    if any(ch in _UNSAFE_COMPONENT_CHARACTERS or ord(ch) < 32 for ch in value):
+        return False
+    return value.split(".", 1)[0].upper() not in WINDOWS_RESERVED_DEVICE_NAMES
+
+
+def windows_alias_key(value: str) -> str:
+    """The Windows physical-name equivalence class: case folded, trailing dots and spaces
+    stripped — two names with one key occupy the same directory on Windows."""
+    return value.rstrip(". ").casefold()
+
+
+def worktree_directory_name(task_id: str) -> str:
+    """Collision-resistant checkout directory name: lossy slug plus a hash of the exact id.
+
+    Slugify alone is lossy — `TASK-A@B` and `TASK-A-B` collapse to one slug — so a hash of the
+    exact id is folded into the name to keep every task's checkout distinct.
+    """
+    digest = hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:10]
+    return f"{slugify(task_id, 48)}-{digest}"
+
+
+def derived_worktree_path(workspace_root: Path, project_name: str, task_id: str) -> Path:
+    """The one shared derivation of a task's checkout path when none is persisted."""
+    return workspace_root / project_name / worktree_directory_name(task_id)
+
+
 def json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
