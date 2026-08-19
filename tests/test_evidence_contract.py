@@ -254,6 +254,7 @@ def test_task_without_evidence_returns_empty_manifest(tmp_path: Path, capsys):
     assert data["artifact_count"] == 0
     assert data["task_id"] == TASK_ID
     assert data["project"] == PROJECT_NAME
+    assert data["task_registered"] is True
     assert data["task_state"] == "COMPLETED"
     assert data["availability"] == {
         "final_result": False,

@@ -18,9 +18,18 @@ from typing import Any, Iterable, Iterator, Mapping
 from .config import ForgeConfig
 from .control_plane import DEFAULT_SCHEMA_VERSION, redact_command, task_to_public
 from .db import ForgeDB
+from .evidence import EvidenceError, retained_evidence_claim
 from .models import Project, Task, TaskState
 from .usage import empty_token_usage
-from .utils import flatten_unique, json_dumps, slugify, stable_id
+from .utils import (
+    derived_worktree_path,
+    flatten_unique,
+    json_dumps,
+    slugify,
+    stable_id,
+    windows_alias_key,
+    windows_safe_component,
+)
 
 
 SUBMISSION_COMMAND = "task.add"
@@ -283,6 +292,15 @@ def _normalize_task_id(value: Any, *, field_name: str = "task_id") -> str | None
         raise TaskSubmissionError(
             "INVALID_TASK_REQUEST",
             "task_id must contain at least one letter or digit.",
+            {"field": field_name},
+        )
+    if not windows_safe_component(task_id):
+        # The shared Windows-safe component validator is the single authority: trailing dots or
+        # spaces alias their stripped names, and DOS device names alias devices with any
+        # extension.
+        raise TaskSubmissionError(
+            "INVALID_TASK_REQUEST",
+            "task_id must be a Windows-safe path component.",
             {"field": field_name},
         )
     return task_id
@@ -554,7 +572,7 @@ def planned_branch(task_id: str, title: str) -> str:
 
 
 def planned_worktree(config: ForgeConfig, project: Project, task_id: str) -> str:
-    return str(config.workspace_root / project.name / slugify(task_id))
+    return str(derived_worktree_path(config.workspace_root, project.name, task_id))
 
 
 def resolve_state(dependencies: Iterable[str]) -> TaskState:
@@ -708,6 +726,114 @@ def _conflict_error(request: TaskRequest, task_id: str) -> TaskSubmissionError:
     )
 
 
+def _locked_project_guard(connection, project: Project) -> None:
+    """Refuse submission into a project whose evidence namespace cannot be proven safe.
+
+    Runs on the caller's connection — under the insert's own immediate transaction on the
+    insertion path — so the registration state it approves is the state the insert commits
+    against. A legacy stored name that is not a safe path component cannot address a workspace
+    or evidence directory at all, and a name aliasing another registered project's Windows
+    physical name shares one on-disk namespace with it; either makes single-generation evidence
+    unprovable, so submission is refused before any task is inserted. Details carry only the
+    backend-minted ids, never a possibly path-shaped stored name.
+    """
+    row = connection.execute("SELECT name FROM projects WHERE id=?", (project.id,)).fetchone()
+    if row is None:
+        raise TaskSubmissionError(
+            "PROJECT_NOT_FOUND",
+            "The project is no longer registered.",
+            {"project_id": project.id},
+        )
+    name = row["name"]
+    if not windows_safe_component(name):
+        raise TaskSubmissionError(
+            "PROJECT_UNSAFE",
+            "The project's stored name is not a safe path component, so its workspace and "
+            "evidence namespaces cannot be proven safe. Re-register the project under a safe "
+            "name before submitting tasks.",
+            {"project_id": project.id},
+        )
+    key = windows_alias_key(name)
+    for other in connection.execute(
+        "SELECT id, name FROM projects WHERE id != ?", (project.id,)
+    ):
+        if windows_alias_key(other["name"]) == key:
+            raise TaskSubmissionError(
+                "PROJECT_UNSAFE",
+                "Another registered project aliases this project's Windows physical name, so "
+                "their workspace and evidence namespaces collide. Resolve the aliased "
+                "registration before submitting tasks.",
+                {"project_id": project.id, "collides_with_project_id": other["id"]},
+            )
+
+
+def _locked_task_collision(connection, config: ForgeConfig, project: Project, task_id: str) -> str | None:
+    """Find a generation or case alias for the task id, using the caller's connection.
+
+    The project registration is guarded first: an unsafe or aliased project makes every
+    task-level namespace answer meaningless, so it refuses before any task check runs.
+    """
+    _locked_project_guard(connection, project)
+    key = windows_alias_key(task_id)
+    for row in connection.execute("SELECT id FROM tasks WHERE project_id=?", (project.id,)):
+        if row["id"] != task_id and windows_alias_key(row["id"]) == key:
+            return row["id"]
+    return retained_evidence_claim(config, project.name, task_id)
+
+
+def task_id_collision(
+    db: ForgeDB, config: ForgeConfig, project: Project, task_id: str
+) -> str | None:
+    """Find the generation or case alias that makes a new task id unavailable.
+
+    A live task in the same project whose id differs only by case would share the new task's
+    worktree slug and evidence directory on a case-insensitive filesystem. Retained evidence of a
+    deleted task — exact or case variant — must never be adopted by a new generation.
+    """
+    try:
+        with _database_scope():
+            with db.connect() as connection:
+                return _locked_task_collision(connection, config, project, task_id)
+    except EvidenceError as exc:
+        raise TaskSubmissionError(
+            "FILESYSTEM_ERROR",
+            "The evidence tree could not be checked for a retained task id.",
+            {"task_id": task_id},
+        ) from exc
+
+
+def _collision_error(task_id: str, collision: str) -> TaskSubmissionError:
+    return TaskSubmissionError(
+        "TASK_ID_COLLISION",
+        "The task id collides with retained evidence of a deleted task or with a case "
+        "variant of a live task in this project; evidence roots are single-generation. "
+        "Submit a new task id.",
+        {"task_id": task_id, "collides_with": collision},
+    )
+
+
+def insert_task_guarded(db: ForgeDB, config: ForgeConfig, project: Project, task: Task) -> None:
+    """Insert a task atomically with the alias check.
+
+    The collision check and the insert share one immediate transaction, so two concurrent
+    submissions with case-variant ids cannot both pass the check and both insert.
+    """
+
+    def guard(connection) -> None:
+        try:
+            collision = _locked_task_collision(connection, config, project, task.id)
+        except EvidenceError as exc:
+            raise TaskSubmissionError(
+                "FILESYSTEM_ERROR",
+                "The evidence tree could not be checked for a retained task id.",
+                {"task_id": task.id},
+            ) from exc
+        if collision is not None:
+            raise _collision_error(task.id, collision)
+
+    db.add_task_guarded(task, guard)
+
+
 def _persisted_task_payload(
     db: ForgeDB,
     task: Task,
@@ -730,7 +856,8 @@ def _persisted_task_payload(
 
 
 def _insert_once(
-    db: ForgeDB, task: Task, fingerprint: str, request: TaskRequest
+    db: ForgeDB, task: Task, fingerprint: str, request: TaskRequest, *,
+    config: ForgeConfig, project: Project
 ) -> bool:
     """Insert the task, returning whether this call created it.
 
@@ -739,7 +866,7 @@ def _insert_once(
     different request is a conflict.
     """
     try:
-        db.add_task(task)
+        insert_task_guarded(db, config, project, task)
         return True
     except sqlite3.IntegrityError as exc:
         with _database_scope():
@@ -807,6 +934,10 @@ def submit_task(
             "defaults_applied": defaults,
         }
 
+    collision = task_id_collision(db, config, project, task_id)
+    if collision is not None:
+        raise _collision_error(task_id, collision)
+
     if dry_run:
         preview = _preview_task(request, project, task_id, state)
         return {
@@ -825,7 +956,14 @@ def submit_task(
             "defaults_applied": defaults,
         }
 
-    created = _insert_once(db, _preview_task(request, project, task_id, state), fingerprint, request)
+    created = _insert_once(
+        db,
+        _preview_task(request, project, task_id, state),
+        fingerprint,
+        request,
+        config=config,
+        project=project,
+    )
 
     with _database_scope():
         stored = db.get_task(task_id)

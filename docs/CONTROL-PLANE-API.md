@@ -5,7 +5,8 @@ controller state and submit work. External applications must use these CLI comma
 reading `forge.db`, depending on SQLite table details, or parsing Forge's human-readable terminal
 output.
 
-This contract covers inspection and task submission. It does not provide retry, cancellation,
+This contract covers inspection, task submission, and deletion of non-running tasks and empty
+projects. It does not provide retry, cancellation,
 reconciliation, merge, push, daemon control, HTTP, or named-pipe operations, and it never starts
 task execution — a submitted task waits for the existing controller loop.
 
@@ -22,6 +23,8 @@ task execution — a submitted task waits for the existing controller loop.
 .\forge.ps1 task add <task arguments> --json
 .\forge.ps1 task evidence list <task-id> --json
 .\forge.ps1 task evidence show <task-id> --artifact-id <artifact-id> --json
+.\forge.ps1 task delete <task-id> --json
+.\forge.ps1 project delete <project> --json
 ```
 
 The same commands retain their existing human-readable output when `--json` is absent. `task add`
@@ -44,8 +47,9 @@ Every JSON response is one UTF-8 JSON document with this envelope:
 
 - `schema_version` identifies the public contract, not the Forge package version or database schema.
 - `command` is the stable dotted command name: `status`, `project.list`, `task.list`, `task.show`,
-  `decision.list`, `task.add`, `task.evidence.list`, or `task.evidence.show`. Validation and
-  submission share the `task.add` command name and are distinguished by `data.dry_run`.
+  `decision.list`, `task.add`, `task.evidence.list`, `task.evidence.show`, `task.delete`, or
+  `project.delete`. Validation and submission share the `task.add` command name and are
+  distinguished by `data.dry_run`.
 - `success` is `true` only when the operation succeeded.
 - `data` contains command data on success and is `null` on failure.
 - `error` is `null` on success and contains a structured error on failure.
@@ -340,8 +344,12 @@ supplied, the source is `client`.
 
 A client-supplied identifier must be 1–64 characters, must contain at least one letter or digit,
 must not contain whitespace, control characters, `..`, path separators, or the Windows-reserved
-characters `\ / : " | ? *`, and must not begin with `-` or `.`. Entries in `dependencies` name other
-tasks and must satisfy the same rules. Forge does not require a dependency to exist yet; a task with
+characters `\ / : " | ? *`, must not begin with `-` or `.`, must not end with `.` (Windows strips
+trailing dots, so `TASK-1.` would alias `TASK-1`'s directories), and must not be a reserved
+Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, with or without an
+extension). The same rules are enforced on the plain `task add` path, not only on `--json`
+submissions, and one shared Windows-safe component validator applies these rules to task ids and
+project names alike. Entries in `dependencies` name other tasks and must satisfy the same rules. Forge does not require a dependency to exist yet; a task with
 dependencies is created in `BACKLOG` and becomes `READY` once every dependency completes.
 
 ### Specification contract fields
@@ -377,6 +385,17 @@ compares it against any task already stored under the same identifier.
 | The identifier holds a task with the same fingerprint | No write occurs, the existing task is returned, and `data.created` is `false`. |
 | The identifier was supplied by the client and holds a different request | `TASK_ID_CONFLICT` |
 | The identifier was derived and holds a different request | `DUPLICATE_TASK_ID` |
+| The identifier names retained evidence of a deleted task, or differs only by case from a live task in the same project | `TASK_ID_COLLISION` |
+| The target project's stored name is not a safe path component, or another registered project aliases its Windows physical name | `PROJECT_UNSAFE` |
+
+The collision check shares one immediate transaction with the insert, so two concurrent
+submissions with case-variant identifiers cannot both pass the check and both persist. The same
+transaction re-reads the target project's registration and refuses with `PROJECT_UNSAFE` when
+its workspace and evidence namespaces cannot be proven safe — a legacy path-shaped stored name,
+or a second registered project whose name aliases the same Windows physical directory. The guard
+runs on every submission path: the inbox importer, plain `task add`, and JSON submission,
+including dry-run previews. Its details carry only backend-minted project ids, never a
+path-shaped stored name.
 
 Order matters for acceptance criteria, architecture decisions, constraints, and validation
 commands, because validation commands run in the order given and stop at the first failure, and
@@ -436,7 +455,7 @@ registered on a project are unaffected.
       "branch": null,
       "worktree": null,
       "planned_branch": "forge/task-001-add-deterministic-report-export",
-      "planned_worktree": "D:\\CodexForge\\worktrees\\sample-service\\task-001",
+      "planned_worktree": "D:\\CodexForge\\worktrees\\sample-service\\task-001-a3b4d261fc",
       "current_phase": null,
       "error_code": null,
       "error_message": null,
@@ -508,7 +527,7 @@ A successful submission returns the same shape with `dry_run` and `would_create`
       "branch": null,
       "worktree": null,
       "planned_branch": "forge/task-001-add-deterministic-report-export",
-      "planned_worktree": "D:\\CodexForge\\worktrees\\sample-service\\task-001",
+      "planned_worktree": "D:\\CodexForge\\worktrees\\sample-service\\task-001-a3b4d261fc",
       "created_at": "2026-08-04T14:10:00+00:00"
     },
     "normalized_request": {},
@@ -528,7 +547,9 @@ Field notes:
   `task show` is present and carries the same meaning.
 - `branch` and `worktree` report persisted state and are therefore `null` until the controller
   prepares the isolated worktree. `planned_branch` and `planned_worktree` are the deterministic
-  values the controller will use. Submission never creates a branch, a worktree, or a directory.
+  values the controller will use. The worktree directory name folds a hash of the exact task id
+  into the lossy slug, so two distinct ids can never derive one checkout directory. Submission
+  never creates a branch, a worktree, or a directory.
 - `state` is `READY`, or `BACKLOG` when the request declares dependencies. Submission does not run
   the task; the existing controller loop picks it up.
 - `token_limit` is the active configured task limit, not a per-task value. A configured limit of `0`
@@ -590,6 +611,135 @@ The current command lists open decisions, preserving existing CLI semantics.
 Decision resolution is not part of this checkpoint. `resolved_at` and `resolution` therefore remain
 `null` for the open collection.
 
+## Task delete
+
+`task delete <task-id>` removes one non-running task and every registry row it owns (its runs and
+decisions) in a single transaction. The task identifier must match exactly; there is no prefix or
+fuzzy matching. A task in an active execution state (`IMPLEMENTING`, `VALIDATING`, `REVIEWING`,
+`REPAIRING`) is refused with `TASK_ACTIVE`; deletion is not cancellation. Retained evidence and the
+task's branch are never deleted. The task's disposable worktree checkout is removed after the
+database deletion commits.
+
+```json
+{
+  "schema_version": "1.0",
+  "command": "task.delete",
+  "success": true,
+  "data": {
+    "deleted": true,
+    "task_id": "TASK-1042",
+    "state": "FAILED",
+    "evidence_retained": true,
+    "evidence_path": "C:\\forge\\evidence\\demo\\TASK-1042",
+    "worktree_removed": true
+  },
+  "error": null
+}
+```
+
+- `state` is the state the task held at the moment it was deleted.
+- `evidence_retained` is always `true`: deletion never touches the evidence tree. `evidence_path`
+  is the retained evidence root of the deleted task, or `null` when it cannot be derived. Deletion
+  removes registry state only: `task evidence list` and `task evidence show` keep serving the
+  retained artifacts under `evidence_path`, reporting `task_registered: false` with `task_state`
+  and `attempt_count` `null`. If retained evidence for the same task id exists under more than one
+  project, the evidence commands fail closed with `EVIDENCE_AMBIGUOUS` rather than guessing.
+- `worktree_removed` is `true` only when both the checkout and any Git registration are
+  verifiably gone, and `false` when there was nothing on disk to remove — or when, by the time
+  the post-commit cleanup ran, the task id or the checkout path (persisted or derived) was owned
+  by a live task row again. The removal runs under a registry write claim, so a reused identity
+  always keeps its worktree. Cleanup only ever deletes a proven disposable checkout: a plain
+  directory that resolves strictly inside the deleted task's own project workspace directory and
+  overlaps — by equality, ancestry, descent, or resolved alias under Windows-normalized canonical
+  comparison — nothing in the protected set: every registered repository, every other project's
+  workspace, every live task's effective checkout, and the Forge configuration roots (evidence,
+  database, repositories, inbox, knowledge, and the configuration file itself). A registered
+  legacy project whose name is not a safe path component makes ownership unprovable, so cleanup
+  fails closed instead of skipping its state. Git registrations are matched by resolved canonical
+  path, so a checkout addressed through a directory symlink still finds and clears the real
+  registration. A stored path that fails that proof — or a
+  Git operation that fails or hangs — is a `WORKTREE_CLEANUP_FAILED` refusal, never a
+  fall-through deletion. Registered removal and pruning are checked operations: a locked worktree
+  fails closed with its directory and registration intact, a registration list that cannot be
+  read fails closed, and completion is re-verified against both the filesystem and a fresh
+  registration listing. A missing repository is never read as "unregistered": when registration
+  state cannot be verified, an on-disk checkout is left untouched and the cleanup fails closed.
+  Deleting an on-disk checkout additionally requires every other registered repository to
+  testify about ownership: a checkout registered to another repository — or to more than one —
+  is never touched, and a required repository that is unavailable fails the cleanup closed,
+  so a checkout owned by a currently unreachable repository is never raw-deleted. The branch is
+  never deleted and no garbage collection ever runs.
+- If the database deletion commits but the worktree cannot be removed, the response is a
+  `WORKTREE_CLEANUP_FAILED` failure whose `details` carry `deleted: true`; the task stays deleted
+  and is not resurrected.
+- Structured error `details` for `task delete` carry `task_id` only when the id is a safe path
+  component. A path-shaped legacy or requested identifier is omitted from `details` entirely and
+  reported on stderr only, so structured output never echoes a path-shaped value.
+
+## Project delete
+
+`project delete <project>` removes one registered project, addressed by exact id or exact name,
+and only when it has no task rows. A project that still has tasks is refused with
+`PROJECT_NOT_EMPTY` and the task count; tasks are never deleted implicitly. Deletion removes only
+the project's disposable worktree directory. Retained evidence and the project's repository —
+cloned or user-supplied — are never deleted.
+
+An identifier that names one project's id and a different project's name is refused with
+`PROJECT_AMBIGUOUS`; a destructive command never guesses, and everywhere else an exact id match
+deterministically wins over a name match. Workspace cleanup follows the same laws as task
+cleanup: the stored project name must be a safe path component (`project add` refuses unsafe
+names and names differing only by case from an existing project, which would alias one
+directory), the workspace must prove it is disposable inside the workspace root, and the removal
+runs under a registry claim so a name registered again — exactly or as a case variant — keeps its
+workspace. A live task's effective checkout (persisted or derived), any other project's
+workspace, any registered repository, or any Forge configuration root (evidence, database,
+repositories, inbox, knowledge, configuration file) overlapping the workspace makes it
+non-disposable and fails the cleanup closed, as does a registered legacy project whose name is
+not a safe path component. A stored name or path that fails the proof is a
+`PROJECT_CLEANUP_FAILED` refusal whose details identify the project by its id rather than echoing
+a path-shaped name.
+
+Before any Git inventory or removal reads through the workspace, the workspace itself is proven
+disposable — a plain, non-reparse directory strictly inside the workspace root and disjoint from
+every protected path — and its physical identity is pinned and re-proven before every Git
+removal and before the final directory deletion; a symlinked or junction workspace fails closed
+without touching its target. Git worktree registrations are then inventoried by resolved
+canonical path across every registered repository. A checkout inside the workspace that is
+registered to the project's own repository is removed only through checked Git operations — a
+locked leftover checkout fails the cleanup closed with its directory and registration intact —
+and the owner's registrations whose checkouts are already gone are pruned, with the inventory
+re-read afterwards. A checkout registered to another repository fails the cleanup closed without
+being touched, and a repository that cannot testify — required but unavailable or unlistable —
+fails the cleanup closed too, because unverifiable registration state is never "nothing
+registered". Project deletion therefore never deletes a registered checkout raw and never leaves
+stale Git registration metadata behind.
+
+A workspace already missing on disk is still reconciled before success is reported: stale
+registrations of the project's own repository under the missing path are pruned and verified
+gone — a locked stale registration fails the cleanup closed — and a foreign registration under
+the missing path fails closed. A repository directory that no longer exists holds no
+registration metadata and needs no check.
+
+```json
+{
+  "schema_version": "1.0",
+  "command": "project.delete",
+  "success": true,
+  "data": {
+    "deleted": true,
+    "project": "demo",
+    "project_id": "project-3f2a1b4c5d",
+    "evidence_retained": true,
+    "repository_removed": false,
+    "workspace_removed": true
+  },
+  "error": null
+}
+```
+
+If the registry deletion commits but the worktree directory cannot be removed, the response is a
+`PROJECT_CLEANUP_FAILED` failure whose `details` carry `deleted: true`; the project stays deleted.
+
 ## Task evidence
 
 Two read-only commands expose the evidence a task produced, so an external application can display
@@ -610,6 +760,22 @@ artifact header followed by its content.
 These commands never write. They do not create, retry, cancel, reconcile, or alter a task, and they
 do not modify the database or any evidence file.
 
+Both commands resolve the task through its registry row while one exists. Once the task row has
+been deleted, the retained evidence tree becomes the read authority: Forge scans exactly one level
+beneath the evidence root for a project directory holding a plain directory named exactly by the
+task id, under the same path-safety rules as every other evidence access — files, links, and unsafe
+names are ignored. One match serves the retained evidence; no match is `TASK_NOT_FOUND`; more than
+one match fails closed with `EVIDENCE_AMBIGUOUS` rather than guessing between projects. A live
+registry row always wins, so retained evidence left by a deleted task never shadows a newer task
+that reuses the same identifier.
+
+The retained-evidence scan pins each directory it enumerates by physical identity and canonical
+containment and re-verifies the pin after enumeration, so a directory swapped and left swapped
+fails the read closed. A full rename-away-and-restore race completed entirely within one
+enumeration window is an explicitly accepted local-filesystem limitation: closing it would
+require enumeration through a held directory handle, which Windows does not offer portably. The
+scan is hardened against, not proof against, a local writer racing it.
+
 ### Evidence manifest
 
 `task evidence list` returns a manifest of every artifact the public allowlist recognizes. A task
@@ -624,6 +790,7 @@ that has not produced evidence yet is a success, not a failure: `evidence_availa
   "data": {
     "task_id": "TASK-1042",
     "project": "demo",
+    "task_registered": true,
     "task_state": "COMPLETED",
     "evidence_available": true,
     "attempt_count": 2,
@@ -663,6 +830,10 @@ that has not produced evidence yet is a success, not a failure: `evidence_availa
 }
 ```
 
+- `task_registered` is `true` while the task's registry row exists. For a deleted task served from
+  retained evidence it is `false`, and the registry-derived fields `task_state` and `attempt_count`
+  are `null` — registry facts are never fabricated from disk. Every filesystem-derived field is
+  populated normally either way.
 - `attempt_count` is the controller's attempt counter for the task; `attempts_with_evidence` lists
   the attempts that actually left artifacts on disk. They differ while an attempt is still running.
 - `phase` is the phase or validation group the artifact belongs to, and is `null` for artifacts that
@@ -674,7 +845,9 @@ that has not produced evidence yet is a success, not a failure: `evidence_availa
   because it is not recorded consistently across platforms.
 - `sha256` covers the artifact's complete original bytes. It is `null` when the artifact is larger
   than `max_readable_bytes`, or when the file changed while the manifest was being built — Forge
-  reports no hash rather than one that describes no version of the file.
+  reports no hash rather than one that describes no version of the file. When a hash is reported,
+  `original_size_bytes` and `modified_at` describe the same verified snapshot the hash was
+  computed from.
 - `content_available` is `false` when the artifact is too large to read or holds binary content.
 - `truncated_when_read` predicts whether `show` will truncate, from the raw size alone. It is a
   hint: redaction runs before truncation, so a redacted artifact can come back complete.
@@ -733,9 +906,16 @@ supplied identifier against it — the identifier is matched, never decoded into
 In addition, Forge:
 
 1. Derives the task evidence root from controller state only, and proves the derived root is inside
-   the configured evidence root.
+   the configured evidence root. The root is additionally re-verified immediately before every
+   read: the project and task directories must be plain directories — never links or reparse
+   points — and the root must still resolve strictly inside the evidence root, so a directory
+   swapped after discovery is refused rather than followed.
 2. Canonicalizes the evidence root and the candidate file, and confirms containment both when the
-   manifest is built and again immediately before reading.
+   manifest is built and again immediately before reading — against directory identities and
+   canonical roots captured at verification, never against a freshly resolved task root. The
+   verified chain is re-checked before every enumeration, before every open, and again before a
+   response is returned, and the opened file must be the identical file discovery saw, so a task
+   directory swapped for a link at any point is refused rather than served.
 3. Inspects directory entries without following links, and refuses symlinks and Windows reparse
    points, so a link that escapes the evidence root is never traversed or served.
 4. Refuses anything that is not a regular file: directories, devices, pipes, and sockets.
@@ -745,7 +925,8 @@ In addition, Forge:
 
 ### Artifact content
 
-`task evidence show` returns one bounded, redacted artifact.
+`task evidence show` returns one bounded, redacted artifact. For a deleted task served from
+retained evidence, `task_state` is `null`; artifact resolution, content, and hashes are unchanged.
 
 ```json
 {
@@ -836,6 +1017,12 @@ returned, truncated, sanitized, or redacted text. A truncated response therefore
 does not match its own `text`; this is intentional, so a consumer can detect that an artifact
 changed between two calls.
 
+In a `show` response, every snapshot-dependent `artifact` field — `sha256`,
+`original_size_bytes`, `modified_at`, `content_available`, and `truncated_when_read` — is
+overwritten from the read itself: the modification time comes from the same open descriptor that
+produced the bytes and the hash, so the artifact metadata and the returned content always
+describe the same opened file, never discovery-time state.
+
 #### Redaction semantics
 
 Redaction is unconditional and applied line by line, so line structure and line counts survive. A
@@ -924,11 +1111,15 @@ JSON response.
 }
 ```
 
+Error envelopes preserve the requested contract schema version whenever it is a supported one —
+including argument-parse, configuration, and unexpected-failure envelopes; an unsupported
+requested version keeps failing closed with `UNSUPPORTED_SCHEMA` at the default version.
+
 This response exits with code `2`. Stable current error codes are:
 
 | Code | Exit | Meaning |
 |---|---:|---|
-| `TASK_NOT_FOUND` | 2 | The requested task does not exist. |
+| `TASK_NOT_FOUND` | 2 | The requested task neither exists in the registry nor has retained evidence on disk. |
 | `INVALID_ARGUMENT` | 2 | The command line could not be parsed — a missing, unknown, or unparseable argument. |
 | `CONFIG_ERROR` | 2 | `forge.toml` could not be loaded. |
 | `COMMAND_FAILED` | 1 | An unexpected failure occurred while running the command. |
@@ -936,12 +1127,15 @@ This response exits with code `2`. Stable current error codes are:
 | `PROJECT_NOT_FOUND` | 2 | The requested project is not registered. |
 | `DUPLICATE_TASK_ID` | 2 | The derived task identifier already holds a different request. |
 | `TASK_ID_CONFLICT` | 2 | The client-supplied task identifier already holds a different request. |
+| `TASK_ID_COLLISION` | 2 | The task id names retained evidence of a deleted task, or differs only by case from a live task in the same project; either would alias one on-disk generation. |
+| `PROJECT_UNSAFE` | 2 | The target project's registration cannot accept submissions: its stored name is not a safe path component, or another registered project aliases its Windows physical name. |
 | `INVALID_VALIDATION_COMMAND` | 2 | A submitted validation command was empty, too long, multi-line, or attempted to chain, redirect, or substitute commands. |
 | `INVALID_LIMIT` | 2 | `max_attempts` or `priority` was not an integer within its supported range. |
 | `CONFIGURATION_ERROR` | 2 | Forge is configured but not initialized. Run `forge init`. |
 | `DATABASE_ERROR` | 1 | The Forge database could not be read or written. |
 | `EVIDENCE_NOT_FOUND` | 2 | The task exists but has recorded no evidence. |
 | `EVIDENCE_UNAVAILABLE` | 2 | The task's evidence cannot be located, for example because its project is no longer registered. |
+| `EVIDENCE_AMBIGUOUS` | 2 | The task id's evidence location is aliased: retained evidence exists under more than one project, a retained directory occupies the same Windows physical name, or a live case-variant task in the same project shares the directory. Reads fail closed; details name only ids and project names, never paths. |
 | `ARTIFACT_NOT_FOUND` | 2 | The identifier is not a public artifact of this task, or the artifact was removed. |
 | `ARTIFACT_NOT_PUBLIC` | 2 | Reserved for an artifact excluded by the public allowlist. |
 | `ARTIFACT_OUTSIDE_EVIDENCE_ROOT` | 2 | A candidate resolved outside the task's evidence root and was refused. |
@@ -951,6 +1145,11 @@ This response exits with code `2`. Stable current error codes are:
 | `ARTIFACT_CHANGED_DURING_READ` | 1 | The artifact changed while being read. Retryable; `details.retryable` is `true`. |
 | `FILESYSTEM_ERROR` | 1 | The evidence tree could not be read. |
 | `UNSUPPORTED_SCHEMA` | 2 | The requested `--schema-version` is not supported. |
+| `TASK_ACTIVE` | 2 | The task is in an active execution state; deletion is refused. |
+| `PROJECT_NOT_EMPTY` | 2 | The project still has tasks; delete them explicitly first. |
+| `PROJECT_AMBIGUOUS` | 2 | The identifier names one project's id and a different project's name; deletion refuses to guess. |
+| `WORKTREE_CLEANUP_FAILED` | 1 | The task was deleted but its worktree could not be removed. `details.deleted` is `true`. |
+| `PROJECT_CLEANUP_FAILED` | 1 | The project was deleted but its worktree directory could not be removed. `details.deleted` is `true`. |
 
 An evidence failure is reported identically in both output modes: with `--json` the envelope carries
 the code and the process exits nonzero; without `--json` the same `CODE: message` line goes to

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -19,15 +22,27 @@ from .control_plane import (
     unsupported_schema_error,
     write_response,
 )
-from .db import ForgeDB
+from .db import ACTIVE_TASK_STATES, ForgeDB
 from .evidence import (
     EVIDENCE_LIST_COMMAND,
     EVIDENCE_SHOW_COMMAND,
     EvidenceError,
     evidence_list,
     evidence_show,
+    safe_path_component,
+    task_evidence_root,
 )
-from .gitops import clone_repository, verify_repository
+from .gitops import (
+    GitError,
+    clone_repository,
+    ensure_disposable_checkout,
+    pin_plain_directory,
+    reconcile_missing_workspace,
+    remove_registered_checkouts,
+    remove_worktree,
+    revalidate_pinned_directory,
+    verify_repository,
+)
 from .models import Project, Task, TaskState
 from .orchestrator import Orchestrator
 from .runner import _build_process_command
@@ -38,14 +53,31 @@ from .task_submission import (
     RISK_LEVELS,
     SUBMISSION_COMMAND,
     TaskSubmissionError,
+    _normalize_task_id,
     build_task_request,
+    insert_task_guarded,
     submit_task,
 )
-from .utils import command_exists, ensure_dir, run_process, stable_id
+from .utils import (
+    command_exists,
+    derived_worktree_path,
+    ensure_dir,
+    run_process,
+    stable_id,
+    windows_alias_key,
+)
 
 
 class CLIArgumentError(ValueError):
     pass
+
+
+class _ProjectNameCollision(Exception):
+    """A project name that differs only by case from a registered one, caught in-transaction."""
+
+    def __init__(self, existing: str):
+        super().__init__(existing)
+        self.existing = existing
 
 
 class ForgeArgumentParser(argparse.ArgumentParser):
@@ -94,6 +126,19 @@ def build_parser() -> argparse.ArgumentParser:
     project_add.add_argument("--no-fetch", action="store_true")
     project_add.add_argument("--no-commit", action="store_true")
     project_add.add_argument("--push", action="store_true")
+    project_delete = project_sub.add_parser(
+        "delete",
+        help="Delete a project that has no tasks; evidence and repositories are retained",
+        description=(
+            "Delete an empty project from the Forge registry. A project that still has tasks is "
+            "refused; delete its tasks explicitly first. Retained task evidence and the project's "
+            "repository (cloned or user-supplied) are never deleted. Only the project's disposable "
+            "worktree directory is removed."
+        ),
+    )
+    project_delete.add_argument("project", help="Project id or exact name")
+    _add_schema_version_argument(project_delete)
+    project_delete.add_argument("--json", action="store_true")
     project_list = project_sub.add_parser("list", help="List projects")
     _add_schema_version_argument(project_list)
     project_list.add_argument("--json", action="store_true")
@@ -133,6 +178,20 @@ def build_parser() -> argparse.ArgumentParser:
     task_show.add_argument("--json", action="store_true")
     task_retry = task_sub.add_parser("retry", help="Retry a failed or blocked task")
     task_retry.add_argument("task_id")
+    active_states = ", ".join(state.value for state in ACTIVE_TASK_STATES)
+    task_delete = task_sub.add_parser(
+        "delete",
+        help="Delete a non-running task; evidence and the task branch are retained",
+        description=(
+            "Delete an obsolete task from the Forge registry. A task in an active execution state "
+            f"({active_states}) is refused; deletion is not cancellation. Retained evidence and "
+            "the task branch are never deleted. Only the task's disposable worktree checkout is "
+            "removed."
+        ),
+    )
+    task_delete.add_argument("task_id", help="Exact task id")
+    _add_schema_version_argument(task_delete)
+    task_delete.add_argument("--json", action="store_true")
 
     task_evidence = task_sub.add_parser("evidence", help="Inspect retained task evidence")
     evidence_sub = task_evidence.add_subparsers(dest="evidence_command", required=True)
@@ -239,6 +298,31 @@ def cmd_doctor(config: ForgeConfig) -> int:
 def cmd_project_add(config: ForgeConfig, args: argparse.Namespace) -> int:
     db = ForgeDB(config.database_path)
     db.initialize()
+    # A project name is a workspace and evidence path component; it must never be able to escape
+    # those roots, and two names differing only by case would alias one directory on Windows.
+    if not safe_path_component(args.name):
+        print(
+            "INVALID_ARGUMENT: a project name must be a single safe path component "
+            "(no separators, colons, or dot navigation).",
+            file=sys.stderr,
+        )
+        return 2
+    variant = next(
+        (
+            existing
+            for existing in db.list_projects()
+            if existing.name != args.name
+            and windows_alias_key(existing.name) == windows_alias_key(args.name)
+        ),
+        None,
+    )
+    if variant is not None:
+        print(
+            f"INVALID_ARGUMENT: project name {args.name!r} differs only by case from "
+            f"{variant.name!r}; the two would alias one evidence and workspace directory.",
+            file=sys.stderr,
+        )
+        return 2
     if args.url:
         repo_path = config.repository_root / args.name
         if not repo_path.exists():
@@ -256,7 +340,22 @@ def cmd_project_add(config: ForgeConfig, args: argparse.Namespace) -> int:
         auto_commit=not args.no_commit,
         auto_push=args.push,
     )
-    db.add_project(project)
+    def _name_guard(connection) -> None:
+        for row in connection.execute("SELECT name FROM projects"):
+            if row["name"] != project.name and windows_alias_key(row["name"]) == windows_alias_key(
+                project.name
+            ):
+                raise _ProjectNameCollision(row["name"])
+
+    try:
+        db.add_project_guarded(project, _name_guard)
+    except _ProjectNameCollision as exc:
+        print(
+            f"INVALID_ARGUMENT: project name {project.name!r} differs only by case from "
+            f"{exc.existing!r}; the two would alias one evidence and workspace directory.",
+            file=sys.stderr,
+        )
+        return 2
     print(f"Registered project {project.name}: {project.repo_path}")
     return 0
 
@@ -288,7 +387,13 @@ def cmd_task_add(
     if not project:
         print(f"Unknown project: {args.project}", file=sys.stderr)
         return 2
-    task_id = args.id or stable_id("TASK", f"{project.id}:{args.title}:{args.objective}")
+    try:
+        task_id = _normalize_task_id(args.id) or stable_id(
+            "TASK", f"{project.id}:{args.title}:{args.objective}"
+        )
+    except TaskSubmissionError as exc:
+        print(f"{exc.code}: {exc.message}", file=sys.stderr)
+        return error_exit_code(exc.code)
     dependencies = args.depends_on or []
     task = Task(
         id=task_id,
@@ -308,7 +413,11 @@ def cmd_task_add(
         out_of_scope=args.out_of_scope or "",
         max_attempts=DEFAULT_MAX_ATTEMPTS if args.max_attempts is None else args.max_attempts,
     )
-    db.add_task(task)
+    try:
+        insert_task_guarded(db, config, project, task)
+    except TaskSubmissionError as exc:
+        print(f"{exc.code}: {exc.message}", file=sys.stderr)
+        return error_exit_code(exc.code)
     print(f"Added {task.id} [{task.state.value}] {task.title}")
     return 0
 
@@ -437,6 +546,400 @@ def cmd_task_retry(config: ForgeConfig, task_id: str) -> int:
     return 0
 
 
+def _structured_failure(
+    command: str,
+    error: StructuredError,
+    as_json: bool,
+    schema_version: str = DEFAULT_SCHEMA_VERSION,
+) -> int:
+    """Render a structured refusal identically in both output modes and map it to an exit code."""
+    if as_json:
+        print(f"ERROR: {error.code}", file=sys.stderr)
+        write_response(command, error=error, schema_version=schema_version)
+    else:
+        print(f"{error.code}: {error.message}", file=sys.stderr)
+    return error_exit_code(error.code)
+
+
+def _project_detail_name(project: Project) -> str:
+    """Structured details never carry a path-shaped value; an unsafe stored name is reported by
+    the backend-minted project id instead."""
+    return project.name if safe_path_component(project.name) else project.id
+
+
+def _task_detail_id(task_id: str) -> dict[str, str]:
+    """Structured details never carry a path-shaped value; a legacy or requested task id that
+    fails the shared safe-component validator is omitted from details entirely. The raw id is
+    reported on stderr only."""
+    return {"task_id": task_id} if safe_path_component(task_id) else {}
+
+
+def _note_unsafe_task_id(task_id: str) -> None:
+    if not safe_path_component(task_id):
+        print(
+            f"task id is not a safe path component and was omitted from details: {task_id}",
+            file=sys.stderr,
+        )
+
+
+def _worktree_reclaimed(connection, config: ForgeConfig, task_id: str, worktree: Path) -> bool:
+    """True when the deleted id or its checkout path is owned by a live task row again.
+
+    A live row's effective checkout is its persisted path when present, otherwise the exact path
+    `prepare_worktree` would derive for it.
+    """
+    target = os.path.normcase(os.path.normpath(str(worktree)))
+    project_names = {
+        row["id"]: row["name"] for row in connection.execute("SELECT id, name FROM projects")
+    }
+    for row in connection.execute("SELECT id, project_id, worktree_path FROM tasks"):
+        if row["id"] == task_id:
+            return True
+        effective = row["worktree_path"]
+        if not effective:
+            owner = project_names.get(row["project_id"])
+            if owner is None or not safe_path_component(owner):
+                raise GitError(
+                    "a live task's checkout cannot be located from its project registration; "
+                    "cleanup cannot prove ownership"
+                )
+            effective = str(derived_worktree_path(config.workspace_root, owner, row["id"]))
+        if os.path.normcase(os.path.normpath(effective)) == target:
+            return True
+    return False
+
+
+def _protected_paths(connection, config: ForgeConfig, project: Project) -> list[Path]:
+    """Everything a cleanup must never touch, gathered under the held write claim.
+
+    Every registered repository, every project workspace except the owner's own, and every live
+    task's effective checkout — persisted, or the exact path `prepare_worktree` would derive.
+    The owner's repository snapshot is included even when its registry row is already deleted.
+    """
+    protected: list[Path] = [project.repo_path]
+    protected.extend(
+        (
+            config.config_path,
+            config.database_path,
+            config.evidence_root,
+            config.repository_root,
+            config.inbox_root,
+            config.knowledge_root,
+        )
+    )
+    if not _lexically_inside(config.workspace_root, config.data_root):
+        # In the default layout the workspace root lives inside the data root, so the data root
+        # cannot be protected against containment; its precious members are protected above. In
+        # any other layout the data root is protected outright.
+        protected.append(config.data_root)
+    project_rows = {
+        row["id"]: row
+        for row in connection.execute("SELECT id, name, repo_path FROM projects")
+    }
+    for row in project_rows.values():
+        protected.append(Path(row["repo_path"]))
+        if row["id"] == project.id:
+            continue
+        if not safe_path_component(row["name"]):
+            # A legacy name that cannot be trusted as a path component cannot have its workspace
+            # located either; ownership is unprovable, so cleanup fails closed.
+            raise GitError(
+                "a registered project name is not a safe path component; "
+                "cleanup cannot prove ownership"
+            )
+        protected.append(config.workspace_root / row["name"])
+    for row in connection.execute("SELECT id, project_id, worktree_path FROM tasks"):
+        stored = row["worktree_path"]
+        if stored:
+            protected.append(Path(stored))
+            continue
+        owner = project_rows.get(row["project_id"])
+        if owner is None or not safe_path_component(owner["name"]):
+            raise GitError(
+                "a live task's checkout cannot be located from its project registration; "
+                "cleanup cannot prove ownership"
+            )
+        protected.append(
+            derived_worktree_path(config.workspace_root, owner["name"], row["id"])
+        )
+    return protected
+
+
+def _lexically_inside(inner: Path, outer: Path) -> bool:
+    inner_c = os.path.normcase(os.path.normpath(str(inner)))
+    outer_c = os.path.normcase(os.path.normpath(str(outer)))
+    return inner_c == outer_c or inner_c.startswith(outer_c + os.sep)
+
+
+def _remove_worktree_claimed(
+    db: ForgeDB, config: ForgeConfig, project: Project, worktree: Path, task_id: str
+) -> bool:
+    """Remove the checkout under a database write claim.
+
+    The row deletion committed before cleanup runs, so the same task id can already have been
+    reused. Holding an immediate transaction across the removal means no new owner can appear
+    mid-removal, and an id or checkout path that is live again is left untouched. The checkout
+    must live strictly inside this project's own workspace directory and stay disjoint from
+    every registered repository.
+    """
+    with db.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if _worktree_reclaimed(connection, config, task_id, worktree):
+            return False
+        if not safe_path_component(project.name):
+            raise GitError(
+                "the stored project name is not a safe path component; the checkout was not touched"
+            )
+        protected = _protected_paths(connection, config, project)
+        repositories = _registered_repositories(connection)
+        return remove_worktree(
+            project.repo_path,
+            worktree,
+            config.workspace_root / project.name,
+            protected,
+            repositories,
+        )
+
+
+def _registered_repositories(connection) -> list[Path]:
+    """Every registered project repository, read under the caller's claim.
+
+    Cleanup ownership checks must see the same registry snapshot the claim holds, so the list is
+    read on the claimed connection, never through a separate database handle.
+    """
+    return [
+        Path(row["repo_path"]) for row in connection.execute("SELECT repo_path FROM projects")
+    ]
+
+
+def _remove_workspace_claimed(
+    db: ForgeDB, config: ForgeConfig, project: Project, workspace: Path
+) -> bool:
+    """Remove the project workspace under a database write claim.
+
+    A project name registered again — exactly or as a case variant that aliases the same
+    directory — owns the workspace path now, so the stale cleanup leaves it alone. The
+    workspace itself is proven disposable — a plain, non-reparse directory strictly inside the
+    workspace root and disjoint from every protected path — before any Git inventory or removal
+    reads through it, and its physical identity is pinned so every later mutation acts on that
+    directory and never on a swapped-in target; a symlinked or junction workspace fails without
+    touching its target. Git worktree registrations inside the workspace are inventoried across
+    every registered repository and cleared only through checked Git operations; a foreign or
+    unverifiable registration, or a locked leftover checkout, fails the cleanup closed with the
+    workspace intact, so deletion never raw-deletes a registered checkout and never leaves
+    stale registration metadata behind. A workspace already missing on disk is still reconciled
+    against stale registrations before success is reported.
+    """
+    key = windows_alias_key(project.name)
+    with db.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        for row in connection.execute("SELECT name FROM projects"):
+            if windows_alias_key(row["name"]) == key:
+                return False
+        repositories = _registered_repositories(connection)
+        if not os.path.lexists(workspace):
+            reconcile_missing_workspace(project.repo_path, workspace, repositories)
+            return False
+        protected = _protected_paths(connection, config, project)
+        ensure_disposable_checkout(workspace, config.workspace_root, protected)
+        pin = pin_plain_directory(workspace)
+        remove_registered_checkouts(
+            project.repo_path, workspace, protected, repositories, pin=pin
+        )
+        revalidate_pinned_directory(workspace, pin)
+        shutil.rmtree(workspace)
+        if os.path.lexists(workspace):
+            raise OSError(f"workspace directory still present after removal: {workspace}")
+        return True
+
+
+def cmd_task_delete(
+    config: ForgeConfig, args: argparse.Namespace, schema_version: str = DEFAULT_SCHEMA_VERSION
+) -> int:
+    as_json = getattr(args, "json", False)
+    db = ForgeDB(config.database_path)
+    outcome, task = db.delete_task(args.task_id)
+    if outcome == "not_found":
+        _note_unsafe_task_id(args.task_id)
+        return _structured_failure(
+            "task.delete",
+            StructuredError(
+                code="TASK_NOT_FOUND",
+                message="Task was not found.",
+                details=_task_detail_id(args.task_id),
+            ),
+            as_json,
+            schema_version,
+        )
+    if outcome == "active":
+        _note_unsafe_task_id(task.id)
+        return _structured_failure(
+            "task.delete",
+            StructuredError(
+                code="TASK_ACTIVE",
+                message="Task is in an active execution state and cannot be deleted.",
+                details={**_task_detail_id(task.id), "state": task.state.value},
+            ),
+            as_json,
+            schema_version,
+        )
+    # The durable deletion has committed; everything after this point is cleanup and reporting,
+    # and any failure here must still say deleted=true, never a generic command failure.
+    evidence_path: str | None = None
+    worktree: Path | None = None
+    worktree_removed = False
+    cleanup_error: str | None = None
+    try:
+        # The project row must outlive its tasks (deleting a non-empty project is refused), so
+        # it is still present here and names both the retained evidence root and the worktree.
+        project = db.get_project(task.project_id)
+        if project is not None:
+            try:
+                evidence_path = str(task_evidence_root(config, project.name, task.id))
+            except EvidenceError:
+                evidence_path = None
+        worktree = task.worktree_path
+        if worktree is None and project is not None:
+            worktree = derived_worktree_path(config.workspace_root, project.name, task.id)
+        if worktree is not None and project is not None:
+            worktree_removed = _remove_worktree_claimed(db, config, project, worktree, task.id)
+    except (GitError, OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
+        cleanup_error = str(exc)
+    data = {
+        "deleted": True,
+        "task_id": task.id,
+        "state": task.state.value,
+        "evidence_retained": True,
+        "evidence_path": evidence_path,
+        "worktree_removed": worktree_removed,
+    }
+    if cleanup_error is not None:
+        # The contract keeps `data` null on failure and keeps paths and OS error text out of
+        # `details`; the durable outcome travels in `details` and the diagnostics go to stderr.
+        _note_unsafe_task_id(task.id)
+        error = StructuredError(
+            code="WORKTREE_CLEANUP_FAILED",
+            message="The task was deleted and its evidence is retained, but its worktree could not be removed.",
+            details={
+                **_task_detail_id(task.id),
+                "deleted": True,
+                "evidence_retained": True,
+                "worktree_removed": False,
+            },
+        )
+        if as_json:
+            print(f"ERROR: {error.code}", file=sys.stderr)
+        else:
+            print(f"Deleted task {task.id}; evidence retained.")
+            print(f"{error.code}: {error.message}", file=sys.stderr)
+        print(f"worktree not removed: {worktree}: {cleanup_error}", file=sys.stderr)
+        if as_json:
+            write_response("task.delete", error=error, schema_version=schema_version)
+        return error_exit_code(error.code)
+    if as_json:
+        write_response("task.delete", data=data, schema_version=schema_version)
+    else:
+        worktree_note = "worktree removed" if worktree_removed else "no worktree to remove"
+        print(f"Deleted task {task.id}; evidence retained; {worktree_note}.")
+    return 0
+
+
+def cmd_project_delete(
+    config: ForgeConfig, args: argparse.Namespace, schema_version: str = DEFAULT_SCHEMA_VERSION
+) -> int:
+    as_json = getattr(args, "json", False)
+    db = ForgeDB(config.database_path)
+    outcome, project, task_count = db.delete_project(args.project)
+    if outcome == "not_found":
+        return _structured_failure(
+            "project.delete",
+            StructuredError(
+                code="PROJECT_NOT_FOUND",
+                message="Project was not found.",
+                details={"project": args.project},
+            ),
+            as_json,
+            schema_version,
+        )
+    if outcome == "ambiguous":
+        return _structured_failure(
+            "project.delete",
+            StructuredError(
+                code="PROJECT_AMBIGUOUS",
+                message=(
+                    "The identifier names one project's id and a different project's name; "
+                    "deletion refuses to guess."
+                ),
+                details={"identifier": args.project},
+            ),
+            as_json,
+            schema_version,
+        )
+    if outcome == "has_tasks":
+        return _structured_failure(
+            "project.delete",
+            StructuredError(
+                code="PROJECT_NOT_EMPTY",
+                message="Project still has tasks; delete them explicitly first.",
+                details={"project": _project_detail_name(project), "task_count": task_count},
+            ),
+            as_json,
+            schema_version,
+        )
+    # Only the disposable worktree directory is Forge state that dies with the project. Evidence
+    # is retained, and the repository -- whether a Forge clone or a user-supplied path -- stays,
+    # because retained evidence records commit hashes that only that repository can verify.
+    workspace = config.workspace_root / project.name
+    workspace_removed = False
+    cleanup_error: str | None = None
+    if not safe_path_component(project.name):
+        # The stored name cannot be trusted as a path component, so the join above cannot be
+        # trusted either; fail the cleanup closed without touching the filesystem.
+        cleanup_error = "the stored project name is not a safe path component; the workspace was not touched"
+    else:
+        # Called even when the workspace path is missing: stale Git registrations under it must
+        # be reconciled before success is reported.
+        try:
+            workspace_removed = _remove_workspace_claimed(db, config, project, workspace)
+        except (GitError, OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
+            cleanup_error = str(exc)
+    data = {
+        "deleted": True,
+        "project": project.name,
+        "project_id": project.id,
+        "evidence_retained": True,
+        "repository_removed": False,
+        "workspace_removed": workspace_removed,
+    }
+    if cleanup_error is not None:
+        # Same failure contract as task deletion: `data` stays null, `details` carries the durable
+        # outcome without paths or OS error text, and the diagnostics go to stderr.
+        error = StructuredError(
+            code="PROJECT_CLEANUP_FAILED",
+            message="The project was deleted and evidence is retained, but its worktree directory could not be removed.",
+            details={
+                "project": _project_detail_name(project),
+                "deleted": True,
+                "evidence_retained": True,
+                "workspace_removed": False,
+            },
+        )
+        if as_json:
+            print(f"ERROR: {error.code}", file=sys.stderr)
+        else:
+            print(f"Deleted project {project.name}; evidence retained.")
+            print(f"{error.code}: {error.message}", file=sys.stderr)
+        print(f"worktree directory not removed: {workspace}: {cleanup_error}", file=sys.stderr)
+        if as_json:
+            write_response("project.delete", error=error, schema_version=schema_version)
+        return error_exit_code(error.code)
+    if as_json:
+        write_response("project.delete", data=data, schema_version=schema_version)
+    else:
+        print(f"Deleted project {project.name}; evidence and repository retained.")
+    return 0
+
+
 def _evidence_failure(
     command: str,
     exc: EvidenceError,
@@ -463,7 +966,7 @@ def cmd_task_evidence_list(
     try:
         data = evidence_list(config, args.task_id, schema_version=args.schema_version)
     except EvidenceError as exc:
-        return _evidence_failure(EVIDENCE_LIST_COMMAND, exc, as_json)
+        return _evidence_failure(EVIDENCE_LIST_COMMAND, exc, as_json, schema_version)
     if as_json:
         write_response(EVIDENCE_LIST_COMMAND, data=data, schema_version=schema_version)
         return 0
@@ -487,7 +990,7 @@ def cmd_task_evidence_show(
             config, args.task_id, args.artifact_id, schema_version=args.schema_version
         )
     except EvidenceError as exc:
-        return _evidence_failure(EVIDENCE_SHOW_COMMAND, exc, as_json)
+        return _evidence_failure(EVIDENCE_SHOW_COMMAND, exc, as_json, schema_version)
     if as_json:
         write_response(EVIDENCE_SHOW_COMMAND, data=data, schema_version=schema_version)
         return 0
@@ -561,10 +1064,37 @@ def _requested_command(argv: list[str]) -> str:
     return words[0]
 
 
-def _write_cli_error(command: str, code: str, message: str, details: dict | None = None) -> None:
+def _requested_schema_version(argv: list[str]) -> str:
+    """Best-effort recovery of a supported requested schema version from raw arguments.
+
+    Used only for error envelopes emitted before parsing succeeds; an absent, malformed, or
+    unsupported value falls back to the default, and the dedicated UNSUPPORTED_SCHEMA path keeps
+    its own pinned contract.
+    """
+    tokens = list(argv)
+    requested = None
+    for index, token in enumerate(tokens):
+        if token == "--schema-version" and index + 1 < len(tokens):
+            requested = tokens[index + 1]
+        elif token.startswith("--schema-version="):
+            requested = token.split("=", 1)[1]
+    try:
+        return resolve_schema_version(requested)
+    except UnsupportedSchemaVersion:
+        return DEFAULT_SCHEMA_VERSION
+
+
+def _write_cli_error(
+    command: str,
+    code: str,
+    message: str,
+    details: dict | None = None,
+    schema_version: str = DEFAULT_SCHEMA_VERSION,
+) -> None:
     write_response(
         command,
         error=StructuredError(code=code, message=message, details=details or {}),
+        schema_version=schema_version,
     )
 
 
@@ -581,6 +1111,7 @@ def main(argv: list[str] | None = None) -> int:
                 _requested_command(raw_argv),
                 "INVALID_ARGUMENT",
                 "Command arguments were invalid.",
+                schema_version=_requested_schema_version(raw_argv),
             )
         else:
             parser.print_usage(sys.stderr)
@@ -615,6 +1146,7 @@ def main(argv: list[str] | None = None) -> int:
                 _requested_command(raw_argv),
                 "CONFIG_ERROR",
                 "Forge configuration could not be loaded.",
+                schema_version=schema_version,
             )
             return 2
         return load_or_exit(args.config)
@@ -627,6 +1159,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "project":
             if args.project_command == "add":
                 return cmd_project_add(config, args)
+            if args.project_command == "delete":
+                return cmd_project_delete(config, args, schema_version)
             return cmd_project_list(config, args.json, schema_version)
         if args.command == "task":
             if args.task_command == "add":
@@ -635,6 +1169,8 @@ def main(argv: list[str] | None = None) -> int:
                 return cmd_task_list(config, args, schema_version)
             if args.task_command == "show":
                 return cmd_task_show(config, args.task_id, args.json, schema_version)
+            if args.task_command == "delete":
+                return cmd_task_delete(config, args, schema_version)
             if args.task_command == "evidence":
                 if args.evidence_command == "list":
                     return cmd_task_evidence_list(config, args, schema_version)
@@ -664,6 +1200,7 @@ def main(argv: list[str] | None = None) -> int:
                 _requested_command(raw_argv),
                 "COMMAND_FAILED",
                 "The command could not be completed.",
+                schema_version=schema_version,
             )
             return 1
         raise

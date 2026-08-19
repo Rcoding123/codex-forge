@@ -86,6 +86,16 @@ CREATE TABLE IF NOT EXISTS runs (
 """
 
 
+# The states in which a live or interrupted worker owns the task. Deletion and restart recovery
+# must agree on this set: a task in one of these states is never the CLI's to remove.
+ACTIVE_TASK_STATES: tuple[TaskState, ...] = (
+    TaskState.IMPLEMENTING,
+    TaskState.VALIDATING,
+    TaskState.REVIEWING,
+    TaskState.REPAIRING,
+)
+
+
 class ForgeDB:
     def __init__(self, path: Path):
         self.path = path
@@ -130,9 +140,20 @@ class ForgeDB:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
     def add_project(self, project: Project) -> None:
-        now = utc_now()
         with self.connect() as connection:
-            connection.execute(
+            self._upsert_project(connection, project)
+
+    def add_project_guarded(self, project: Project, guard) -> None:
+        """Register under one immediate transaction after the caller's guard approves."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            guard(connection)
+            self._upsert_project(connection, project)
+
+    @staticmethod
+    def _upsert_project(connection: sqlite3.Connection, project: Project) -> None:
+        now = utc_now()
+        connection.execute(
                 """
                 INSERT INTO projects(id,name,repo_path,default_branch,validation_json,auto_fetch,auto_commit,auto_push,created_at,updated_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?)
@@ -161,10 +182,16 @@ class ForgeDB:
             )
 
     def get_project(self, identifier: str) -> Project | None:
+        # Deterministic resolution: an exact id match always wins over a name match, so an
+        # identifier that collides across projects can never select an arbitrary row.
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM projects WHERE id=? OR name=?", (identifier, identifier)
+                "SELECT * FROM projects WHERE id=?", (identifier,)
             ).fetchone()
+            if row is None:
+                row = connection.execute(
+                    "SELECT * FROM projects WHERE name=?", (identifier,)
+                ).fetchone()
         return self._project_from_row(row) if row else None
 
     def list_projects(self) -> list[Project]:
@@ -172,10 +199,61 @@ class ForgeDB:
             rows = connection.execute("SELECT * FROM projects ORDER BY name").fetchall()
         return [self._project_from_row(row) for row in rows]
 
-    def add_task(self, task: Task) -> None:
-        now = utc_now()
+    def delete_project(self, identifier: str) -> tuple[str, Project | None, int]:
+        """Atomically delete one project that owns no tasks.
+
+        Returns ``("deleted", project, 0)``, ``("not_found", None, 0)``,
+        ``("has_tasks", project, task_count)``, or ``("ambiguous", None, 0)`` when the identifier
+        names one project's id and a different project's name — a destructive command never
+        guesses. The emptiness check and the deletion share one immediate transaction, and the
+        tasks->projects foreign key backstops the refusal. Nothing on disk is touched here.
+        """
         with self.connect() as connection:
-            connection.execute(
+            connection.execute("BEGIN IMMEDIATE")
+            by_id = connection.execute(
+                "SELECT * FROM projects WHERE id=?", (identifier,)
+            ).fetchone()
+            by_name = connection.execute(
+                "SELECT * FROM projects WHERE name=?", (identifier,)
+            ).fetchone()
+            if by_id is not None and by_name is not None and by_id["id"] != by_name["id"]:
+                connection.rollback()
+                return ("ambiguous", None, 0)
+            row = by_id if by_id is not None else by_name
+            if row is None:
+                connection.rollback()
+                return ("not_found", None, 0)
+            project = self._project_from_row(row)
+            count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM tasks WHERE project_id=?", (project.id,)
+                ).fetchone()[0]
+            )
+            if count:
+                connection.rollback()
+                return ("has_tasks", project, count)
+            connection.execute("DELETE FROM projects WHERE id=?", (project.id,))
+        return ("deleted", project, 0)
+
+    def add_task(self, task: Task) -> None:
+        with self.connect() as connection:
+            self._insert_task(connection, task)
+
+    def add_task_guarded(self, task: Task, guard) -> None:
+        """Insert under one immediate transaction after the caller's guard approves.
+
+        The guard runs with the write lock held and may raise to refuse the insert; a refusal
+        rolls the transaction back. This is what makes an alias check atomic with its insert.
+        """
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            guard(connection)
+            self._insert_task(connection, task)
+
+    @staticmethod
+    def _insert_task(connection: sqlite3.Connection, task: Task) -> None:
+        now = utc_now()
+        connection.execute(
                 """
                 INSERT INTO tasks(
                     id,project_id,title,objective,acceptance_json,validation_json,state,priority,risk,
@@ -308,6 +386,39 @@ class ForgeDB:
         with self.connect() as connection:
             connection.execute(f"UPDATE tasks SET {', '.join(fields)} WHERE id=?", values)
 
+    def delete_task(self, task_id: str) -> tuple[str, Task | None]:
+        """Atomically delete one non-running task and every row it owns.
+
+        Returns ``("deleted", task)`` with the pre-deletion snapshot, ``("not_found", None)`` when
+        no such row exists, or ``("active", task)`` when a worker owns the task. The state check
+        and the child-first deletion run inside one immediate transaction, so the daemon's claim
+        (``claim_ready_tasks``, also immediate) can never interleave: whichever transaction wins
+        the write lock decides, and the loser observes the durable outcome. Evidence on disk is
+        never touched here.
+        """
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None:
+                connection.rollback()
+                return ("not_found", None)
+            task = self._task_from_row(row)
+            if task.state in ACTIVE_TASK_STATES:
+                connection.rollback()
+                return ("active", task)
+            connection.execute("DELETE FROM decisions WHERE task_id=?", (task_id,))
+            connection.execute("DELETE FROM runs WHERE task_id=?", (task_id,))
+            placeholders = ",".join("?" for _ in ACTIVE_TASK_STATES)
+            cursor = connection.execute(
+                f"DELETE FROM tasks WHERE id=? AND state NOT IN ({placeholders})",
+                (task_id, *(state.value for state in ACTIVE_TASK_STATES)),
+            )
+            if cursor.rowcount != 1:
+                # Unreachable while the immediate transaction holds the write lock; failing loudly
+                # beats committing a child-row deletion for a task that was not deleted.
+                raise sqlite3.OperationalError(f"task {task_id} changed state during deletion")
+        return ("deleted", task)
+
     def add_decision(
         self,
         task_id: str,
@@ -382,15 +493,7 @@ class ForgeDB:
         }
 
     def recover_interrupted_tasks(self) -> list[dict[str, str]]:
-        active_states = tuple(
-            state.value
-            for state in (
-                TaskState.IMPLEMENTING,
-                TaskState.VALIDATING,
-                TaskState.REVIEWING,
-                TaskState.REPAIRING,
-            )
-        )
+        active_states = tuple(state.value for state in ACTIVE_TASK_STATES)
         placeholders = ",".join("?" for _ in active_states)
         recovered: list[dict[str, str]] = []
         with self.connect() as connection:
