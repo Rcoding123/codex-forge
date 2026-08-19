@@ -1,0 +1,1 @@
+python -m ruff check . && python -m compileall -q src tests
