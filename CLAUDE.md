@@ -6,6 +6,8 @@ repository. Read it before any repository work. If instructions conflict,
 
 - Code, schemas, and tests outrank all descriptive documentation.
 - Deeper design: `docs/ARCHITECTURE.md` and `docs/CONTROL-PLANE-API.md`.
+- Durable engineering lessons: `docs/ENGINEERING_LESSONS.md`. Read it before
+  architecture or implementation work; `AGENTS.md` carries the read order.
 
 Canonical completion gates:
 

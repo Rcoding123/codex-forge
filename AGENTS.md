@@ -9,10 +9,21 @@ being controlled by it.
 1. Code, schemas, tests — executable truth; documentation loses.
 2. `AGENTS.md` (this file).
 3. `docs/ARCHITECTURE.md`, `docs/CONTROL-PLANE-API.md`.
-4. `CONTRIBUTING.md`, `README.md`.
-5. Other planning/descriptive docs.
+4. `docs/ENGINEERING_LESSONS.md` — durable engineering lessons.
+5. `CONTRIBUTING.md`, `README.md`.
+6. Other planning/descriptive docs.
 
 Descriptive documents never override executable truth.
+
+## Read order for architecture or implementation work
+
+1. `AGENTS.md` — this repository's engineering law.
+2. `docs/ARCHITECTURE.md` and the relevant `docs/CONTROL-PLANE-API.md` section.
+3. `docs/ENGINEERING_LESSONS.md` — do not repeat a failure it already records.
+4. The owning code, schemas and tests — executable truth.
+
+The lessons file is not a changelog and does not restate the contracts; it
+records why they are shaped the way they are. It never overrides this file.
 
 ## Ownership
 
