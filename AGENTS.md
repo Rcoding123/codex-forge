@@ -25,6 +25,24 @@ Descriptive documents never override executable truth.
 The lessons file is not a changelog and does not restate the contracts; it
 records why they are shaped the way they are. It never overrides this file.
 
+### Session startup and rereads
+
+`docs/AGENT_CONTEXT.md` is a navigation index — a map from subsystems to their
+owning files, plus headline invariants. It carries no authority and never
+overrides this file, the architecture/API docs, or the lessons; where they
+disagree, they win.
+
+- New working session: read `docs/AGENT_CONTEXT.md`, then the read order
+  above as the task requires.
+- Subsequent tasks in the same session: do not reread the large authority
+  documents in full if they were already read this session and have not
+  changed. Consult `docs/AGENT_CONTEXT.md` and open only the task-relevant
+  sections and files. Code, schemas and tests remain executable truth.
+- For broad navigation or reachability work, prefer a researcher/explorer
+  subagent that returns exact files and functions to the primary coding
+  agent, instead of loading large unrelated modules into the primary context.
+  Small tasks do not require delegation.
+
 ## Ownership
 
 - Forge owns task truth, execution, review, repair, validation, and evidence.
