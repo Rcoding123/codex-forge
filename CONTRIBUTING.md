@@ -17,13 +17,30 @@ If an environment already exists:
 
 ## Required checks
 
+The canonical completion gates from [AGENTS.md](AGENTS.md), run in full before requesting review:
+
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
 .\.venv\Scripts\python.exe -m ruff check .
 .\.venv\Scripts\python.exe -m compileall -q src tests
+git diff --check
 ```
 
+`pytest` includes release manifest integrity via `tests/test_manifest.py`, so a tracked-file change that has not been followed by [manifest regeneration](#release-manifest) fails the suite.
+
 Use `rtk proxy pytest ...` rather than compressed RTK pytest output until the documented RTK 0.44.2 issue is revalidated after an upgrade.
+
+## Release manifest
+
+`MANIFEST.sha256` is generated, never hand-edited. After changing, adding or removing any tracked file, regenerate it and stage the result:
+
+```powershell
+git add <the files you changed>
+powershell -File scripts/update-manifest.ps1
+git add MANIFEST.sha256
+```
+
+The manifest covers **tracked files only**, so stage a new file before regenerating or it will be absent — this is what keeps unstaged scratch state out of a release manifest. The script writes LF and is deterministic: rerunning it with no source change leaves the file untouched, timestamp included.
 
 ## Change rules
 
@@ -41,4 +58,4 @@ Use `rtk proxy pytest ...` rather than compressed RTK pytest output until the do
 
 Use focused commits with an imperative summary. Describe the demonstrated problem, the invariant being restored, validation performed, and any migration or operational impact. Avoid generated artifacts and machine-specific paths. Security-sensitive changes should follow [SECURITY.md](SECURITY.md).
 
-Before requesting review, verify the release manifest if tracked files changed and confirm `git status --ignored --short` contains only expected local state.
+Before requesting review, regenerate the release manifest if tracked files changed and confirm `git status --ignored --short` contains only expected local state.
