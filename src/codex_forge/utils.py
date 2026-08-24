@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 from contextlib import contextmanager
@@ -29,6 +30,18 @@ def slugify(value: str, max_length: int = 64) -> str:
 def stable_id(prefix: str, value: str, length: int = 10) -> str:
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]
     return f"{prefix}-{digest}"
+
+
+def new_repository_registration_id() -> str:
+    """Mint one Forge-owned opaque repository-registration identity.
+
+    Deliberately minted rather than derived. A value derived from the project name would be
+    reproduced exactly by delete-then-recreate, which is a new registration of a repository
+    that may not be the old one; a value derived from the repository path would change when
+    the same registration is relocated. Neither is an identity. This is minted once, persisted,
+    and never recomputed -- unlike `stable_id`, which exists to be recomputed.
+    """
+    return f"repo-reg-{secrets.token_hex(16)}"
 
 
 WINDOWS_RESERVED_DEVICE_NAMES = frozenset(

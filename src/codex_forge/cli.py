@@ -22,7 +22,12 @@ from .control_plane import (
     unsupported_schema_error,
     write_response,
 )
-from .db import ACTIVE_TASK_STATES, ForgeDB
+from .db import (
+    ACTIVE_TASK_STATES,
+    ForgeDB,
+    ProjectAlreadyRegistered,
+    RepositoryAlreadyRegistered,
+)
 from .evidence import (
     EVIDENCE_LIST_COMMAND,
     EVIDENCE_SHOW_COMMAND,
@@ -126,6 +131,23 @@ def build_parser() -> argparse.ArgumentParser:
     project_add.add_argument("--no-fetch", action="store_true")
     project_add.add_argument("--no-commit", action="store_true")
     project_add.add_argument("--push", action="store_true")
+    project_relocate = project_sub.add_parser(
+        "relocate",
+        help="Point an existing project registration at a different local repository path",
+        description=(
+            "Move one registration to a different local path for the same repository. The operator "
+            "asserts that it is the same repository; Forge verifies only that the target is a Git "
+            "working tree that no other registration claims, and refuses while a task of this "
+            "project is active. The repository registration identity, the project id, the name and "
+            "the default branch are all preserved. Binding a project to a different repository is "
+            "not a relocation: delete the project and register it again, which mints a new "
+            "repository registration identity."
+        ),
+    )
+    project_relocate.add_argument("project", help="Project id or exact name")
+    project_relocate.add_argument("--repo", required=True, help="New repository path")
+    _add_schema_version_argument(project_relocate)
+    project_relocate.add_argument("--json", action="store_true")
     project_delete = project_sub.add_parser(
         "delete",
         help="Delete a project that has no tasks; evidence and repositories are retained",
@@ -307,10 +329,26 @@ def cmd_project_add(config: ForgeConfig, args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    registered = db.list_projects()
+    # Registration creates; it never replaces one. A second `project add` for a project that is
+    # already registered would otherwise silently overwrite its repository path, its default branch
+    # and its policies, which is exactly the replacement the registration identity exists to stop.
+    # Checked before any clone so a refused registration never leaves a repository behind.
+    identity = stable_id("project", args.name)
+    occupied = next(
+        (
+            existing
+            for existing in registered
+            if existing.name == args.name or existing.id == identity
+        ),
+        None,
+    )
+    if occupied is not None:
+        return _project_exists_refusal(occupied)
     variant = next(
         (
             existing
-            for existing in db.list_projects()
+            for existing in registered
             if existing.name != args.name
             and windows_alias_key(existing.name) == windows_alias_key(args.name)
         ),
@@ -348,7 +386,7 @@ def cmd_project_add(config: ForgeConfig, args: argparse.Namespace) -> int:
                 raise _ProjectNameCollision(row["name"])
 
     try:
-        db.add_project_guarded(project, _name_guard)
+        project = db.add_project_guarded(project, _name_guard)
     except _ProjectNameCollision as exc:
         print(
             f"INVALID_ARGUMENT: project name {project.name!r} differs only by case from "
@@ -356,7 +394,150 @@ def cmd_project_add(config: ForgeConfig, args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    except ProjectAlreadyRegistered as exc:
+        # The pre-check above already refused the ordinary case; this closes the window between it
+        # and the insert, under the same transaction that performs the insert.
+        return _project_exists_refusal(exc.existing)
+    except RepositoryAlreadyRegistered as exc:
+        return _structured_failure(
+            "project.add",
+            StructuredError(
+                code="REPOSITORY_ALREADY_REGISTERED",
+                message=(
+                    "That repository path is already registered to another project; one "
+                    "repository path is one registration."
+                ),
+                details={"registered_to": _project_detail_name(exc.existing)},
+            ),
+            False,
+        )
     print(f"Registered project {project.name}: {project.repo_path}")
+    print(f"Repository registration id: {project.repository_registration_id}")
+    return 0
+
+
+def _project_exists_refusal(existing: Project) -> int:
+    """Refuse a registration that would replace an existing one, naming what already holds it."""
+    return _structured_failure(
+        "project.add",
+        StructuredError(
+            code="PROJECT_EXISTS",
+            message=(
+                "That project is already registered; registration never replaces a repository, a "
+                "default branch or a policy. Use `project relocate` to move the same repository "
+                "registration to a new path, or delete the project and register it again, which "
+                "mints a new repository registration identity."
+            ),
+            details={"project": _project_detail_name(existing)},
+        ),
+        False,
+    )
+
+
+def cmd_project_relocate(
+    config: ForgeConfig, args: argparse.Namespace, schema_version: str = DEFAULT_SCHEMA_VERSION
+) -> int:
+    """Move one registration to a new local path for the same repository, keeping its identity.
+
+    The target is verified to be a Git working tree before the registry is touched, so a bad path
+    cannot leave a registration pointing at something that is not a repository. Forge does not try
+    to prove that it is the same repository -- no local repository identity survives every
+    legitimate relocation, and a repository without a remote has none to compare -- so relocation
+    is the operator's explicit assertion, and the immutable registration identity, not an inferred
+    fingerprint, stays the authority.
+    """
+    as_json = getattr(args, "json", False)
+    db = ForgeDB(config.database_path)
+    db.initialize()
+    repo_path = Path(args.repo).expanduser().resolve()
+    try:
+        verify_repository(repo_path)
+    except GitError:
+        return _structured_failure(
+            "project.relocate",
+            StructuredError(
+                code="INVALID_ARGUMENT",
+                message="The relocation target is not an existing Git working tree.",
+                details={"project": args.project},
+            ),
+            as_json,
+            schema_version,
+        )
+    relocation = db.relocate_project(args.project, repo_path)
+    if relocation.outcome == "not_found":
+        return _structured_failure(
+            "project.relocate",
+            StructuredError(
+                code="PROJECT_NOT_FOUND",
+                message="Project was not found.",
+                details={"project": args.project},
+            ),
+            as_json,
+            schema_version,
+        )
+    if relocation.outcome == "ambiguous":
+        return _structured_failure(
+            "project.relocate",
+            StructuredError(
+                code="PROJECT_AMBIGUOUS",
+                message=(
+                    "The identifier names one project's id and a different project's name; "
+                    "relocation refuses to guess."
+                ),
+                details={"identifier": args.project},
+            ),
+            as_json,
+            schema_version,
+        )
+    if relocation.outcome == "path_claimed":
+        return _structured_failure(
+            "project.relocate",
+            StructuredError(
+                code="REPOSITORY_ALREADY_REGISTERED",
+                message=(
+                    "That repository path is already registered to another project; one "
+                    "repository path is one registration."
+                ),
+                details={
+                    "project": _project_detail_name(relocation.project),
+                    "registered_to": _project_detail_name(relocation.conflict),
+                },
+            ),
+            as_json,
+            schema_version,
+        )
+    if relocation.outcome == "active_tasks":
+        return _structured_failure(
+            "project.relocate",
+            StructuredError(
+                code="TASK_ACTIVE",
+                message=(
+                    "A task of this project is being executed; the repository underneath a live "
+                    "execution is not relocatable."
+                ),
+                details={
+                    "project": _project_detail_name(relocation.project),
+                    "active_tasks": relocation.active_tasks,
+                },
+            ),
+            as_json,
+            schema_version,
+        )
+    project = relocation.project
+    relocated = relocation.outcome == "relocated"
+    if as_json:
+        write_response(
+            "project.relocate",
+            data={
+                "relocated": relocated,
+                "project": project_to_public(project, schema_version),
+            },
+            schema_version=schema_version,
+        )
+    elif relocated:
+        print(f"Relocated project {project.name} to {project.repo_path}")
+    else:
+        print(f"Project {project.name} is already registered at {project.repo_path}")
     return 0
 
 
@@ -368,7 +549,11 @@ def cmd_project_list(
     if as_json:
         write_response(
             "project.list",
-            data={"projects": [project_to_public(project) for project in projects]},
+            data={
+                "projects": [
+                    project_to_public(project, schema_version) for project in projects
+                ]
+            },
             schema_version=schema_version,
         )
         return 0
@@ -1159,6 +1344,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "project":
             if args.project_command == "add":
                 return cmd_project_add(config, args)
+            if args.project_command == "relocate":
+                return cmd_project_relocate(config, args, schema_version)
             if args.project_command == "delete":
                 return cmd_project_delete(config, args, schema_version)
             return cmd_project_list(config, args.json, schema_version)

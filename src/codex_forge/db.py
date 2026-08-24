@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterator
 
 from .models import Project, Task, TaskState
 from .usage import aggregate_token_usage
-from .utils import json_dumps, json_loads, utc_now
+from .utils import json_dumps, json_loads, new_repository_registration_id, utc_now
 
 
 SCHEMA = """
@@ -23,6 +24,7 @@ CREATE TABLE IF NOT EXISTS projects (
     auto_fetch INTEGER NOT NULL DEFAULT 1,
     auto_commit INTEGER NOT NULL DEFAULT 1,
     auto_push INTEGER NOT NULL DEFAULT 0,
+    repository_registration_id TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -96,6 +98,49 @@ ACTIVE_TASK_STATES: tuple[TaskState, ...] = (
 )
 
 
+class ProjectAlreadyRegistered(RuntimeError):
+    """A project id or name is already registered.
+
+    Registration creates; it never replaces a registration. Re-registering an existing project is
+    refused so that its repository path, default branch and policies cannot be silently replaced.
+    """
+
+    def __init__(self, existing: Project):
+        super().__init__(f"Project is already registered: {existing.id}")
+        self.existing = existing
+
+
+class RepositoryAlreadyRegistered(RuntimeError):
+    """The requested repository path is already claimed by a different registration."""
+
+    def __init__(self, existing: Project):
+        super().__init__(f"Repository path is already registered to {existing.id}")
+        self.existing = existing
+
+
+# A project row whose registration identity has not been established yet: either it predates the
+# column, or it was added by a migration that has not reached that row. `NOT NULL DEFAULT ''` is why
+# both forms have to be named -- `ALTER TABLE ... ADD COLUMN` gives existing rows the default.
+_REGISTRATION_UNSET = (
+    "(repository_registration_id IS NULL OR repository_registration_id='')"
+)
+_UNSETTLED_REGISTRATION_COUNT = f"SELECT COUNT(*) FROM projects WHERE {_REGISTRATION_UNSET}"
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectRelocation:
+    """The durable outcome of one explicit relocation request.
+
+    `outcome` is one of `relocated`, `unchanged`, `not_found`, `ambiguous`, `path_claimed` or
+    `active_tasks`. Only `relocated` and `unchanged` carry a registration the caller may report.
+    """
+
+    outcome: str
+    project: Project | None = None
+    active_tasks: int = 0
+    conflict: Project | None = None
+
+
 class ForgeDB:
     def __init__(self, path: Path):
         self.path = path
@@ -130,6 +175,7 @@ class ForgeDB:
                 connection, "tasks", "out_of_scope", "TEXT NOT NULL DEFAULT ''"
             )
             self._add_column_if_missing(connection, "runs", "effort", "TEXT NOT NULL DEFAULT 'medium'")
+            self._establish_repository_registration(connection)
 
     @staticmethod
     def _add_column_if_missing(
@@ -139,47 +185,135 @@ class ForgeDB:
         if column not in columns:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
-    def add_project(self, project: Project) -> None:
-        with self.connect() as connection:
-            self._upsert_project(connection, project)
+    @staticmethod
+    def _establish_repository_registration(connection: sqlite3.Connection) -> None:
+        """Add, backfill and index the registration column exactly once, under one write lock.
 
-    def add_project_guarded(self, project: Project, guard) -> None:
+        `BEGIN IMMEDIATE` takes the database's write lock before the column is even inspected and
+        holds it through the column addition, the backfill, the verification and the unique index,
+        so this is one atomic unit for every concurrent initializer. Without it two Forge processes
+        opening one legacy database each read the same unset row before either writes, both mint,
+        and the second write replaces an identity the first had already made durable and a consumer
+        may already hold -- a lost update that rotates an identity that is required to be immutable
+        for the life of the registration. Serializing the writes alone would not have fixed it: the
+        losing initializer had already decided to write, so it would still overwrite the winner
+        once it acquired the lock. The read and the write have to be inside the same write
+        transaction, which is what this takes. The same lock removes the second race in this
+        migration, where two initializers both passed the `PRAGMA table_info` check and the loser's
+        `ALTER TABLE` failed with `duplicate column name`.
+
+        A second initializer blocks here until the first commits, and then finds the column
+        present, no row unset and the index built, so it does nothing.
+        """
+        connection.execute("BEGIN IMMEDIATE")
+        ForgeDB._add_column_if_missing(
+            connection, "projects", "repository_registration_id", "TEXT NOT NULL DEFAULT ''"
+        )
+        ForgeDB._mint_missing_registration_ids(connection)
+        unsettled = connection.execute(_UNSETTLED_REGISTRATION_COUNT).fetchone()[0]
+        if unsettled:
+            # The index is the durable statement that one registration has one identity. Building
+            # it over rows that still share the column default would either fail or, worse, appear
+            # to succeed on a single row; refuse loudly instead of leaving a half-migrated database.
+            raise RuntimeError(
+                f"{unsettled} project rows still have no repository registration identity"
+            )
+        # Created after the backfill, never in SCHEMA: on an upgraded database every pre-existing
+        # row carries the column default until it is minted, and a unique index over those
+        # identical values could not be built.
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_repository_registration "
+            "ON projects(repository_registration_id)"
+        )
+
+    @staticmethod
+    def _mint_missing_registration_ids(connection: sqlite3.Connection) -> None:
+        """Give every project row that predates the column one persisted registration identity.
+
+        Additive backfill, not derivation: each row receives its own freshly minted value, so a
+        second run finds nothing to fill and cannot rotate an identity that already exists. Nothing
+        else on the row is touched -- `id`, `name`, `repo_path`, `default_branch` and `updated_at`
+        all stay exactly as they were, and every task, run and evidence record keeps naming the
+        same project.
+
+        Every write is a compare-and-set that applies only while the row is still unset, so the
+        first durable assignment wins permanently: a writer that finds the identity already
+        established writes nothing and thereby accepts the durable value. The caller holds the
+        write lock, which makes that the whole guarantee rather than half of one; the predicate
+        states the law in the statement itself so no future caller can reach this and rotate an
+        identity by reading it a moment too early.
+        """
+        rows = connection.execute(
+            f"SELECT id FROM projects WHERE {_REGISTRATION_UNSET}"
+        ).fetchall()
+        for row in rows:
+            connection.execute(
+                "UPDATE projects SET repository_registration_id=? "
+                f"WHERE id=? AND {_REGISTRATION_UNSET}",
+                (new_repository_registration_id(), row["id"]),
+            )
+
+    def add_project(self, project: Project) -> Project:
+        """Register one new project and return it carrying its minted registration identity."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            registered = self._insert_project(connection, project)
+        return registered
+
+    def add_project_guarded(self, project: Project, guard) -> Project:
         """Register under one immediate transaction after the caller's guard approves."""
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             guard(connection)
-            self._upsert_project(connection, project)
+            registered = self._insert_project(connection, project)
+        return registered
 
     @staticmethod
-    def _upsert_project(connection: sqlite3.Connection, project: Project) -> None:
+    def _insert_project(connection: sqlite3.Connection, project: Project) -> Project:
+        """Create one registration. It never updates an existing one.
+
+        The repository path, the default branch and the policy settings of a registration that
+        already exists are never written here: a second registration of the same project is a
+        refusal, not a silent replacement. `repository_registration_id` is minted here, by Forge,
+        and whatever the caller's `Project` carried in that field is ignored.
+        """
+        existing = connection.execute(
+            "SELECT * FROM projects WHERE id=? OR name=?", (project.id, project.name)
+        ).fetchone()
+        if existing is not None:
+            raise ProjectAlreadyRegistered(ForgeDB._project_from_row(existing))
+        claimed = connection.execute(
+            "SELECT * FROM projects WHERE repo_path=?", (str(project.repo_path),)
+        ).fetchone()
+        if claimed is not None:
+            raise RepositoryAlreadyRegistered(ForgeDB._project_from_row(claimed))
         now = utc_now()
+        registration_id = new_repository_registration_id()
         connection.execute(
-                """
-                INSERT INTO projects(id,name,repo_path,default_branch,validation_json,auto_fetch,auto_commit,auto_push,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(id) DO UPDATE SET
-                    name=excluded.name,
-                    repo_path=excluded.repo_path,
-                    default_branch=excluded.default_branch,
-                    validation_json=excluded.validation_json,
-                    auto_fetch=excluded.auto_fetch,
-                    auto_commit=excluded.auto_commit,
-                    auto_push=excluded.auto_push,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    project.id,
-                    project.name,
-                    str(project.repo_path),
-                    project.default_branch,
-                    json_dumps(project.validation_commands),
-                    int(project.auto_fetch),
-                    int(project.auto_commit),
-                    int(project.auto_push),
-                    now,
-                    now,
-                ),
-            )
+            """
+            INSERT INTO projects(id,name,repo_path,default_branch,validation_json,auto_fetch,auto_commit,auto_push,repository_registration_id,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                project.id,
+                project.name,
+                str(project.repo_path),
+                project.default_branch,
+                json_dumps(project.validation_commands),
+                int(project.auto_fetch),
+                int(project.auto_commit),
+                int(project.auto_push),
+                registration_id,
+                now,
+                now,
+            ),
+        )
+        return replace(
+            project,
+            repository_registration_id=registration_id,
+            created_at=now,
+            updated_at=now,
+        )
 
     def get_project(self, identifier: str) -> Project | None:
         # Deterministic resolution: an exact id match always wins over a name match, so an
@@ -234,6 +368,67 @@ class ForgeDB:
                 return ("has_tasks", project, count)
             connection.execute("DELETE FROM projects WHERE id=?", (project.id,))
         return ("deleted", project, 0)
+
+    def relocate_project(self, identifier: str, repo_path: Path) -> ProjectRelocation:
+        """Point one existing registration at a different local path, preserving its identity.
+
+        Relocation is the only operation that ever changes `repo_path` after registration, and it
+        changes nothing else. `id`, `name`, `default_branch`, the validation commands, the policy
+        settings and above all `repository_registration_id` are carried through unchanged, so every
+        task, run and evidence record keeps naming the same registration.
+
+        Relocation is the operator's explicit assertion that this is the same repository in a new
+        place; Forge does not infer repository sameness. It is refused while a worker owns a task
+        of this project, because the repository underneath a live execution is not the caller's to
+        move; it is refused when another registration already claims the path; and it mutates
+        nothing when the path is already the registered one. Resolution, refusal and update share
+        one immediate transaction.
+        """
+        target = str(repo_path)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            by_id = connection.execute(
+                "SELECT * FROM projects WHERE id=?", (identifier,)
+            ).fetchone()
+            by_name = connection.execute(
+                "SELECT * FROM projects WHERE name=?", (identifier,)
+            ).fetchone()
+            if by_id is not None and by_name is not None and by_id["id"] != by_name["id"]:
+                connection.rollback()
+                return ProjectRelocation("ambiguous")
+            row = by_id if by_id is not None else by_name
+            if row is None:
+                connection.rollback()
+                return ProjectRelocation("not_found")
+            project = self._project_from_row(row)
+            if str(project.repo_path) == target:
+                connection.rollback()
+                return ProjectRelocation("unchanged", project)
+            claimed = connection.execute(
+                "SELECT * FROM projects WHERE repo_path=? AND id<>?", (target, project.id)
+            ).fetchone()
+            if claimed is not None:
+                connection.rollback()
+                return ProjectRelocation(
+                    "path_claimed", project, conflict=self._project_from_row(claimed)
+                )
+            active = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM tasks WHERE project_id=? AND state IN (?,?,?,?)",
+                    (project.id, *(state.value for state in ACTIVE_TASK_STATES)),
+                ).fetchone()[0]
+            )
+            if active:
+                connection.rollback()
+                return ProjectRelocation("active_tasks", project, active_tasks=active)
+            connection.execute(
+                "UPDATE projects SET repo_path=?, updated_at=? WHERE id=?",
+                (target, utc_now(), project.id),
+            )
+            relocated = self._project_from_row(
+                connection.execute("SELECT * FROM projects WHERE id=?", (project.id,)).fetchone()
+            )
+        return ProjectRelocation("relocated", relocated)
 
     def add_task(self, task: Task) -> None:
         with self.connect() as connection:
@@ -529,6 +724,7 @@ class ForgeDB:
             auto_fetch=bool(row["auto_fetch"]),
             auto_commit=bool(row["auto_commit"]),
             auto_push=bool(row["auto_push"]),
+            repository_registration_id=row["repository_registration_id"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
