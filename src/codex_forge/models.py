@@ -29,6 +29,9 @@ class Project:
     auto_fetch: bool = True
     auto_commit: bool = True
     auto_push: bool = False
+    # Minted and owned by Forge, never supplied by a caller: `add_project` ignores whatever is
+    # here and persists its own value, and a read fills it in from the durable row.
+    repository_registration_id: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
 

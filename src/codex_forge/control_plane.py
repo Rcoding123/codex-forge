@@ -15,9 +15,17 @@ from .utils import json_loads
 # built against, so silently emitting a newer one would break it even though every added field is
 # additive. `1.1` is served only to a caller that asked for `1.1`.
 DEFAULT_SCHEMA_VERSION = "1.0"
-LATEST_SCHEMA_VERSION = "1.1"
-# Every version in major 1 a caller may request. A removal, rename, or meaning change needs major 2.
-SUPPORTED_SCHEMA_VERSIONS = ("1.0", "1.1")
+LATEST_SCHEMA_VERSION = "1.2"
+# Every version in major 1 a caller may request, oldest first. A removal, rename, or meaning change
+# needs major 2. The order is contractual: `_declares` reads it to decide whether a version is at or
+# after the one that first declared an additive field.
+SUPPORTED_SCHEMA_VERSIONS = ("1.0", "1.1", "1.2")
+
+# The contract version that first declares `repository_registration_id` on a project object. A
+# consumer built against 1.0 or 1.1 validated a project object that did not have it, so the field is
+# served only to a caller that asked for a version declaring it -- the same rule `token_usage`
+# follows. Forge mints and persists the identity for every project regardless of who asks for it.
+REPOSITORY_REGISTRATION_ID_SINCE = "1.2"
 
 # `token_usage` as schema 1.0 declares it. A 1.0 document that carried the 1.1 categories would
 # disagree with the version it announces, so the projection is by declared version, not by what
@@ -76,6 +84,11 @@ ERROR_EXIT_CODES: dict[str, int] = {
     "PROJECT_UNSAFE": 2,
     # The identifier names one project's id and a different project's name.
     "PROJECT_AMBIGUOUS": 2,
+    # A registration for this project id or name already exists. Registration creates; it never
+    # replaces the repository path, default branch or policies of an existing registration.
+    "PROJECT_EXISTS": 2,
+    # The requested repository path is already claimed by a different registration.
+    "REPOSITORY_ALREADY_REGISTERED": 2,
     # The durable deletion committed but a disposable filesystem cleanup did not complete.
     # `error.details.deleted` stays true; `data` is null on failure as everywhere else.
     "WORKTREE_CLEANUP_FAILED": 1,
@@ -119,6 +132,11 @@ def project_token_usage(token_usage: Mapping[str, Any], schema_version: str) -> 
     if schema_version == DEFAULT_SCHEMA_VERSION:
         return {field: token_usage.get(field, 0) for field in LEGACY_TOKEN_USAGE_FIELDS}
     return dict(token_usage)
+
+
+def _declares(schema_version: str, since: str) -> bool:
+    """True when `schema_version` is at or after the version that first declared a field."""
+    return SUPPORTED_SCHEMA_VERSIONS.index(schema_version) >= SUPPORTED_SCHEMA_VERSIONS.index(since)
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,9 +220,22 @@ def write_response(
     output.write(json.dumps(document, indent=2, ensure_ascii=False) + "\n")
 
 
-def project_to_public(project: Project) -> dict[str, Any]:
-    return {
+def project_to_public(
+    project: Project, schema_version: str = DEFAULT_SCHEMA_VERSION
+) -> dict[str, Any]:
+    """Return the project object the declared contract version defines.
+
+    `project_id` is derived from the project name and is stable across a delete and a re-register
+    of that name; `repository_registration_id` is the Forge-minted registration identity and is
+    not. A consumer that must know it is still bound to the repository registration it was bound to
+    binds to both.
+    """
+    document: dict[str, Any] = {
         "project_id": project.id,
+    }
+    if _declares(schema_version, REPOSITORY_REGISTRATION_ID_SINCE):
+        document["repository_registration_id"] = project.repository_registration_id
+    document |= {
         "name": project.name,
         "repository_path": str(project.repo_path),
         "default_branch": project.default_branch,
@@ -215,6 +246,7 @@ def project_to_public(project: Project) -> dict[str, Any]:
         "created_at": project.created_at,
         "updated_at": project.updated_at,
     }
+    return document
 
 
 def redact_secret_arguments(text: str) -> str:

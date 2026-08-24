@@ -393,7 +393,10 @@ def test_unsupported_schema_version_fails_closed(tmp_path: Path, capsys, command
     assert payload["schema_version"] == "1.0"
     assert payload["command"] == ".".join(command[:2] if len(command) > 1 else command)
     assert payload["error"]["code"] == "UNSUPPORTED_SCHEMA"
-    assert payload["error"]["details"] == {"requested": "2.0", "supported": ["1.0", "1.1"]}
+    assert payload["error"]["details"] == {
+        "requested": "2.0",
+        "supported": ["1.0", "1.1", "1.2"],
+    }
     assert "UNSUPPORTED_SCHEMA" in stderr
 
 
