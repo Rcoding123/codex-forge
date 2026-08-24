@@ -1532,10 +1532,10 @@ def test_unsupported_schema_version_is_rejected(tmp_path: Path, capsys):
 
     assert exit_code == 2
     assert payload["error"]["code"] == "UNSUPPORTED_SCHEMA"
-    assert payload["error"]["details"]["supported"] == ["1.0", "1.1", "1.2"]
+    assert payload["error"]["details"]["supported"] == ["1.0", "1.1", "1.2", "1.3"]
 
 
-@pytest.mark.parametrize("requested", ["1.0", "1.1", "1.2"])
+@pytest.mark.parametrize("requested", ["1.0", "1.1", "1.2", "1.3"])
 def test_requested_supported_schema_versions_are_accepted(tmp_path: Path, capsys, requested: str):
     """Each supported version is served, and the response declares the version that was asked for."""
     config, db = _configured(tmp_path)

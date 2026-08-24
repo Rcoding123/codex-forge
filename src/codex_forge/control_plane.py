@@ -15,17 +15,25 @@ from .utils import json_loads
 # built against, so silently emitting a newer one would break it even though every added field is
 # additive. `1.1` is served only to a caller that asked for `1.1`.
 DEFAULT_SCHEMA_VERSION = "1.0"
-LATEST_SCHEMA_VERSION = "1.2"
+LATEST_SCHEMA_VERSION = "1.3"
 # Every version in major 1 a caller may request, oldest first. A removal, rename, or meaning change
 # needs major 2. The order is contractual: `_declares` reads it to decide whether a version is at or
 # after the one that first declared an additive field.
-SUPPORTED_SCHEMA_VERSIONS = ("1.0", "1.1", "1.2")
+SUPPORTED_SCHEMA_VERSIONS = ("1.0", "1.1", "1.2", "1.3")
 
 # The contract version that first declares `repository_registration_id` on a project object. A
 # consumer built against 1.0 or 1.1 validated a project object that did not have it, so the field is
 # served only to a caller that asked for a version declaring it -- the same rule `token_usage`
 # follows. Forge mints and persists the identity for every project regardless of who asks for it.
 REPOSITORY_REGISTRATION_ID_SINCE = "1.2"
+
+# The contract version that first declares `admission_base_commit` on a task object, and the echoed
+# base on a submission's `normalized_request`. A consumer built against 1.0, 1.1 or 1.2 validated a
+# task object that did not carry it, so it is served only to a caller that asked for a version
+# declaring it. Forge persists the admission base for every task that has one regardless of who
+# asks. A task admitted without one reports `null` at 1.3, which is the honest answer and never an
+# invitation to infer a base from anything else.
+ADMISSION_BASE_COMMIT_SINCE = "1.3"
 
 # `token_usage` as schema 1.0 declares it. A 1.0 document that carried the 1.1 categories would
 # disagree with the version it announces, so the projection is by declared version, not by what
@@ -93,6 +101,16 @@ ERROR_EXIT_CODES: dict[str, int] = {
     # `error.details.deleted` stays true; `data` is null on failure as everywhere else.
     "WORKTREE_CLEANUP_FAILED": 1,
     "PROJECT_CLEANUP_FAILED": 1,
+    # The requested admission base is not a canonical commit object id in the project's registered
+    # repository: a branch, a tag, an abbreviation, a revision expression, a non-commit object, or
+    # a commit the repository does not have.
+    "INVALID_BASE_COMMIT": 2,
+    # The task id already names a durable task admitted from a different base -- or from none.
+    # Admission provenance is immutable, so the existing task is left exactly as it was.
+    "TASK_BASE_MISMATCH": 2,
+    # The project's registered repository could not be read, so no admission base can be proven
+    # against it. A repository fault, not a statement about the requested commit.
+    "REPOSITORY_UNAVAILABLE": 1,
 }
 
 
@@ -279,6 +297,15 @@ def _safe_task_error(last_error: str | None) -> tuple[str | None, str | None]:
             "The independent review could not run because its command runner was unavailable. "
             "This is an environment fault, not a finding about the task's code."
         ),
+        "REPOSITORY_UNAVAILABLE": (
+            "The task's registered repository could not supply its exact admission history "
+            "through a safe task checkout. This is a repository fault, not a finding about the "
+            "task's code."
+        ),
+        "CANDIDATE_STATE_UNAVAILABLE": (
+            "The task's final checkout was not represented by one clean commit descended from "
+            "its admission base. This is a candidate-provenance fault, not a review finding."
+        ),
     }
     for code, message in known_errors.items():
         if last_error.startswith(code):
@@ -297,7 +324,7 @@ def task_to_public(
 ) -> dict[str, Any]:
     error_code, error_message = _safe_task_error(task.last_error)
     completed_at = task.result.get("completed_at")
-    return {
+    document: dict[str, Any] = {
         "task_id": task.id,
         "project": project_name,
         "project_id": task.project_id,
@@ -320,6 +347,9 @@ def task_to_public(
         "started_at": runtime.get("started_at"),
         "completed_at": completed_at if isinstance(completed_at, str) else None,
     }
+    if _declares(schema_version, ADMISSION_BASE_COMMIT_SINCE):
+        document["admission_base_commit"] = task.admission_base_commit
+    return document
 
 
 def decision_to_public(row: Mapping[str, Any]) -> dict[str, Any]:

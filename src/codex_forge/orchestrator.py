@@ -9,7 +9,18 @@ from pathlib import Path
 
 from .config import ForgeConfig
 from .db import ForgeDB
-from .gitops import changed_files_between, commit_task, current_commit, prepare_worktree, write_patch
+from .gitops import (
+    BaseCommitUnavailable,
+    CandidateStateUnavailable,
+    GitError,
+    WorktreeUnavailable,
+    changed_files_between,
+    commit_task,
+    current_commit,
+    explicit_candidate_commit,
+    prepare_worktree,
+    write_patch,
+)
 from .knowledge import KnowledgeStore
 from .models import CodexRunResult, Project, Task, TaskState, ValidationResult
 from .prompts import implementation_prompt, review_prompt, validation_failure_summary
@@ -64,6 +75,11 @@ REVIEW_SANDBOX = "read-only"
 # Shared Chat reports an infrastructure fault rather than a generic task error.
 REVIEW_INFRASTRUCTURE_BLOCK_FILENAME = "review-infrastructure-block.json"
 REVIEW_INFRASTRUCTURE_BLOCKED = "REVIEW_INFRASTRUCTURE_BLOCKED"
+# A task whose persisted admission base cannot be supplied by its registered repository.
+# A repository fault, in the same class as a reviewer that could not run: nothing was
+# learned about the candidate, so nothing about the candidate may be recorded.
+REPOSITORY_UNAVAILABLE = "REPOSITORY_UNAVAILABLE"
+CANDIDATE_STATE_UNAVAILABLE = "CANDIDATE_STATE_UNAVAILABLE"
 
 
 class Orchestrator:
@@ -233,10 +249,13 @@ class Orchestrator:
             raise RuntimeError(f"Project missing for task {task.id}: {task.project_id}")
         artifact_dir = ensure_dir(self.config.evidence_root / project.name / task.id / f"attempt-{task.attempts:02d}")
         branch, worktree = prepare_worktree(project, task, self.config.workspace_root)
-        # Capture the branch snapshot before any worker runs. Repairs and later controller attempts
-        # reuse the worktree, but terminal evidence must retain this task base rather than the most
-        # recent model phase as its comparison point.
-        base_commit = current_commit(worktree)
+        # A task admitted from an exact commit is compared against that commit and nothing else,
+        # on every attempt: `prepare_worktree` has already proven this checkout descends from it,
+        # and the durable value cannot drift as the worktree accumulates repair commits. Without
+        # one, the branch snapshot taken before any worker runs remains the comparison point --
+        # repairs and later controller attempts reuse the worktree, but terminal evidence must
+        # retain this task base rather than the most recent model phase.
+        base_commit = task.admission_base_commit or current_commit(worktree)
         self.db.update_task(task.id, branch=branch, worktree_path=worktree)
         task.branch = branch
         task.worktree_path = worktree
@@ -378,8 +397,14 @@ class Orchestrator:
         with self.telemetry.phase_span(phase_name=PHASE_EVIDENCE, role=ROLE_CONTROLLER) as span:
             patch_path = artifact_dir / "changes.patch"
             commit_hash = commit_task(worktree, task) if project.auto_commit else None
-            write_patch(worktree, patch_path, base_commit, commit_hash)
-            final_changed_files = changed_files_between(worktree, base_commit, commit_hash)
+            candidate_commit = _candidate_commit(
+                project.repo_path, task, worktree, base_commit, commit_hash
+            )
+            # One base and one candidate feed every terminal field below, so the patch, the
+            # changed-file set, the recorded candidate and anything derived from them cannot
+            # disagree about which delta this task produced.
+            write_patch(worktree, patch_path, base_commit, candidate_commit)
+            final_changed_files = changed_files_between(worktree, base_commit, candidate_commit)
             if project.auto_push and commit_hash:
                 from .gitops import _git
                 _git(worktree, "push", "-u", "origin", branch, timeout=1200)
@@ -390,6 +415,10 @@ class Orchestrator:
                 # Phase results retain the model's incremental claim. Terminal evidence is instead
                 # the complete Git truth integration will compare: approved base -> final candidate.
                 "changed_files": final_changed_files,
+                # The exact commit the diff, the changed files and the candidate are all measured
+                # from, so an integrator never has to re-derive it or guess which base was used.
+                "base_commit": base_commit,
+                "admission_base_commit": task.admission_base_commit,
                 "controller_validation": [self._validation_to_dict(item) for item in validation_results],
                 "review": review_final,
                 # Retained so a completed task records which sandbox the independent review actually
@@ -397,7 +426,7 @@ class Orchestrator:
                 "review_sandbox": resolution.sandbox,
                 "review_sandbox_requested": resolution.requested,
                 "branch": branch,
-                "commit": commit_hash,
+                "commit": candidate_commit,
                 "worktree": str(worktree),
                 "patch": str(patch_path),
                 "completed_at": utc_now(),
@@ -763,7 +792,44 @@ class Orchestrator:
         if isinstance(exc, TaskUsageBudgetExceeded):
             self.db.update_task(task.id, state=TaskState.FAILED, last_error=str(exc))
             return
+        if isinstance(exc, (BaseCommitUnavailable, WorktreeUnavailable)):
+            self._fail_repository_unavailable(task, exc)
+            return
+        if isinstance(exc, CandidateStateUnavailable):
+            self._fail_candidate_state_unavailable(task, exc)
+            return
         self._retry_or_fail(task, f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}")
+
+    def _fail_repository_unavailable(self, task: Task, exc: GitError) -> None:
+        """End the attempt on a repository fault without inventing an implementation failure.
+
+        A task admitted from an exact commit cannot run when its repository no longer supplies
+        that commit, or when the checkout it would reuse no longer descends from it. Nothing was
+        implemented, nothing was reviewed and nothing was validated, so no repair cycle follows
+        and no reviewer conclusion exists to record. This deliberately does not go through
+        `_retry_or_fail`: that would advance the identical-failure fingerprint and counter, which
+        are the durable record of repeated *implementation* failure, and would return the task to
+        READY to burn another attempt resolving the same absent commit. The failure class stays
+        at the front of `last_error`, where the control plane reads it, exactly as the review
+        infrastructure block does.
+        """
+        self.db.update_task(
+            task.id,
+            state=TaskState.FAILED,
+            last_error=f"{REPOSITORY_UNAVAILABLE}: "
+            + tail_text(str(exc), self.config.max_output_chars),
+        )
+
+    def _fail_candidate_state_unavailable(
+        self, task: Task, exc: CandidateStateUnavailable
+    ) -> None:
+        """Fail without a repair loop when no commit completely represents the final checkout."""
+        self.db.update_task(
+            task.id,
+            state=TaskState.FAILED,
+            last_error=f"{CANDIDATE_STATE_UNAVAILABLE}: "
+            + tail_text(str(exc), self.config.max_output_chars),
+        )
 
     def _write_controller_error(self, content: str) -> None:
         root = ensure_dir(self.config.data_root / "controller-errors")
@@ -955,6 +1021,30 @@ def _contract_item_findings(
                     }
                 )
     return findings
+
+
+def _candidate_commit(
+    repository: Path,
+    task: Task,
+    worktree: Path,
+    base_commit: str,
+    created: str | None,
+) -> str | None:
+    """The commit terminal evidence names as this task's candidate.
+
+    "This attempt created a commit" and "there is a candidate commit" are different facts, and
+    conflating them loses a candidate. A retried task reuses the branch its earlier attempt left
+    behind; that branch can already carry the candidate, the checkout is then clean, `commit_task`
+    creates nothing, and the candidate is the checkout's own HEAD rather than nothing at all.
+
+    For a task admitted from an exact base the candidate is therefore always the current HEAD,
+    including the base itself for a clean no-change result. Ownership, base availability, descent
+    and cleanliness are all re-proven before HEAD is accepted. A task admitted without a base
+    keeps the historical rule exactly: only a commit this attempt created is a candidate.
+    """
+    if not task.admission_base_commit:
+        return created
+    return explicit_candidate_commit(repository, worktree, base_commit)
 
 
 def acceptance_conformance_findings(task: Task, review_final: dict) -> list[dict]:

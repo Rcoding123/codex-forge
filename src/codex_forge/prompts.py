@@ -51,6 +51,28 @@ def _contract_sections(task: Task) -> str:
     return "\n\n".join([hierarchy, *sections])
 
 
+def base_authority(project: Project, task: Task) -> str:
+    """The revision the model must treat as this task's comparison base.
+
+    A task admitted from an exact commit is measured against that commit by terminal evidence, so
+    model-facing prose must name the same authority. Naming the project's default branch there
+    would point the reviewer at a movable ref while the recorded diff, changed-file set and
+    candidate delta are all computed from the immutable base. A task admitted without one keeps
+    the default-branch wording it has always had.
+    """
+    return task.admission_base_commit or project.default_branch
+
+
+def _base_line(project: Project, task: Task) -> str:
+    if task.admission_base_commit:
+        return (
+            f"- Base commit: {task.admission_base_commit}\n"
+            "- That commit is this task's immutable admission base. Compare against it, not "
+            "against the default branch, which may have moved since admission."
+        )
+    return f"- Base branch: {project.default_branch}"
+
+
 def implementation_prompt(
     project: Project,
     task: Task,
@@ -72,7 +94,7 @@ def implementation_prompt(
 PROJECT
 - Name: {project.name}
 - Repository: {worktree}
-- Base branch: {project.default_branch}
+{_base_line(project, task)}
 
 TASK
 - ID: {task.id}
@@ -101,6 +123,17 @@ REVIEW FINDINGS TO REPAIR
 Execute the task now. Inspect the repository, implement the smallest complete solution, run validation, repair failures, and leave the worktree ready for independent review.
 If an external runtime prevents complete validation, perform every available offline check and report the exact missing evidence.
 """.strip()
+
+
+def _review_base_note(task: Task) -> str:
+    if not task.admission_base_commit:
+        return ""
+    return (
+        "\nThat commit is this task's immutable admission base and the exact base its terminal "
+        "evidence is measured from, so the changed files, the patch scope and the candidate delta "
+        "you reason about are the ones in that diff. The project's default branch may have moved "
+        "since admission and is not the comparison authority."
+    )
 
 
 def review_prompt(
@@ -147,7 +180,7 @@ do not repeat unrelated repository exploration.
 """.strip()
     return f"""
 You are the independent reviewer for an autonomous coding task. Do not modify files.
-Review the complete diff against `{project.default_branch}` in {worktree}.
+Review the complete diff against `{base_authority(project, task)}` in {worktree}.{_review_base_note(task)}
 Focus on correctness, regressions, concurrency/resource issues, security, missing validation, and whether the task is actually complete.
 Do not report style preferences unless they create a concrete defect.
 

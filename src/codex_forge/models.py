@@ -57,6 +57,10 @@ class Task:
     max_attempts: int = 3
     branch: str | None = None
     worktree_path: Path | None = None
+    # The exact commit this task's execution lineage was admitted from, or None for a task
+    # admitted without one. Immutable once persisted: it is provenance, not a setting, and a
+    # task that has it is branched from it on every attempt.
+    admission_base_commit: str | None = None
     last_error: str | None = None
     failure_fingerprint: str | None = None
     identical_failures: int = 0

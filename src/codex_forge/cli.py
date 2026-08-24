@@ -58,10 +58,13 @@ from .task_submission import (
     RISK_LEVELS,
     SUBMISSION_COMMAND,
     TaskSubmissionError,
+    _normalize_base_commit,
     _normalize_task_id,
+    admit_task,
     build_task_request,
-    insert_task_guarded,
+    resolve_base_commit,
     submit_task,
+    task_conflict_error,
 )
 from .utils import (
     command_exists,
@@ -185,6 +188,14 @@ def build_parser() -> argparse.ArgumentParser:
     task_add.add_argument("--priority", type=int, default=None)
     task_add.add_argument("--max-attempts", type=int, default=None)
     task_add.add_argument("--id")
+    task_add.add_argument(
+        "--base-commit",
+        help=(
+            "Exact Git commit this task's execution lineage is admitted from. Must be a full "
+            "commit object id in the project's registered repository. Omit to keep Forge's "
+            "existing base selection."
+        ),
+    )
     task_add.add_argument(
         "--dry-run", action="store_true", help="Validate the request without writing to the database"
     )
@@ -579,6 +590,15 @@ def cmd_task_add(
     except TaskSubmissionError as exc:
         print(f"{exc.code}: {exc.message}", file=sys.stderr)
         return error_exit_code(exc.code)
+    try:
+        # Only the base is normalized and resolved here. The human path deliberately does not run
+        # the contract request validator, so adding an option must not start applying it.
+        admission_base_commit = resolve_base_commit(
+            project, _normalize_base_commit(getattr(args, "base_commit", None))
+        )
+    except TaskSubmissionError as exc:
+        print(f"{exc.code}: {exc.message}", file=sys.stderr)
+        return error_exit_code(exc.code)
     dependencies = args.depends_on or []
     task = Task(
         id=task_id,
@@ -597,13 +617,24 @@ def cmd_task_add(
         scope=args.scope or "",
         out_of_scope=args.out_of_scope or "",
         max_attempts=DEFAULT_MAX_ATTEMPTS if args.max_attempts is None else args.max_attempts,
+        admission_base_commit=admission_base_commit,
     )
     try:
-        insert_task_guarded(db, config, project, task)
+        # The same durable law the contract path uses. Reaching the database directly here is what
+        # let one entry point answer an already-taken id with a raw integrity error while the other
+        # answered with a structured refusal; there is one seam and one answer now.
+        admission = admit_task(
+            db,
+            config,
+            project,
+            task,
+            conflict=lambda: task_conflict_error(task.id, client_supplied=bool(args.id)),
+        )
     except TaskSubmissionError as exc:
         print(f"{exc.code}: {exc.message}", file=sys.stderr)
         return error_exit_code(exc.code)
-    print(f"Added {task.id} [{task.state.value}] {task.title}")
+    verb = "Added" if admission.created else "Already present:"
+    print(f"{verb} {admission.task.id} [{admission.task.state.value}] {admission.task.title}")
     return 0
 
 

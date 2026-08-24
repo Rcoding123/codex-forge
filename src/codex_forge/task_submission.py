@@ -13,12 +13,19 @@ import sqlite3
 import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from .config import ForgeConfig
-from .control_plane import DEFAULT_SCHEMA_VERSION, redact_command, task_to_public
+from .control_plane import (
+    ADMISSION_BASE_COMMIT_SINCE,
+    DEFAULT_SCHEMA_VERSION,
+    _declares,
+    redact_command,
+    task_to_public,
+)
 from .db import ForgeDB
 from .evidence import EvidenceError, retained_evidence_claim
+from .gitops import BaseCommitError, GitError, resolve_admission_base_commit, verify_repository
 from .models import Project, Task, TaskState
 from .usage import empty_token_usage
 from .utils import (
@@ -98,6 +105,9 @@ class TaskRequest:
     priority: int
     max_attempts: int
     task_id: str | None
+    # Exactly as the caller wrote it. Resolution needs the project's repository, which a
+    # database-independent request must not reach, so the canonical form is produced later.
+    base_commit: str | None = None
     architecture_decisions: tuple[str, ...] = ()
     constraints: tuple[str, ...] = ()
     scope: str = ""
@@ -306,6 +316,31 @@ def _normalize_task_id(value: Any, *, field_name: str = "task_id") -> str | None
     return task_id
 
 
+def _normalize_base_commit(value: Any) -> str | None:
+    """Normalize the requested admission base without deciding whether it names a commit.
+
+    Only shape is checked here, because whether a commit exists is a question for the project's
+    registered repository and this function is database- and repository-independent. An omitted
+    base stays omitted: it is not defaulted, and it never becomes the default branch.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TaskSubmissionError(
+            "INVALID_TASK_REQUEST",
+            "base_commit must be a string.",
+            {"field": "base_commit"},
+        )
+    candidate = value.strip()
+    if not candidate:
+        raise TaskSubmissionError(
+            "INVALID_TASK_REQUEST",
+            "base_commit must not be empty when it is supplied.",
+            {"field": "base_commit"},
+        )
+    return candidate
+
+
 def _normalize_risk(value: Any) -> str:
     if not isinstance(value, str):
         raise TaskSubmissionError("INVALID_TASK_REQUEST", "risk must be text.", {"field": "risk"})
@@ -383,6 +418,8 @@ def build_task_request(args: argparse.Namespace) -> TaskRequest:
         )
     )
 
+    base_commit = _normalize_base_commit(getattr(args, "base_commit", None))
+
     task_id = _normalize_task_id(getattr(args, "id", None))
     if task_id is not None and task_id in dependencies:
         raise TaskSubmissionError(
@@ -448,6 +485,7 @@ def build_task_request(args: argparse.Namespace) -> TaskRequest:
         priority=priority,
         max_attempts=max_attempts,
         task_id=task_id,
+        base_commit=base_commit,
         architecture_decisions=architecture_decisions,
         constraints=constraints,
         scope=scope,
@@ -472,6 +510,7 @@ def _fingerprint(
     constraints: Iterable[str],
     scope: str,
     out_of_scope: str,
+    admission_base_commit: str | None,
 ) -> str:
     """Hash the material content of a task so identical retries are recognizable.
 
@@ -483,6 +522,11 @@ def _fingerprint(
     binding requirements and keep their order too, so the same task identity can never represent
     two different binding contracts. Tags and dependencies are unordered sets, so they are sorted
     here to keep a reordered retry from reading as a different request.
+
+    The admission base is material: one task identity may never stand for two execution lineages,
+    so a retry that names a different base -- or none -- is a different request and not an
+    idempotent repeat. Its canonical resolved form is hashed, so the same commit written in a
+    different case is the same request.
     """
     material = {
         "project_id": project_id,
@@ -499,11 +543,14 @@ def _fingerprint(
         "constraints": [_normalize_text(item) for item in constraints],
         "scope": _normalize_text(scope),
         "out_of_scope": _normalize_text(out_of_scope),
+        "admission_base_commit": admission_base_commit,
     }
     return hashlib.sha256(json_dumps(material).encode("utf-8")).hexdigest()
 
 
-def request_fingerprint(request: TaskRequest, project: Project) -> str:
+def request_fingerprint(
+    request: TaskRequest, project: Project, admission_base_commit: str | None
+) -> str:
     return _fingerprint(
         project_id=project.id,
         title=request.title,
@@ -519,6 +566,7 @@ def request_fingerprint(request: TaskRequest, project: Project) -> str:
         constraints=request.constraints,
         scope=request.scope,
         out_of_scope=request.out_of_scope,
+        admission_base_commit=admission_base_commit,
     )
 
 
@@ -538,6 +586,7 @@ def task_fingerprint(task: Task) -> str:
         constraints=task.constraints,
         scope=task.scope,
         out_of_scope=task.out_of_scope,
+        admission_base_commit=task.admission_base_commit,
     )
 
 
@@ -565,6 +614,46 @@ def derive_task_id(request: TaskRequest, project: Project) -> str:
     return request.task_id or stable_id(
         "TASK", f"{project.id}:{request.title}:{request.objective}"
     )
+
+
+def resolve_base_commit(project: Project, base_commit: str | None) -> str | None:
+    """Resolve a requested admission base against the project's registered repository.
+
+    Returns None when no base was requested, which preserves Forge's existing base selection for
+    that task exactly. A requested base is proven to be a commit object that this repository
+    actually has, and the canonical object id Git returns is what everything downstream persists,
+    fingerprints and reports.
+
+    Containment in `origin/<default_branch>` is deliberately not required. The case this exists
+    for is a predecessor merged locally and not yet pushed, so demanding the remote contain it
+    would refuse exactly the admission this primitive was built to make possible. Whether the base
+    contains the right predecessors is the controller's law, not Forge's; Forge's law is to use
+    exactly the commit it was given.
+    """
+    if base_commit is None:
+        return None
+    try:
+        verify_repository(project.repo_path)
+    except GitError as exc:
+        raise TaskSubmissionError(
+            "REPOSITORY_UNAVAILABLE",
+            "The project's registered repository could not be read, so the requested admission "
+            "base commit could not be verified.",
+            {"project_id": project.id},
+        ) from exc
+    try:
+        return resolve_admission_base_commit(project.repo_path, base_commit)
+    except BaseCommitError as exc:
+        raise TaskSubmissionError(
+            "INVALID_BASE_COMMIT", str(exc), {"project_id": project.id}
+        ) from exc
+    except GitError as exc:
+        raise TaskSubmissionError(
+            "REPOSITORY_UNAVAILABLE",
+            "The project's registered repository could not be read, so the requested admission "
+            "base commit could not be verified.",
+            {"project_id": project.id},
+        ) from exc
 
 
 def planned_branch(task_id: str, title: str) -> str:
@@ -610,8 +699,14 @@ def _resolve_project(db: ForgeDB, identifier: str) -> Project:
     return project
 
 
-def _normalized_request_payload(request: TaskRequest, project: Project, task_id: str) -> dict[str, Any]:
-    return {
+def _normalized_request_payload(
+    request: TaskRequest,
+    project: Project,
+    task_id: str,
+    admission_base_commit: str | None,
+    schema_version: str = DEFAULT_SCHEMA_VERSION,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "task_id": task_id,
         "task_id_source": "client" if request.task_id else "derived",
         "project": project.name,
@@ -630,6 +725,11 @@ def _normalized_request_payload(request: TaskRequest, project: Project, task_id:
         "priority": request.priority,
         "max_attempts": request.max_attempts,
     }
+    if _declares(schema_version, ADMISSION_BASE_COMMIT_SINCE):
+        # The canonical resolved form, so a caller can compare what it asked for against what
+        # Forge made durable without opening the database.
+        payload["admission_base_commit"] = admission_base_commit
+    return payload
 
 
 def _defaults_payload(
@@ -689,7 +789,13 @@ def _task_payload(
     return payload
 
 
-def _preview_task(request: TaskRequest, project: Project, task_id: str, state: TaskState) -> Task:
+def _preview_task(
+    request: TaskRequest,
+    project: Project,
+    task_id: str,
+    state: TaskState,
+    admission_base_commit: str | None,
+) -> Task:
     return Task(
         id=task_id,
         project_id=project.id,
@@ -707,11 +813,17 @@ def _preview_task(request: TaskRequest, project: Project, task_id: str, state: T
         scope=request.scope,
         out_of_scope=request.out_of_scope,
         max_attempts=request.max_attempts,
+        admission_base_commit=admission_base_commit,
     )
 
 
-def _conflict_error(request: TaskRequest, task_id: str) -> TaskSubmissionError:
-    if request.task_id:
+def task_conflict_error(task_id: str, *, client_supplied: bool) -> TaskSubmissionError:
+    """The refusal for an id that already names a different task contract.
+
+    Shared by every task-add path so one durable identity never reports two different failures
+    depending on which entry point reached it.
+    """
+    if client_supplied:
         return TaskSubmissionError(
             "TASK_ID_CONFLICT",
             "The task_id already identifies a different task request. Submit a new task_id or "
@@ -724,6 +836,143 @@ def _conflict_error(request: TaskRequest, task_id: str) -> TaskSubmissionError:
         "task_id for this submission.",
         {"task_id": task_id},
     )
+
+
+def _conflict_error(request: TaskRequest, task_id: str) -> TaskSubmissionError:
+    return task_conflict_error(task_id, client_supplied=bool(request.task_id))
+
+
+def _base_mismatch_error(
+    task_id: str, requested: str | None, existing: str | None
+) -> TaskSubmissionError:
+    return TaskSubmissionError(
+        "TASK_BASE_MISMATCH",
+        "The task id already identifies a task admitted from a different base commit. Admission "
+        "provenance is immutable; submit a new specification revision under a new task id rather "
+        "than rebinding this one.",
+        {
+            "task_id": task_id,
+            "requested_admission_base_commit": requested,
+            "admission_base_commit": existing,
+        },
+    )
+
+
+def _require_same_admission_base(
+    task_id: str, requested: str | None, existing: Task
+) -> None:
+    """Refuse a resubmission whose admission base differs from the durable one.
+
+    Checked before the content fingerprint so the refusal names the actual disagreement rather
+    than reporting a generic contract conflict. Both directions are refused, and so is the legacy
+    case: a task persisted before exact admission bases existed has none, and a later request
+    carrying one would be binding it to provenance it never had, which would be a fabrication
+    rather than an idempotent repeat. The stored value is never rewritten here or anywhere else.
+    """
+    if (requested or None) != (existing.admission_base_commit or None):
+        raise _base_mismatch_error(task_id, requested, existing.admission_base_commit)
+
+
+def reconcile_existing_task(
+    existing: Task,
+    *,
+    task_id: str,
+    admission_base_commit: str | None,
+    fingerprint: str,
+    conflict: Callable[[], TaskSubmissionError],
+) -> None:
+    """The durable idempotency law for a task id that is already taken.
+
+    One law, one place, every entry point. Same id with the same admission base and the same
+    contract is an idempotent repeat and adopts the durable task; the same id with a different
+    admission base -- in either direction, including a legacy task that has none -- is a base
+    mismatch and the stored provenance is left exactly as it is; the same id and base with
+    different contract material is the caller's conflict. The base is checked first so a
+    disagreement about provenance is never reported as a generic contract conflict.
+
+    The submitted side is passed as captured intent rather than as a live object. What must be
+    compared is what this caller asked to insert; re-deriving it from a mutable task after a
+    losing race would compare the winner against itself.
+    """
+    _require_same_admission_base(task_id, admission_base_commit, existing)
+    if task_fingerprint(existing) != fingerprint:
+        raise conflict()
+
+
+@dataclass(frozen=True, slots=True)
+class TaskAdmission:
+    """The outcome of admitting one task through the shared law.
+
+    `task` is the durable row, except on a dry run that would create one, where it is the preview
+    the caller supplied and `would_create` says so.
+    """
+
+    created: bool
+    would_create: bool
+    task: Task
+
+
+def admit_task(
+    db: ForgeDB,
+    config: ForgeConfig,
+    project: Project,
+    task: Task,
+    *,
+    conflict: Callable[[], TaskSubmissionError],
+    dry_run: bool = False,
+) -> TaskAdmission:
+    """Admit one task, or converge on the durable task that already holds its id.
+
+    This is the only durable task-add seam. Both CLI paths reach it, so an id that is already
+    taken is reconciled by `reconcile_existing_task` rather than surfacing as a raw database
+    integrity error from one path and a structured refusal from the other. A concurrent writer
+    that wins the primary key is reconciled by exactly the same law, so two simultaneous adds of
+    the same task and base converge on one row, and two adds that disagree about the base leave
+    one winner and one structured mismatch with the stored base unrotated.
+    """
+    # Captured before anything is read or written, so every reconciliation below compares the
+    # durable row against what this call asked for.
+    admission_base_commit = task.admission_base_commit
+    fingerprint = task_fingerprint(task)
+
+    with _database_scope():
+        existing = db.get_task(task.id)
+    if existing is not None:
+        reconcile_existing_task(
+            existing,
+            task_id=task.id,
+            admission_base_commit=admission_base_commit,
+            fingerprint=fingerprint,
+            conflict=conflict,
+        )
+        return TaskAdmission(created=False, would_create=False, task=existing)
+
+    collision = task_id_collision(db, config, project, task.id)
+    if collision is not None:
+        raise _collision_error(task.id, collision)
+
+    if dry_run:
+        return TaskAdmission(created=False, would_create=True, task=task)
+
+    created = _insert_once(
+        db,
+        task,
+        task_id=task.id,
+        admission_base_commit=admission_base_commit,
+        fingerprint=fingerprint,
+        config=config,
+        project=project,
+        conflict=conflict,
+    )
+    with _database_scope():
+        stored = db.get_task(task.id)
+    if stored is None:
+        raise TaskSubmissionError(
+            "DATABASE_ERROR",
+            "The task could not be read back after submission.",
+            {"task_id": task.id},
+        )
+    return TaskAdmission(created=created, would_create=False, task=stored)
 
 
 def _locked_project_guard(connection, project: Project) -> None:
@@ -856,29 +1105,42 @@ def _persisted_task_payload(
 
 
 def _insert_once(
-    db: ForgeDB, task: Task, fingerprint: str, request: TaskRequest, *,
-    config: ForgeConfig, project: Project
+    db: ForgeDB,
+    task: Task,
+    *,
+    task_id: str,
+    admission_base_commit: str | None,
+    fingerprint: str,
+    config: ForgeConfig,
+    project: Project,
+    conflict: Callable[[], TaskSubmissionError],
 ) -> bool:
     """Insert the task, returning whether this call created it.
 
-    A primary-key violation means a concurrent writer inserted the same identifier first. An
-    identical request adopts that row so a client retry never produces a duplicate task; a
-    different request is a conflict.
+    A primary-key violation means a concurrent writer inserted the same identifier first. The
+    racing row is then reconciled by the same law an already-present row is: an identical request
+    adopts it so a client retry never produces a duplicate task, a different admission base is a
+    base mismatch, and different contract material is a conflict.
     """
     try:
         insert_task_guarded(db, config, project, task)
         return True
     except sqlite3.IntegrityError as exc:
         with _database_scope():
-            racing = db.get_task(task.id)
+            racing = db.get_task(task_id)
         if racing is None:
             # No row holds this identifier, so the violation was not a duplicate id — a foreign
             # key or another constraint failed. Reporting a conflict would be misleading.
             raise TaskSubmissionError(
                 "DATABASE_ERROR", "The Forge database rejected the task."
             ) from exc
-        if task_fingerprint(racing) != fingerprint:
-            raise _conflict_error(request, task.id) from exc
+        reconcile_existing_task(
+            racing,
+            task_id=task_id,
+            admission_base_commit=admission_base_commit,
+            fingerprint=fingerprint,
+            conflict=conflict,
+        )
         return False
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc).lower():
@@ -910,75 +1172,45 @@ def submit_task(
     """
     db = db or open_database(config)
     project = _resolve_project(db, request.project)
+    # Resolved before anything is read or written: a base that does not name a commit in this
+    # repository is refused on its own terms, never adopted and never silently replaced.
+    admission_base_commit = resolve_base_commit(project, request.base_commit)
     task_id = derive_task_id(request, project)
     state = resolve_state(request.dependencies)
-    fingerprint = request_fingerprint(request, project)
 
-    with _database_scope():
-        existing = db.get_task(task_id)
-
-    normalized = _normalized_request_payload(request, project, task_id)
+    normalized = _normalized_request_payload(
+        request, project, task_id, admission_base_commit, schema_version
+    )
     defaults = _defaults_payload(request, config, task_id, state)
 
-    if existing is not None:
-        if task_fingerprint(existing) != fingerprint:
-            raise _conflict_error(request, task_id)
-        return {
-            "dry_run": dry_run,
-            "created": False,
-            "would_create": False,
-            "task": _persisted_task_payload(
-                db, existing, config=config, project=project, schema_version=schema_version
-            ),
-            "normalized_request": normalized,
-            "defaults_applied": defaults,
-        }
-
-    collision = task_id_collision(db, config, project, task_id)
-    if collision is not None:
-        raise _collision_error(task_id, collision)
-
-    if dry_run:
-        preview = _preview_task(request, project, task_id, state)
-        return {
-            "dry_run": True,
-            "created": False,
-            "would_create": True,
-            "task": _task_payload(
-                preview,
-                config=config,
-                project=project,
-                token_usage=EMPTY_TOKEN_USAGE,
-                runtime={},
-                schema_version=schema_version,
-            ),
-            "normalized_request": normalized,
-            "defaults_applied": defaults,
-        }
-
-    created = _insert_once(
+    admission = admit_task(
         db,
-        _preview_task(request, project, task_id, state),
-        fingerprint,
-        request,
-        config=config,
-        project=project,
+        config,
+        project,
+        _preview_task(request, project, task_id, state, admission_base_commit),
+        conflict=lambda: _conflict_error(request, task_id),
+        dry_run=dry_run,
     )
 
-    with _database_scope():
-        stored = db.get_task(task_id)
-    if stored is None:
-        raise TaskSubmissionError(
-            "DATABASE_ERROR", "The task could not be read back after submission.", {"task_id": task_id}
+    if admission.would_create:
+        task_payload = _task_payload(
+            admission.task,
+            config=config,
+            project=project,
+            token_usage=EMPTY_TOKEN_USAGE,
+            runtime={},
+            schema_version=schema_version,
+        )
+    else:
+        task_payload = _persisted_task_payload(
+            db, admission.task, config=config, project=project, schema_version=schema_version
         )
 
     return {
-        "dry_run": False,
-        "created": created,
-        "would_create": False,
-        "task": _persisted_task_payload(
-            db, stored, config=config, project=project, schema_version=schema_version
-        ),
+        "dry_run": dry_run,
+        "created": admission.created,
+        "would_create": admission.would_create,
+        "task": task_payload,
         "normalized_request": normalized,
         "defaults_applied": defaults,
     }
