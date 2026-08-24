@@ -22,7 +22,13 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 from .config import ForgeConfig
-from .control_plane import SUPPORTED_SCHEMA_VERSIONS, redact_secret_arguments
+from .control_plane import (
+    ADMISSION_BASE_COMMIT_SINCE,
+    DEFAULT_SCHEMA_VERSION,
+    SUPPORTED_SCHEMA_VERSIONS,
+    _declares,
+    redact_secret_arguments,
+)
 from .db import ForgeDB
 from .models import Task
 from .utils import windows_alias_key, windows_safe_component
@@ -838,7 +844,9 @@ def _sanitize_review_result(document: Mapping[str, Any], sanitize: Any) -> dict[
     }
 
 
-def _sanitize_final_result(document: Mapping[str, Any], sanitize: Any) -> dict[str, Any]:
+def _sanitize_final_result(
+    document: Mapping[str, Any], sanitize: Any, schema_version: str
+) -> dict[str, Any]:
     payload = _sanitize_task_result(document, sanitize)
     review = document.get("review")
     payload["review"] = (
@@ -848,17 +856,39 @@ def _sanitize_final_result(document: Mapping[str, Any], sanitize: Any) -> dict[s
         document.get("controller_validation"), _VALIDATION_FIELDS, sanitize
     )
     payload["branch"] = _clean(document.get("branch"), sanitize)
+    if _declares(schema_version, ADMISSION_BASE_COMMIT_SINCE):
+        # The base half of the terminal Git truth, so a consumer can verify `base_commit..commit`
+        # from evidence alone rather than reading the controller's database. Declared by 1.3 and
+        # withheld from every earlier version: a consumer built against 1.0, 1.1 or 1.2 validated
+        # this projection against a fixed allowlist that did not contain these two names, and an
+        # allowlist that silently grows is the same breakage as a renamed field.
+        payload["base_commit"] = _clean(document.get("base_commit"), sanitize)
+        payload["admission_base_commit"] = _clean(
+            document.get("admission_base_commit"), sanitize
+        )
     payload["commit"] = _clean(document.get("commit"), sanitize)
     payload["completed_at"] = _clean(document.get("completed_at"), sanitize)
     return payload
 
 
-def sanitize_structured(kind: str, document: Any, sanitize: Any) -> dict[str, Any] | None:
-    """Return an allowlisted view of a recognized controller document, or None if unrecognized."""
+def sanitize_structured(
+    kind: str,
+    document: Any,
+    sanitize: Any,
+    schema_version: str | None = None,
+) -> dict[str, Any] | None:
+    """Return an allowlisted view of a recognized controller document, or None if unrecognized.
+
+    The allowlist is a disclosure control and a declared shape at once, so it is projected by the
+    contract version the caller asked for. Omitting the version keeps the default contract, which
+    is the one every already-installed consumer was built against.
+    """
     if not isinstance(document, dict):
         return None
     if kind == "final_result":
-        return _sanitize_final_result(document, sanitize)
+        return _sanitize_final_result(
+            document, sanitize, schema_version or DEFAULT_SCHEMA_VERSION
+        )
     if kind == "review_result":
         return _sanitize_review_result(document, sanitize)
     if kind in {"implementation_result", "repair_summary"}:
@@ -899,6 +929,10 @@ def _format_structured(kind: str, payload: Mapping[str, Any]) -> str:
         lines.append(f"Review verdict: {review.get('verdict')}")
     if payload.get("branch"):
         lines.append(f"Branch: {payload['branch']}")
+    if payload.get("base_commit"):
+        lines.append(f"Base commit: {payload['base_commit']}")
+    if payload.get("admission_base_commit"):
+        lines.append(f"Admission base commit: {payload['admission_base_commit']}")
     if payload.get("commit"):
         lines.append(f"Commit: {payload['commit']}")
     return "\n".join(lines)
@@ -1573,7 +1607,9 @@ def evidence_show(
             # A legally sized document can still nest deeply enough to exhaust the parser.
             structured_status = "unsupported_shape"
         else:
-            structured_data = sanitize_structured(selected.classification.kind, document, sanitize)
+            structured_data = sanitize_structured(
+                selected.classification.kind, document, sanitize, schema_version
+            )
             if structured_data is None:
                 structured_status = "unsupported_shape"
             else:

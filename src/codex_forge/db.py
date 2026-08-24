@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     max_attempts INTEGER NOT NULL DEFAULT 3,
     branch TEXT,
     worktree_path TEXT,
+    admission_base_commit TEXT,
     last_error TEXT,
     failure_fingerprint TEXT,
     identical_failures INTEGER NOT NULL DEFAULT 0,
@@ -175,6 +176,7 @@ class ForgeDB:
                 connection, "tasks", "out_of_scope", "TEXT NOT NULL DEFAULT ''"
             )
             self._add_column_if_missing(connection, "runs", "effort", "TEXT NOT NULL DEFAULT 'medium'")
+            self._establish_admission_base_commit(connection)
             self._establish_repository_registration(connection)
 
     @staticmethod
@@ -184,6 +186,29 @@ class ForgeDB:
         columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
         if column not in columns:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+    @staticmethod
+    def _establish_admission_base_commit(connection: sqlite3.Connection) -> None:
+        """Add the task admission-base column exactly once, under one write lock.
+
+        `BEGIN IMMEDIATE` takes the write lock before the column is inspected and holds it through
+        the addition and the verification, so inspection and mutation are one atomic unit for
+        every concurrent initializer. The unguarded `_add_column_if_missing` pattern is the known
+        defect this must not repeat: two initializers both pass `PRAGMA table_info`, both issue
+        `ALTER TABLE`, and the loser fails with `duplicate column name`. A second initializer
+        blocks here until the first commits and then finds the column present, so it does nothing.
+
+        Nothing is backfilled. A task that predates the column has no exact admission provenance,
+        and inventing one from today's repository state would fabricate history: the column stays
+        NULL for it and its base selection is unchanged. The transaction is committed here rather
+        than left open, because the registration migration that follows opens its own.
+        """
+        connection.execute("BEGIN IMMEDIATE")
+        ForgeDB._add_column_if_missing(connection, "tasks", "admission_base_commit", "TEXT")
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(tasks)")}
+        if "admission_base_commit" not in columns:
+            raise RuntimeError("the task admission base column could not be established")
+        connection.commit()
 
     @staticmethod
     def _establish_repository_registration(connection: sqlite3.Connection) -> None:
@@ -453,9 +478,9 @@ class ForgeDB:
                 INSERT INTO tasks(
                     id,project_id,title,objective,acceptance_json,validation_json,state,priority,risk,
                     tags_json,dependencies_json,architecture_decisions_json,constraints_json,scope,
-                    out_of_scope,attempts,max_attempts,branch,worktree_path,last_error,
-                    failure_fingerprint,identical_failures,result_json,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    out_of_scope,attempts,max_attempts,branch,worktree_path,admission_base_commit,
+                    last_error,failure_fingerprint,identical_failures,result_json,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     task.id,
@@ -477,6 +502,7 @@ class ForgeDB:
                     task.max_attempts,
                     task.branch,
                     str(task.worktree_path) if task.worktree_path else None,
+                    task.admission_base_commit,
                     task.last_error,
                     task.failure_fingerprint,
                     task.identical_failures,
@@ -757,6 +783,7 @@ class ForgeDB:
             max_attempts=int(row["max_attempts"]),
             branch=row.get("branch"),
             worktree_path=Path(row["worktree_path"]) if row.get("worktree_path") else None,
+            admission_base_commit=row.get("admission_base_commit"),
             last_error=row.get("last_error"),
             failure_fingerprint=row.get("failure_fingerprint"),
             identical_failures=int(row.get("identical_failures") or 0),
