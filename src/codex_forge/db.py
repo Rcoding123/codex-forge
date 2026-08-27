@@ -459,16 +459,39 @@ class ForgeDB:
         with self.connect() as connection:
             self._insert_task(connection, task)
 
-    def add_task_guarded(self, task: Task, guard) -> None:
+    def add_task_guarded(self, task: Task, guard) -> Task:
         """Insert under one immediate transaction after the caller's guard approves.
 
         The guard runs with the write lock held and may raise to refuse the insert; a refusal
         rolls the transaction back. This is what makes an alias check atomic with its insert.
+
+        Returns the inserted row as the transaction commits it, read before the write lock is
+        released: whatever the guard proved about the surrounding rows is true of exactly this
+        snapshot, and a caller that answers with it never has to read the task back later, when
+        the row may already have been replaced.
         """
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             guard(connection)
             self._insert_task(connection, task)
+            row = connection.execute("SELECT * FROM tasks WHERE id=?", (task.id,)).fetchone()
+            if row is None:
+                raise sqlite3.DatabaseError("the inserted task is not visible in its own transaction")
+        return self._task_from_row(row)
+
+    def read_task_guarded(self, task_id: str, guard) -> Task | None:
+        """Read one task under one immediate transaction after the caller's guard approves.
+
+        The guard runs with the write lock held, so whatever it proves about the surrounding
+        rows -- the project's registration generation, for admission -- is true of the exact task
+        row returned: no writer can delete, replace or re-register between the proof and the read.
+        A refusal from the guard rolls the transaction back and nothing is returned.
+        """
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            guard(connection)
+            row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        return self._task_from_row(row) if row else None
 
     @staticmethod
     def _insert_task(connection: sqlite3.Connection, task: Task) -> None:

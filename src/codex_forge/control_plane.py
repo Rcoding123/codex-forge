@@ -15,11 +15,11 @@ from .utils import json_loads
 # built against, so silently emitting a newer one would break it even though every added field is
 # additive. `1.1` is served only to a caller that asked for `1.1`.
 DEFAULT_SCHEMA_VERSION = "1.0"
-LATEST_SCHEMA_VERSION = "1.3"
+LATEST_SCHEMA_VERSION = "1.4"
 # Every version in major 1 a caller may request, oldest first. A removal, rename, or meaning change
 # needs major 2. The order is contractual: `_declares` reads it to decide whether a version is at or
 # after the one that first declared an additive field.
-SUPPORTED_SCHEMA_VERSIONS = ("1.0", "1.1", "1.2", "1.3")
+SUPPORTED_SCHEMA_VERSIONS = ("1.0", "1.1", "1.2", "1.3", "1.4")
 
 # The contract version that first declares `repository_registration_id` on a project object. A
 # consumer built against 1.0 or 1.1 validated a project object that did not have it, so the field is
@@ -34,6 +34,15 @@ REPOSITORY_REGISTRATION_ID_SINCE = "1.2"
 # asks. A task admitted without one reports `null` at 1.3, which is the honest answer and never an
 # invitation to infer a base from anything else.
 ADMISSION_BASE_COMMIT_SINCE = "1.3"
+
+# The contract version that first declares `expected_repository_registration_id` on a task
+# submission and echoes it on the submission's `normalized_request`. It is the caller's statement
+# of which repository generation -- the Forge-minted `repository_registration_id` of the project
+# it resolved -- the task is bound to, so a submission declaring 1.4 or later must carry it and is
+# refused with `EXPECTED_REGISTRATION_REQUIRED` when it does not. A caller on an older version may
+# still supply it, and a supplied expectation is always enforced; only the echo is gated. It is a
+# precondition on the project, never task material: it enters no task id, fingerprint or row.
+EXPECTED_REPOSITORY_REGISTRATION_SINCE = "1.4"
 
 # `token_usage` as schema 1.0 declares it. A 1.0 document that carried the 1.1 categories would
 # disagree with the version it announces, so the projection is by declared version, not by what
@@ -90,6 +99,9 @@ ERROR_EXIT_CODES: dict[str, int] = {
     # path component, or another registered project aliases its Windows physical name, so its
     # workspace and evidence namespaces cannot be proven single-generation.
     "PROJECT_UNSAFE": 2,
+    # A submission declaring contract 1.4 or later did not state the repository generation it is
+    # bound to. Nothing was resolved or written.
+    "EXPECTED_REGISTRATION_REQUIRED": 2,
     # The identifier names one project's id and a different project's name.
     "PROJECT_AMBIGUOUS": 2,
     # A registration for this project id or name already exists. Registration creates; it never
@@ -97,6 +109,12 @@ ERROR_EXIT_CODES: dict[str, int] = {
     "PROJECT_EXISTS": 2,
     # The requested repository path is already claimed by a different registration.
     "REPOSITORY_ALREADY_REGISTERED": 2,
+    # The target project's repository registration identity is not the generation the task was
+    # bound to: either the caller's expected registration is not the one the project currently
+    # carries, or the identity changed between resolving the request and the locked insert (a
+    # delete-and-recreate under the same name rotates it). Either way the task is refused rather
+    # than admitted under another generation.
+    "REPOSITORY_REGISTRATION_MISMATCH": 2,
     # The durable deletion committed but a disposable filesystem cleanup did not complete.
     # `error.details.deleted` stays true; `data` is null on failure as everywhere else.
     "WORKTREE_CLEANUP_FAILED": 1,

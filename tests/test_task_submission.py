@@ -783,10 +783,12 @@ def test_database_failure_reports_a_database_error(tmp_path: Path, capsys, monke
     config, db = _configured_db(tmp_path)
     _register_project(db, tmp_path)
 
-    def failing_get_task(self: ForgeDB, task_id: str):
+    # The first database read admission performs is the guarded read of the task id; nothing is
+    # read back after the guarded transaction, so this is the seam a failing disk reaches first.
+    def failing_read_task_guarded(self: ForgeDB, task_id: str, guard):
         raise sqlite3.DatabaseError(f"disk I/O error reading {self.path}")
 
-    monkeypatch.setattr(ForgeDB, "get_task", failing_get_task)
+    monkeypatch.setattr(ForgeDB, "read_task_guarded", failing_read_task_guarded)
     exit_code, document, stdout, _ = _run_json(config, capsys, *_submit_arguments(), "--json")
 
     assert exit_code == 1

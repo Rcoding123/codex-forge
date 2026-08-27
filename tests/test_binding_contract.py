@@ -657,7 +657,7 @@ def test_old_tasks_without_contract_columns_remain_readable(tmp_path: Path):
 # --------------------------------------------------------------------------------------------
 
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "shared-chat-task-contract.json"
-FIXTURE_SHA256 = "e98baafb3befd929ba520019549b111969c81380a4eaf58e369c3945154b8f95"
+FIXTURE_SHA256 = "7127b4be418c29c59d73ba6a946e5aacf63a9e0ba71c19a9cb220009d4ba397b"
 
 
 def test_the_boundary_fixture_is_byte_pinned():
@@ -686,9 +686,19 @@ def test_the_boundary_fixture_argv_produces_its_expected_request():
         "priority": request.priority,
         "max_attempts": request.max_attempts,
         "task_id": request.task_id,
+        "expected_repository_registration_id": request.expected_repository_registration_id,
         "defaults_applied": list(request.defaults_applied),
     }
     assert actual == fixture["expected_request"]
+    # The generation expectation travels as one option with one value, decoded exactly: it is the
+    # caller's binding to a Forge repository generation and is never task material, so it is
+    # absent from every declarative field and from the derived identity of the request.
+    argv = fixture["expected_argv"]
+    assert argv.count("--expected-repository-registration") == 1
+    expected_registration = argv[argv.index("--expected-repository-registration") + 1]
+    assert expected_registration == fixture["expected_request"]["expected_repository_registration_id"]
+    assert request.expected_repository_registration_id == expected_registration
+    assert "expected_repository_registration_id" not in fixture["expected_request"]["defaults_applied"]
     # The declarative fields and the request representation describe the same contract.
     assert fixture["architecture_decisions"] == list(request.architecture_decisions)
     assert fixture["constraints"] == list(request.constraints)

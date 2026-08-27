@@ -395,7 +395,7 @@ def test_unsupported_schema_version_fails_closed(tmp_path: Path, capsys, command
     assert payload["error"]["code"] == "UNSUPPORTED_SCHEMA"
     assert payload["error"]["details"] == {
         "requested": "2.0",
-        "supported": ["1.0", "1.1", "1.2", "1.3"],
+        "supported": ["1.0", "1.1", "1.2", "1.3", "1.4"],
     }
     assert "UNSUPPORTED_SCHEMA" in stderr
 
