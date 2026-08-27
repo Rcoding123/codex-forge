@@ -164,13 +164,25 @@ class Orchestrator:
 
     def _task_from_yaml(self, data: dict) -> None:
         from .models import Task
-        from .task_submission import _normalize_task_id, insert_task_guarded
+        from .task_submission import (
+            _normalize_expected_registration,
+            _normalize_task_id,
+            insert_task_guarded,
+            verify_expected_registration,
+        )
         from .utils import stable_id
 
         project_name = str(data["project"])
         project = self.db.get_project(project_name)
         if not project:
             raise ValueError(f"Unknown project: {project_name}")
+        # An inbox file may bind itself to a repository generation exactly as a contract caller
+        # does. A supplied expectation is never discarded; an omitted one keeps the legacy
+        # behavior, with the locked guard still holding the resolved generation to the insert.
+        verify_expected_registration(
+            project,
+            _normalize_expected_registration(data.get("expected_repository_registration_id")),
+        )
         title = str(data["title"])
         objective = str(data["objective"])
         # Inbox submissions pass through the same id authority as both CLI submission paths: the

@@ -19,6 +19,7 @@ from .config import ForgeConfig
 from .control_plane import (
     ADMISSION_BASE_COMMIT_SINCE,
     DEFAULT_SCHEMA_VERSION,
+    EXPECTED_REPOSITORY_REGISTRATION_SINCE,
     _declares,
     redact_command,
     task_to_public,
@@ -59,6 +60,8 @@ MAX_VALIDATION_CHARS = 500
 MAX_TAG_ITEMS = 30
 MAX_TAG_CHARS = 60
 MAX_DEPENDENCY_ITEMS = 50
+# An opaque Forge-minted identity (`repo-reg-<hex>`); the bound only keeps a stray payload out.
+MAX_REPOSITORY_REGISTRATION_ID_CHARS = 128
 MIN_MAX_ATTEMPTS = 1
 MAX_MAX_ATTEMPTS = 50
 MIN_PRIORITY = 0
@@ -108,6 +111,12 @@ class TaskRequest:
     # Exactly as the caller wrote it. Resolution needs the project's repository, which a
     # database-independent request must not reach, so the canonical form is produced later.
     base_commit: str | None = None
+    # The repository generation the caller is bound to: the Forge-minted
+    # `repository_registration_id` of the project it resolved, exactly as supplied. A precondition
+    # on the project, never task material -- it enters no task id, fingerprint or row -- and never
+    # discarded once supplied: admission compares it against the live registration and refuses a
+    # different generation before any task work.
+    expected_repository_registration_id: str | None = None
     architecture_decisions: tuple[str, ...] = ()
     constraints: tuple[str, ...] = ()
     scope: str = ""
@@ -341,6 +350,22 @@ def _normalize_base_commit(value: Any) -> str | None:
     return candidate
 
 
+def _normalize_expected_registration(value: Any) -> str | None:
+    """Normalize a caller's expected repository registration without interpreting it.
+
+    Forge mints the identity and owns its shape, so the only validation here is the hygiene every
+    submitted text gets: an explicitly supplied expectation must be visible text without control
+    characters. Whether it names the project's current generation is admission's question.
+    """
+    if value is None:
+        return None
+    return _require_text(
+        value,
+        field_name="expected_repository_registration_id",
+        maximum=MAX_REPOSITORY_REGISTRATION_ID_CHARS,
+    )
+
+
 def _normalize_risk(value: Any) -> str:
     if not isinstance(value, str):
         raise TaskSubmissionError("INVALID_TASK_REQUEST", "risk must be text.", {"field": "risk"})
@@ -419,6 +444,9 @@ def build_task_request(args: argparse.Namespace) -> TaskRequest:
     )
 
     base_commit = _normalize_base_commit(getattr(args, "base_commit", None))
+    expected_repository_registration_id = _normalize_expected_registration(
+        getattr(args, "expected_repository_registration", None)
+    )
 
     task_id = _normalize_task_id(getattr(args, "id", None))
     if task_id is not None and task_id in dependencies:
@@ -486,6 +514,7 @@ def build_task_request(args: argparse.Namespace) -> TaskRequest:
         max_attempts=max_attempts,
         task_id=task_id,
         base_commit=base_commit,
+        expected_repository_registration_id=expected_repository_registration_id,
         architecture_decisions=architecture_decisions,
         constraints=constraints,
         scope=scope,
@@ -699,6 +728,53 @@ def _resolve_project(db: ForgeDB, identifier: str) -> Project:
     return project
 
 
+def require_expected_registration(expected: str | None, schema_version: str) -> None:
+    """The required-field law: a submission declaring 1.4 or later must state its generation.
+
+    Enforced before the database is opened, so the refusal is a pure contract refusal. An older
+    declared version keeps its shape: omission stays valid there, and a supplied expectation is
+    enforced by `verify_expected_registration` regardless of the version that carried it.
+    """
+    if expected is None and _declares(schema_version, EXPECTED_REPOSITORY_REGISTRATION_SINCE):
+        raise TaskSubmissionError(
+            "EXPECTED_REGISTRATION_REQUIRED",
+            f"Contract schema {EXPECTED_REPOSITORY_REGISTRATION_SINCE} and later require "
+            "expected_repository_registration_id: the repository registration id of the project "
+            "generation this task is bound to.",
+            {
+                "field": "expected_repository_registration_id",
+                "schema_version": schema_version,
+                "required_since": EXPECTED_REPOSITORY_REGISTRATION_SINCE,
+            },
+        )
+
+
+def verify_expected_registration(project: Project, expected: str | None) -> None:
+    """Refuse a project that is not the repository generation the caller is bound to.
+
+    This is the caller's half of the generation proof and runs on the resolved snapshot before any
+    admission work -- no base resolution, no id derivation, no lock, no insert -- so a dry run
+    answers honestly and a stale caller learns fast. The atomic half is `_locked_project_guard`,
+    which re-reads the row under the write lock and refuses a generation rotated after this check;
+    the snapshot passed along carries the identity verified here, so the complete proof is
+    caller expectation == resolved snapshot == locked row, without threading the expectation
+    further. Relocation preserves the registration id and is not a mismatch; `repo_path` is never
+    compared. A supplied expectation is enforced at every declared contract version.
+    """
+    if expected is None or expected == project.repository_registration_id:
+        return
+    raise TaskSubmissionError(
+        "REPOSITORY_REGISTRATION_MISMATCH",
+        "The project is not the repository generation the caller is bound to, so the task was "
+        "not admitted. Resolve the project again and resubmit against its current registration.",
+        {
+            "project_id": project.id,
+            "expected_repository_registration_id": expected,
+            "current_repository_registration_id": project.repository_registration_id,
+        },
+    )
+
+
 def _normalized_request_payload(
     request: TaskRequest,
     project: Project,
@@ -729,6 +805,11 @@ def _normalized_request_payload(
         # The canonical resolved form, so a caller can compare what it asked for against what
         # Forge made durable without opening the database.
         payload["admission_base_commit"] = admission_base_commit
+    if _declares(schema_version, EXPECTED_REPOSITORY_REGISTRATION_SINCE):
+        # Echoed exactly as supplied. At 1.4 it is required, so a declaring caller always sees the
+        # generation its task was admitted against; older versions keep their prior shape even when
+        # a caller on one supplied and had the expectation enforced.
+        payload["expected_repository_registration_id"] = request.expected_repository_registration_id
     return payload
 
 
@@ -903,8 +984,10 @@ def reconcile_existing_task(
 class TaskAdmission:
     """The outcome of admitting one task through the shared law.
 
-    `task` is the durable row, except on a dry run that would create one, where it is the preview
-    the caller supplied and `would_create` says so.
+    `task` is the exact snapshot proven under the guarded transaction that admitted it -- the row
+    this call inserted, or the row it adopted -- never a later read of the database; except on a
+    dry run that would create one, where it is the preview the caller supplied and `would_create`
+    says so.
     """
 
     created: bool
@@ -929,14 +1012,26 @@ def admit_task(
     that wins the primary key is reconciled by exactly the same law, so two simultaneous adds of
     the same task and base converge on one row, and two adds that disagree about the base leave
     one winner and one structured mismatch with the stored base unrotated.
+
+    Both outcomes are admissions, and one generation law governs both: the generation the caller
+    resolved (`project.repository_registration_id`) must be the generation currently governing
+    the task the call returns. The insert proves it under the write lock in
+    `_locked_project_guard`; adoption proves it under the same lock through
+    `_guarded_existing_task`, which is the only way an existing task is ever observed here. A
+    deterministic task with identical contents admitted under a rotated generation is therefore
+    refused rather than adopted, however the rotation interleaved with this call.
+
+    The task returned is the snapshot that proof was made about, obtained before the transaction
+    released its authority. Nothing is read back afterwards: an unlocked reread of the id could
+    observe a task deleted, the project rotated and the same deterministic id admitted again
+    under the new generation, and would describe that replacement as this admission's result.
     """
     # Captured before anything is read or written, so every reconciliation below compares the
     # durable row against what this call asked for.
     admission_base_commit = task.admission_base_commit
     fingerprint = task_fingerprint(task)
 
-    with _database_scope():
-        existing = db.get_task(task.id)
+    existing = _guarded_existing_task(db, project, task.id)
     if existing is not None:
         reconcile_existing_task(
             existing,
@@ -954,7 +1049,7 @@ def admit_task(
     if dry_run:
         return TaskAdmission(created=False, would_create=True, task=task)
 
-    created = _insert_once(
+    return _insert_once(
         db,
         task,
         task_id=task.id,
@@ -964,15 +1059,60 @@ def admit_task(
         project=project,
         conflict=conflict,
     )
-    with _database_scope():
-        stored = db.get_task(task.id)
-    if stored is None:
+
+
+def _locked_generation_guard(connection, project: Project) -> None:
+    """Refuse, under the caller's transaction, a project row that is not the resolved generation.
+
+    `project` is the unlocked snapshot admission was computed against, and its
+    `repository_registration_id` is the generation the caller expects to remain current: for a
+    contract caller the pre-lock law already proved its own expectation equals this snapshot, so
+    the detail reported here is the caller's expectation without threading the string further.
+    A delete-and-recreate under the same name reproduces the name-derived project id exactly
+    while rotating the registration, so an id lookup alone would let a task computed against R1
+    be committed -- or adopted -- under R2. Relocation preserves the registration id, so a
+    legitimately moved repository still passes; `repo_path` is a relocatable descriptor and is
+    never compared or disclosed here.
+    """
+    row = connection.execute(
+        "SELECT repository_registration_id FROM projects WHERE id=?", (project.id,)
+    ).fetchone()
+    if row is None:
         raise TaskSubmissionError(
-            "DATABASE_ERROR",
-            "The task could not be read back after submission.",
-            {"task_id": task.id},
+            "PROJECT_NOT_FOUND",
+            "The project is no longer registered.",
+            {"project_id": project.id},
         )
-    return TaskAdmission(created=created, would_create=False, task=stored)
+    if row["repository_registration_id"] != project.repository_registration_id:
+        raise TaskSubmissionError(
+            "REPOSITORY_REGISTRATION_MISMATCH",
+            "The project's repository registration changed after the request was resolved "
+            "against it, so the task cannot be admitted under the current registration. "
+            "Resolve the project again and resubmit.",
+            {
+                "project_id": project.id,
+                "expected_repository_registration_id": project.repository_registration_id,
+                "current_repository_registration_id": row["repository_registration_id"],
+            },
+        )
+
+
+def _guarded_existing_task(db: ForgeDB, project: Project, task_id: str) -> Task | None:
+    """The durable task holding `task_id`, read under the locked generation proof, or None.
+
+    Adoption of an existing task is an admission, so it is decided under the same authority as
+    an insert: one immediate transaction proves the project row is still the resolved generation
+    and reads the task inside it. There is deliberately no unlocked existence check before this;
+    an earlier observation of the task -- or of the project being non-empty, which merely stops
+    project deletion while tasks exist -- says nothing about the generation at adoption time,
+    because the task itself can be deleted first. A task that disappears before the lock simply
+    reads as absent and admission proceeds to the guarded insert, which reconciles any racing
+    winner through this same read.
+    """
+    with _database_scope():
+        return db.read_task_guarded(
+            task_id, lambda connection: _locked_generation_guard(connection, project)
+        )
 
 
 def _locked_project_guard(connection, project: Project) -> None:
@@ -985,7 +1125,11 @@ def _locked_project_guard(connection, project: Project) -> None:
     physical name shares one on-disk namespace with it; either makes single-generation evidence
     unprovable, so submission is refused before any task is inserted. Details carry only the
     backend-minted ids, never a possibly path-shaped stored name.
+
+    The locked row must also be the same repository generation the caller resolved, which is
+    `_locked_generation_guard`'s law and runs first.
     """
+    _locked_generation_guard(connection, project)
     row = connection.execute("SELECT name FROM projects WHERE id=?", (project.id,)).fetchone()
     if row is None:
         raise TaskSubmissionError(
@@ -1061,11 +1205,12 @@ def _collision_error(task_id: str, collision: str) -> TaskSubmissionError:
     )
 
 
-def insert_task_guarded(db: ForgeDB, config: ForgeConfig, project: Project, task: Task) -> None:
-    """Insert a task atomically with the alias check.
+def insert_task_guarded(db: ForgeDB, config: ForgeConfig, project: Project, task: Task) -> Task:
+    """Insert a task atomically with the alias check, returning the inserted row's snapshot.
 
     The collision check and the insert share one immediate transaction, so two concurrent
-    submissions with case-variant ids cannot both pass the check and both insert.
+    submissions with case-variant ids cannot both pass the check and both insert. The snapshot is
+    read inside that same transaction, so it is the row the generation guard proved.
     """
 
     def guard(connection) -> None:
@@ -1080,7 +1225,7 @@ def insert_task_guarded(db: ForgeDB, config: ForgeConfig, project: Project, task
         if collision is not None:
             raise _collision_error(task.id, collision)
 
-    db.add_task_guarded(task, guard)
+    return db.add_task_guarded(task, guard)
 
 
 def _persisted_task_payload(
@@ -1114,20 +1259,22 @@ def _insert_once(
     config: ForgeConfig,
     project: Project,
     conflict: Callable[[], TaskSubmissionError],
-) -> bool:
-    """Insert the task, returning whether this call created it.
+) -> TaskAdmission:
+    """Insert the task, returning the admission: the exact guarded snapshot and who created it.
 
     A primary-key violation means a concurrent writer inserted the same identifier first. The
     racing row is then reconciled by the same law an already-present row is: an identical request
     adopts it so a client retry never produces a duplicate task, a different admission base is a
-    base mismatch, and different contract material is a conflict.
+    base mismatch, and different contract material is a conflict. It is read under the locked
+    generation proof like any other adoption; the guard this insert ran approved a transaction
+    that rolled back, and proves nothing about the row the winner committed. Either way the task
+    handed back is the one the proof was made about; there is no later reread to hand back.
     """
     try:
-        insert_task_guarded(db, config, project, task)
-        return True
+        inserted = insert_task_guarded(db, config, project, task)
+        return TaskAdmission(created=True, would_create=False, task=inserted)
     except sqlite3.IntegrityError as exc:
-        with _database_scope():
-            racing = db.get_task(task_id)
+        racing = _guarded_existing_task(db, project, task_id)
         if racing is None:
             # No row holds this identifier, so the violation was not a duplicate id — a foreign
             # key or another constraint failed. Reporting a conflict would be misleading.
@@ -1141,7 +1288,7 @@ def _insert_once(
             fingerprint=fingerprint,
             conflict=conflict,
         )
-        return False
+        return TaskAdmission(created=False, would_create=False, task=racing)
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc).lower():
             raise TaskSubmissionError(
@@ -1170,8 +1317,13 @@ def submit_task(
     Returns the `data` payload of the envelope for `schema_version`. Raises `TaskSubmissionError`
     for every expected failure so the caller emits one stable structured error.
     """
+    # A contract refusal, before any database is opened.
+    require_expected_registration(request.expected_repository_registration_id, schema_version)
     db = db or open_database(config)
     project = _resolve_project(db, request.project)
+    # The caller's generation check runs first: a stale expectation is refused before the
+    # repository is touched, before an id is derived, and before any existing task is reconciled.
+    verify_expected_registration(project, request.expected_repository_registration_id)
     # Resolved before anything is read or written: a base that does not name a commit in this
     # repository is refused on its own terms, never adopted and never silently replaced.
     admission_base_commit = resolve_base_commit(project, request.base_commit)

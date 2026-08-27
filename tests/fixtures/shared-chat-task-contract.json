@@ -55,6 +55,8 @@
     "3",
     "--id",
     "SC-R1-BOUNDARY-CONTRACT",
+    "--expected-repository-registration",
+    "repo-reg-3c1a5d2f9e8b4c7a6d5e4f3a2b1c0d9e",
     "--json"
   ],
   "expected_request": {
@@ -83,6 +85,7 @@
     "priority": 100,
     "max_attempts": 3,
     "task_id": "SC-R1-BOUNDARY-CONTRACT",
+    "expected_repository_registration_id": "repo-reg-3c1a5d2f9e8b4c7a6d5e4f3a2b1c0d9e",
     "defaults_applied": [
       "priority",
       "tags",

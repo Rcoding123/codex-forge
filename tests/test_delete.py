@@ -65,9 +65,9 @@ def make_db(config: ForgeConfig) -> ForgeDB:
 
 
 def add_project(db: ForgeDB, repo_path: Path, name: str = "demo") -> Project:
-    project = Project(id=f"project-{name}", name=name, repo_path=repo_path)
-    db.add_project(project)
-    return project
+    # The registered project, carrying the registration identity Forge minted: the locked
+    # admission guard requires the snapshot it is handed to name the generation it resolved.
+    return db.add_project(Project(id=f"project-{name}", name=name, repo_path=repo_path))
 
 
 def add_task(

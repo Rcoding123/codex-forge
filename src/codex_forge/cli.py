@@ -59,12 +59,15 @@ from .task_submission import (
     SUBMISSION_COMMAND,
     TaskSubmissionError,
     _normalize_base_commit,
+    _normalize_expected_registration,
     _normalize_task_id,
     admit_task,
     build_task_request,
+    require_expected_registration,
     resolve_base_commit,
     submit_task,
     task_conflict_error,
+    verify_expected_registration,
 )
 from .utils import (
     command_exists,
@@ -194,6 +197,14 @@ def build_parser() -> argparse.ArgumentParser:
             "Exact Git commit this task's execution lineage is admitted from. Must be a full "
             "commit object id in the project's registered repository. Omit to keep Forge's "
             "existing base selection."
+        ),
+    )
+    task_add.add_argument(
+        "--expected-repository-registration",
+        help=(
+            "The project's repository_registration_id this task is bound to. Admission is refused "
+            "with REPOSITORY_REGISTRATION_MISMATCH unless the project still carries exactly this "
+            "registration. Required at --schema-version 1.4 and later; always enforced when given."
         ),
     )
     task_add.add_argument(
@@ -578,12 +589,25 @@ def cmd_task_add(
 ) -> int:
     if getattr(args, "json", False) or getattr(args, "dry_run", False):
         return cmd_task_submit(config, args, schema_version)
+    try:
+        # The same contract law the structured path applies, before the database is opened: a
+        # declared 1.4 must state its generation, and an option argparse accepted is never ignored.
+        expected_registration = _normalize_expected_registration(
+            getattr(args, "expected_repository_registration", None)
+        )
+        require_expected_registration(expected_registration, schema_version)
+    except TaskSubmissionError as exc:
+        print(f"{exc.code}: {exc.message}", file=sys.stderr)
+        return error_exit_code(exc.code)
     db = ForgeDB(config.database_path)
     project = db.get_project(args.project)
     if not project:
         print(f"Unknown project: {args.project}", file=sys.stderr)
         return 2
     try:
+        # The caller's generation check precedes every other admission step, exactly as in
+        # `submit_task`; the locked guard then holds this resolved snapshot to the insert.
+        verify_expected_registration(project, expected_registration)
         task_id = _normalize_task_id(args.id) or stable_id(
             "TASK", f"{project.id}:{args.title}:{args.objective}"
         )
