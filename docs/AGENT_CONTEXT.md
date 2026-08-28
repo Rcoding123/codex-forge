@@ -9,14 +9,19 @@ authority documents in full.
 
 ## Status
 
-- Current Forge baseline: `e679c36` (main) — PR #12, repository-generation
-  admission (contract `1.4`). Contract `1.2` (PR #10) added the Forge-minted
-  `repository_registration_id`; `1.3` (PR #11) added the exact admission base
-  and `project relocate`.
-- Shared Chat `7c591c4` + Forge `e679c36` are certified for the
-  repository-generation boundary. The exact admission base exists in Forge but
-  the Shared Chat handoff (`--base-commit` from the controller) is NEXT, not
-  landed.
+- Current Forge baseline: `7f7c8db` (main) — PR #14, the canonical Shared Chat
+  contract fixture pins the exact admission base (`--base-commit` /
+  `admission_base_commit`); no runtime change since PR #12, repository-
+  generation admission (contract `1.4`). Contract `1.2` (PR #10) added the
+  Forge-minted `repository_registration_id`; `1.3` (PR #11) added the exact
+  admission base and `project relocate`.
+- Shared Chat `a89bc05` + Forge `7f7c8db` are certified for the
+  repository-generation **and exact admission-base** boundary: Shared Chat
+  now sends `--base-commit` (the local default-branch tip of the bound
+  generation, proven a commit) on every `task add`, and Forge admits and
+  executes from exactly that commit. Shared Chat `7c591c4` + Forge `e679c36`
+  were certified for the repository-generation boundary. The base law itself
+  is unchanged since PR #11.
 
 ## Ownership map
 
