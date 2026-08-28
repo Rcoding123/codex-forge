@@ -657,7 +657,7 @@ def test_old_tasks_without_contract_columns_remain_readable(tmp_path: Path):
 # --------------------------------------------------------------------------------------------
 
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "shared-chat-task-contract.json"
-FIXTURE_SHA256 = "7127b4be418c29c59d73ba6a946e5aacf63a9e0ba71c19a9cb220009d4ba397b"
+FIXTURE_SHA256 = "d57cb24a87506e5bd63e8362d0d894caea3b68eeb2e69fe96a45d9845b0b41a3"
 
 
 def test_the_boundary_fixture_is_byte_pinned():
@@ -686,14 +686,25 @@ def test_the_boundary_fixture_argv_produces_its_expected_request():
         "priority": request.priority,
         "max_attempts": request.max_attempts,
         "task_id": request.task_id,
+        "admission_base_commit": request.base_commit,
         "expected_repository_registration_id": request.expected_repository_registration_id,
         "defaults_applied": list(request.defaults_applied),
     }
     assert actual == fixture["expected_request"]
+    argv = fixture["expected_argv"]
+    # The admission base travels as one option with one value, decoded exactly as supplied: the
+    # caller's exact commit, which admission proves against the repository and never chooses. It
+    # sits between the task identity and the generation expectation, and it is request content,
+    # never task material — absent from every declarative field and from the derived identity.
+    assert argv.count("--base-commit") == 1
+    expected_base = argv[argv.index("--base-commit") + 1]
+    assert expected_base == fixture["expected_request"]["admission_base_commit"]
+    assert request.base_commit == expected_base
+    assert argv.index("--id") < argv.index("--base-commit") < argv.index("--expected-repository-registration")
+    assert "admission_base_commit" not in fixture["expected_request"]["defaults_applied"]
     # The generation expectation travels as one option with one value, decoded exactly: it is the
     # caller's binding to a Forge repository generation and is never task material, so it is
     # absent from every declarative field and from the derived identity of the request.
-    argv = fixture["expected_argv"]
     assert argv.count("--expected-repository-registration") == 1
     expected_registration = argv[argv.index("--expected-repository-registration") + 1]
     assert expected_registration == fixture["expected_request"]["expected_repository_registration_id"]

@@ -55,6 +55,8 @@
     "3",
     "--id",
     "SC-R1-BOUNDARY-CONTRACT",
+    "--base-commit",
+    "4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e",
     "--expected-repository-registration",
     "repo-reg-3c1a5d2f9e8b4c7a6d5e4f3a2b1c0d9e",
     "--json"
@@ -85,6 +87,7 @@
     "priority": 100,
     "max_attempts": 3,
     "task_id": "SC-R1-BOUNDARY-CONTRACT",
+    "admission_base_commit": "4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e",
     "expected_repository_registration_id": "repo-reg-3c1a5d2f9e8b4c7a6d5e4f3a2b1c0d9e",
     "defaults_applied": [
       "priority",
