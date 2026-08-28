@@ -142,6 +142,11 @@ Or register an existing local Git repository:
   --validation "python -m pytest"
 ```
 
+Registration mints a `repository_registration_id`, the identity of this repository generation:
+`project relocate <project> --repo <new-path>` moves a registration to a new path and keeps it,
+while `project delete` followed by `project add` under the same name mints a new one. Consumers
+read it with `project list --json --schema-version 1.2`.
+
 Add a project-specific `AGENTS.md`; `templates/project-AGENTS.md` is a starting point. Keep project rules in that repository rather than expanding Forge's global instructions. Remote pushing is off unless a project is explicitly registered with `--push`.
 
 ## Submit work
@@ -167,14 +172,19 @@ External applications submit the same task through the versioned JSON contract. 
 submit; both accept the arguments shown above:
 
 ```powershell
-.\forge.ps1 task add --project sample-service --id TASK-001 --title "..." --objective "..." --dry-run --json
-.\forge.ps1 task add --project sample-service --id TASK-001 --title "..." --objective "..." --json
+.\forge.ps1 task add --project sample-service --id TASK-001 --title "..." --objective "..." --expected-repository-registration <repository_registration_id> --schema-version 1.4 --dry-run --json
+.\forge.ps1 task add --project sample-service --id TASK-001 --title "..." --objective "..." --expected-repository-registration <repository_registration_id> --schema-version 1.4 --json
 ```
 
 `--dry-run` resolves and validates the request without writing anything. Submission is idempotent by
 `task_id`: retrying an identical request returns the existing task with `"created": false` instead of
-creating a second one, and reusing an identifier for a different request is a structured conflict. See
-[Control-plane JSON contract](docs/CONTROL-PLANE-API.md) for the envelope, field list, and error codes.
+creating a second one, and reusing an identifier for a different request is a structured conflict.
+Contract `1.4` requires `--expected-repository-registration`, the project's
+`repository_registration_id` from `project list`; Forge refuses the submission with
+`REPOSITORY_REGISTRATION_MISMATCH` unless the project still carries exactly that registration, and
+proves it again under the admission lock. See
+[Control-plane JSON contract](docs/CONTROL-PLANE-API.md) for the envelope, field list, versions, and
+error codes.
 
 Useful commands:
 

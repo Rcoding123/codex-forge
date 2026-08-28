@@ -21,10 +21,12 @@ task execution — a submitted task waits for the existing controller loop.
 .\forge.ps1 decision list --json
 .\forge.ps1 task add <task arguments> --dry-run --json
 .\forge.ps1 task add <task arguments> --json
+.\forge.ps1 task add <task arguments> --expected-repository-registration <id> --schema-version 1.4 --json
 .\forge.ps1 task evidence list <task-id> --json
 .\forge.ps1 task evidence show <task-id> --artifact-id <artifact-id> --json
 .\forge.ps1 task delete <task-id> --json
 .\forge.ps1 project delete <project> --json
+.\forge.ps1 project relocate <project> --repo <path> --json
 ```
 
 The same commands retain their existing human-readable output when `--json` is absent. `task add`
@@ -75,6 +77,9 @@ Version history:
 |---|---|
 | `1.0` | Initial contract. The default. |
 | `1.1` | `task.token_usage` gained additive reported token categories. Every `1.0` field kept its name, type, meaning, and value. Opt-in. |
+| `1.2` | Project objects gained `repository_registration_id`, the Forge-minted repository-generation identity. Relocation preserves it; delete and re-register mints a new one. See [Repository registration identity](#repository-registration-identity). |
+| `1.3` | Task objects and `normalized_request` gained `admission_base_commit`, the exact commit a task was admitted from when the caller supplied `--base-commit`; `null` otherwise. See [Admission base](#admission-base). |
+| `1.4` | Task submission gained `expected_repository_registration_id` (`--expected-repository-registration <id>`), echoed on `normalized_request`. Required on a submission declaring `1.4` or later (`EXPECTED_REGISTRATION_REQUIRED`); enforced whenever supplied (`REPOSITORY_REGISTRATION_MISMATCH`). See [Repository generation expectation](#repository-generation-expectation). |
 
 **`1.0` is the default and stays the default.** Every command accepts `--schema-version`; when it is
 omitted the response declares `1.0` and contains exactly the `1.0` payload. A newer version is served
@@ -160,6 +165,7 @@ Task-state count keys are always present, including zero counts.
     "projects": [
       {
         "project_id": "project-a1b2c3",
+        "repository_registration_id": "repo-reg-3c1a5d2f9e8b4c7a6d5e4f3a2b1c0d9e",
         "name": "sample-service",
         "repository_path": "D:\\CodexForge\\repositories\\sample-service",
         "default_branch": "main",
@@ -178,7 +184,43 @@ Task-state count keys are always present, including zero counts.
 
 Policy values are `automatic` or `disabled`. Validation commands are returned for inspection, but
 Forge replaces environment-assignment values, recognized credential-argument values, and URL
-credentials with `[REDACTED]`.
+credentials with `[REDACTED]`. `repository_registration_id` is served only to a caller declaring
+`1.2` or later; a `1.0` or `1.1` project object keeps its prior shape.
+
+### Repository registration identity
+
+Every registered project carries two identities, and a consumer that must know it is still bound
+to the repository it was bound to binds to both:
+
+- `project_id` is derived from the project name. It is stable across a delete and a re-register
+  of the same name, so on its own it cannot tell one generation of a repository from the next.
+- `repository_registration_id` is the repository-generation identity. Forge mints it when the
+  project is registered and never accepts one from a caller. It is opaque — consumers compare it
+  for equality and must not parse it — and it is not task material: it enters no task id, no
+  idempotency fingerprint, no attempt identity, and no task row. It is a precondition on the
+  project a task is admitted under.
+
+The identity follows the repository, not its path:
+
+- **Relocation preserves it.** `project relocate <project> --repo <path> --json` points an
+  existing registration at a different local path and changes nothing else: `project_id`, the
+  name, the default branch, the policies, and `repository_registration_id` are carried through
+  unchanged, so every task, run, and evidence record keeps naming the same registration. Forge
+  verifies only that the target is a Git working tree that no other registration claims; it does
+  not try to prove the two paths hold the same repository, because no local identity survives
+  every legitimate move. Relocation is the operator's explicit assertion. It is refused with
+  `TASK_ACTIVE` while a worker owns a task of the project, with `REPOSITORY_ALREADY_REGISTERED`
+  when another registration claims the path, with `INVALID_ARGUMENT` when the target is not a
+  Git working tree, and with `PROJECT_NOT_FOUND` / `PROJECT_AMBIGUOUS` as for deletion. The
+  response is `{"relocated": <bool>, "project": <project object>}`; `relocated` is `false` when
+  the path was already the registered one, and nothing was written.
+- **Delete and re-register rotates it.** `project delete` followed by `project add` under the
+  same name reproduces the name-derived `project_id` exactly and mints a fresh
+  `repository_registration_id`. The new registration is a new generation; nothing admitted or
+  bound under the old one carries over.
+- `repository_path` is a relocatable descriptor for operators and tooling. It is never repository
+  identity, is never compared during admission, and is never disclosed in structured error
+  details.
 
 ## Task list and task show
 
@@ -233,6 +275,10 @@ Field notes:
   synthesized from task state.
 - `started_at` is the first persisted run start. `completed_at` is present only when Forge persisted
   task completion in the task result.
+- `admission_base_commit` is served to a caller declaring `1.3` or later: the full commit object id
+  the task was admitted from when its submission supplied `--base-commit`, and `null` for a task
+  admitted without one. `null` is the honest answer, never an invitation to infer a base from the
+  branch, the worktree, or anything else.
 - Raw result objects, failure fingerprints, run thread IDs, authentication data, and raw subprocess
   output are not exposed. Known controller error markers receive stable safe codes and messages; other
   stored error text is represented as `TASK_ERROR` without returning the raw text.
@@ -336,6 +382,17 @@ in insignificant ways is recognized as the same request:
 values Forge resolved for fields the client did not supply, and always includes the derived `state`
 and the configured `token_limit`.
 
+`normalized_request` is projected by declared version, like every other object:
+
+- At `1.3` and later it carries `admission_base_commit`: the canonical commit object id Forge
+  resolved from `--base-commit`, or `null` when none was supplied, so a caller can compare what it
+  asked for against what Forge made durable without opening the database.
+- At `1.4` and later it carries `expected_repository_registration_id`, echoed exactly as supplied.
+  Because `1.4` requires it, a declaring caller always sees the generation its task was admitted
+  against.
+- An older declared version keeps its prior shape even when the caller supplied one of these
+  values and had it enforced. Only the echo is gated; enforcement never is.
+
 ### Task identifiers
 
 `--id` is optional. When it is omitted, Forge derives a stable identifier from the project,
@@ -372,12 +429,84 @@ acceptance criteria state what must be demonstrably true, while decisions and co
 the work is done. Tasks submitted before these fields existed remain readable and behave exactly
 as before.
 
+### Admission base
+
+`--base-commit <commit>` (contract `1.3`) names the exact Git commit the task's execution lineage
+is admitted from. It is optional; omitting it keeps Forge's existing base selection for that task
+exactly, and the task reports `admission_base_commit: null`.
+
+A supplied base is resolved before anything is read or written: it must name a commit object the
+project's registered repository actually has, and the canonical object id Git returns is what is
+persisted, fingerprinted, and reported. A base the repository does not have is refused with
+`INVALID_BASE_COMMIT`; a repository that cannot be read is `REPOSITORY_UNAVAILABLE`. A base is
+never adopted from elsewhere and never silently replaced. Containment in the default branch is
+deliberately not required — the case this exists for is a predecessor merged locally and not yet
+pushed. Whether the base contains the right predecessors is the submitting controller's law, not
+Forge's; Forge's law is to execute from exactly the commit it was given.
+
+Once admitted, the base is immutable task provenance. A resubmission under the same task id with
+a different base — in either direction, including against a legacy task that has none — is
+refused with `TASK_BASE_MISMATCH` and the stored base is left exactly as it is; the base is
+compared before the contract fingerprint, so a disagreement about provenance is never reported as
+a generic contract conflict.
+
+The mechanism exists in Forge; no external application is known to supply a base yet.
+
+### Repository generation expectation
+
+`--expected-repository-registration <id>` (contract `1.4`) is the caller's statement of which
+repository generation — the `repository_registration_id` of the project it resolved through
+`project list` — the task is bound to. It is the caller's half of a single admission law:
+
+    caller expectation == resolved project generation == locked current project generation
+
+- **Required at `1.4`.** A submission declaring `1.4` or later without it is refused with
+  `EXPECTED_REGISTRATION_REQUIRED` before the database is opened; `details` name the field, the
+  declared version, and `required_since`.
+- **Honoured at every supported version.** A caller declaring `1.0`–`1.3` may still supply it, and
+  a supplied expectation is enforced exactly as at `1.4`; only the `normalized_request` echo is
+  gated by version. A caller on `1.3` or earlier that omits it keeps its existing shape: omission
+  stays valid there, and admission proceeds under whatever generation the project currently is.
+- **Pre-lock verification.** The expectation is compared against the resolved project snapshot
+  before any admission work — no base resolution, no id derivation, no existing-task
+  reconciliation, no lock, no insert — so a stale caller learns fast and a dry run answers
+  honestly. A difference is `REPOSITORY_REGISTRATION_MISMATCH`, whose `details` carry
+  `project_id`, `expected_repository_registration_id`, and `current_repository_registration_id`.
+- **Locked verification.** The guarded transaction that admits the task re-reads the project's
+  `repository_registration_id` under the write lock and refuses with the same code when it no
+  longer equals the generation the request was resolved against. A delete-and-recreate under the
+  same name reproduces the name-derived `project_id` while rotating the registration, so an id
+  lookup alone would let a task computed against one generation be committed — or adopted — under
+  the next.
+- **Both admission outcomes.** The locked proof governs a newly created deterministic task and an
+  existing task that a repeat submission would adopt alike: an existing task is only ever observed
+  through the same guarded read, so a deterministic task with identical contents admitted under a
+  rotated generation is refused rather than adopted, however the rotation interleaved with the
+  call. `TASK_ID_CONFLICT` / `DUPLICATE_TASK_ID` / `TASK_BASE_MISMATCH` are judged on the proven
+  generation, never on a rotated one.
+- **Exact guarded result.** `data.task` is the snapshot that proof was made about — the row this
+  call inserted, or the row it adopted — obtained before the transaction released its authority.
+  Nothing is read back afterwards: an unlocked re-read of the id could observe the task deleted,
+  the project rotated, and the same deterministic id admitted again under the new generation, and
+  would describe that replacement as this admission's result.
+- **Relocation is not a mismatch.** Relocation preserves the registration id, so a legitimately
+  moved repository passes both checks; `repository_path` is never compared.
+- **Dry run.** `--dry-run` runs the same pre-lock verification and the same guarded existing-task
+  read, so a validation against a stale generation is refused exactly as a submission would be.
+  When the id is unused, `data.task` on a dry run is the preview the caller supplied and
+  `would_create` says so.
+
+The expectation is a precondition on the project, never task material: it does not enter the task
+id, the idempotency fingerprint, attempt identity, or the task row.
+
 ### Idempotency
 
 Submission is safe to retry. Forge computes a fingerprint over the material content of a request —
 project, title, objective, acceptance criteria, architecture decisions, constraints, scope,
-out-of-scope, validation commands, tags, dependencies, risk, priority, and maximum attempts — and
-compares it against any task already stored under the same identifier.
+out-of-scope, validation commands, tags, dependencies, risk, priority, maximum attempts, and the
+admission base commit — and compares it against any task already stored under the same identifier.
+The expected repository registration is not fingerprint material; it is verified against the
+project instead (see above).
 
 | Situation | Result |
 |---|---|
@@ -385,7 +514,9 @@ compares it against any task already stored under the same identifier.
 | The identifier holds a task with the same fingerprint | No write occurs, the existing task is returned, and `data.created` is `false`. |
 | The identifier was supplied by the client and holds a different request | `TASK_ID_CONFLICT` |
 | The identifier was derived and holds a different request | `DUPLICATE_TASK_ID` |
+| The identifier holds a task admitted from a different base, or a base was supplied for a task that has none | `TASK_BASE_MISMATCH` |
 | The identifier names retained evidence of a deleted task, or differs only by case from a live task in the same project | `TASK_ID_COLLISION` |
+| The project's current `repository_registration_id` is not the one the caller expected, before or under the lock | `REPOSITORY_REGISTRATION_MISMATCH` |
 | The target project's stored name is not a safe path component, or another registered project aliases its Windows physical name | `PROJECT_UNSAFE` |
 
 The collision check shares one immediate transaction with the insert, so two concurrent
@@ -1129,6 +1260,13 @@ This response exits with code `2`. Stable current error codes are:
 | `TASK_ID_CONFLICT` | 2 | The client-supplied task identifier already holds a different request. |
 | `TASK_ID_COLLISION` | 2 | The task id names retained evidence of a deleted task, or differs only by case from a live task in the same project; either would alias one on-disk generation. |
 | `PROJECT_UNSAFE` | 2 | The target project's registration cannot accept submissions: its stored name is not a safe path component, or another registered project aliases its Windows physical name. |
+| `EXPECTED_REGISTRATION_REQUIRED` | 2 | The submission declared contract `1.4` or later without `expected_repository_registration_id`. Refused before the database is opened. |
+| `REPOSITORY_REGISTRATION_MISMATCH` | 2 | The project is not the repository generation the caller is bound to — its `repository_registration_id` differs from the expectation, either on the resolved snapshot or under the admission lock. No task was created or adopted. |
+| `INVALID_BASE_COMMIT` | 2 | `--base-commit` does not name a commit object in the project's registered repository. |
+| `TASK_BASE_MISMATCH` | 2 | The task id already holds a task admitted from a different base (or none); the stored base is left unchanged. |
+| `REPOSITORY_UNAVAILABLE` | 1 | The project's registered repository could not be read while resolving the request. |
+| `PROJECT_EXISTS` | 2 | `project add` named a project that is already registered. |
+| `REPOSITORY_ALREADY_REGISTERED` | 2 | The repository path is already registered to another project; one repository path is one registration. |
 | `INVALID_VALIDATION_COMMAND` | 2 | A submitted validation command was empty, too long, multi-line, or attempted to chain, redirect, or substitute commands. |
 | `INVALID_LIMIT` | 2 | `max_attempts` or `priority` was not an integer within its supported range. |
 | `CONFIGURATION_ERROR` | 2 | Forge is configured but not initialized. Run `forge init`. |
@@ -1147,7 +1285,7 @@ This response exits with code `2`. Stable current error codes are:
 | `UNSUPPORTED_SCHEMA` | 2 | The requested `--schema-version` is not supported. |
 | `TASK_ACTIVE` | 2 | The task is in an active execution state; deletion is refused. |
 | `PROJECT_NOT_EMPTY` | 2 | The project still has tasks; delete them explicitly first. |
-| `PROJECT_AMBIGUOUS` | 2 | The identifier names one project's id and a different project's name; deletion refuses to guess. |
+| `PROJECT_AMBIGUOUS` | 2 | The identifier names one project's id and a different project's name; deletion and relocation refuse to guess. |
 | `WORKTREE_CLEANUP_FAILED` | 1 | The task was deleted but its worktree could not be removed. `details.deleted` is `true`. |
 | `PROJECT_CLEANUP_FAILED` | 1 | The project was deleted but its worktree directory could not be removed. `details.deleted` is `true`. |
 
