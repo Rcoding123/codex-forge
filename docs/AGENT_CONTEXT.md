@@ -7,6 +7,17 @@ authority order. If this index disagrees with any of them, they win — fix the
 index. Use it to find the owning seam quickly instead of rereading the
 authority documents in full.
 
+## Status
+
+- Current Forge baseline: `e679c36` (main) — PR #12, repository-generation
+  admission (contract `1.4`). Contract `1.2` (PR #10) added the Forge-minted
+  `repository_registration_id`; `1.3` (PR #11) added the exact admission base
+  and `project relocate`.
+- Shared Chat `7c591c4` + Forge `e679c36` are certified for the
+  repository-generation boundary. The exact admission base exists in Forge but
+  the Shared Chat handoff (`--base-commit` from the controller) is NEXT, not
+  landed.
+
 ## Ownership map
 
 - Forge is the governed execution controller: it owns task truth, attempts,
@@ -28,6 +39,7 @@ Source in `src/codex_forge/`.
 | Evidence | `evidence.py` (read-only, versioned external access), `schemas/task-result.schema.json` |
 | Git / worktrees | `gitops.py` |
 | Task / project deletion | no dedicated module — lives in `db.py` / `orchestrator.py` / `cli.py`; contract in `docs/CONTROL-PLANE-API.md` (Task delete / Project delete); behavior proven by `tests/test_delete.py` |
+| Repository generation / admission | `task_submission.py` (`require_expected_registration`, `verify_expected_registration`, `admit_task`, `_locked_generation_guard`, `resolve_base_commit`), `db.py` (`add_project_guarded` mints the registration, `relocate_project`), `control_plane.py` (`*_SINCE` version gates); proven by `tests/test_repository_registration.py`, `tests/test_binding_contract.py` (boundary fixture pin), `tests/test_admission_base_commit.py` |
 | CLI / control plane | `cli.py`, `control_plane.py`, `docs/CONTROL-PLANE-API.md` |
 | Config / prompts / knowledge | `config.py`, `prompts.py`, `knowledge.py`, `validation.py` |
 | Telemetry | `telemetry.py` (OTel tracing), `agent_telemetry.py` (Gate 4 primitives — implemented, tested, unwired) |
@@ -50,6 +62,19 @@ Tests are flat in `tests/` — start from the test named for the seam:
   never evidence. Project deletion requires zero tasks and never cascades.
 - Simulation-only controller: the capability restrictions in the AGENTS.md
   controller laws are permanent; never add what they exclude.
+- `repository_registration_id` is the repository-generation identity: Forge
+  mints it, it is opaque, it enters no task id / fingerprint / attempt, it
+  survives relocation, and delete + recreate rotates it. `repo_path` is a
+  relocatable descriptor, never identity. Relocation ≠ generation change;
+  delete/recreate = generation change.
+- Contract `1.4` requires `expected_repository_registration_id`; a supplied
+  expectation is enforced at every version. Admission proves caller
+  expectation == resolved generation == locked generation, for a created task
+  and for an adopted/reconciled one alike, and answers with the exact Task
+  snapshot proven under that transaction — never a post-proof re-read.
+- Mutation and adversarial experiments (reverting a fix to prove a test
+  bites, rotating or poisoning state) run in an isolated worktree or scratch
+  copy — never by modifying or resetting the primary uncommitted worktree.
 
 ## Gates
 

@@ -6,6 +6,21 @@ All notable changes to Codex Forge are documented here. This project follows sem
 
 ### Added
 
+- Repository-generation admission (contract `1.4`, PR #12). A task submission carries
+  `expected_repository_registration_id` (`--expected-repository-registration <id>`): required on
+  a submission declaring `1.4` or later (`EXPECTED_REGISTRATION_REQUIRED`, exit code 2, refused
+  before the database is opened) and enforced at every supported version whenever supplied.
+  Admission proves that the caller's expectation, the resolved project's
+  `repository_registration_id`, and the registration re-read under the admission write lock are
+  one generation, and refuses `REPOSITORY_REGISTRATION_MISMATCH` (exit code 2) otherwise — for a
+  newly created task and for a deterministic task a repeat submission would adopt alike, closing
+  the delete-and-recreate races where a task computed against one generation could be committed
+  or adopted under the next. The admission result is the exact task snapshot proven under that
+  transaction; nothing is re-read after the lock is released. `normalized_request` echoes the
+  expectation at `1.4`; relocation (which preserves the registration) is never a mismatch.
+  Builds on contract `1.2` (`repository_registration_id` on project objects, PR #10) and `1.3`
+  (`--base-commit` / `admission_base_commit`, `project relocate`, PR #11).
+
 - Forge-owned deletion primitives. `forge task delete <task-id>` removes one non-running task and
   its owned `runs`/`decisions` rows in a single immediate transaction, refuses active execution
   states with `TASK_ACTIVE` (deletion is not cancellation), retains evidence and the task branch,
