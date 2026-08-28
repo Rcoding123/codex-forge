@@ -196,6 +196,16 @@ All notable changes to Codex Forge are documented here. This project follows sem
 
 ### Changed
 
+- Canonical Shared Chat contract fixture (`tests/fixtures/shared-chat-task-contract.json`, PR #14)
+  now carries the exact admission base: `--base-commit <B>` between `--id` and
+  `--expected-repository-registration` on the argv, and `admission_base_commit` before
+  `expected_repository_registration_id` in the expected request. Shared Chat consumes the `1.3`
+  exact-base mechanism (PR #11) on every `task add` since its PR #62; the fixture is byte-identical
+  in both repositories and pinned at
+  `d57cb24a87506e5bd63e8362d0d894caea3b68eeb2e69fe96a45d9845b0b41a3`. `MANIFEST.sha256` was
+  regenerated, which also caught up the hashes of documentation changed by PR #13. No runtime
+  behavior changed; the base law is as introduced in PR #11.
+
 - A review that could not inspect anything is reported as `REVIEW_INFRASTRUCTURE_BLOCKED` rather than
   as a `changes_required` verdict. It starts no repair phase, makes no further model call, retains
   the failing commands and exit codes in `review-infrastructure-block.json` next to the review
