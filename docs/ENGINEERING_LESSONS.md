@@ -43,6 +43,10 @@ It is not a changelog. Code, schemas, and tests remain executable truth.
 - Nonzero exit, missing output, malformed JSON, and schema-invalid output are infrastructure/protocol failures.
 - Do not launch repair without a valid semantic `changes_required` verdict.
 - Exit code 0 alone is not semantic success.
+- Schema-valid bytes are necessary, not sufficient: a review that launched a command and never
+  recorded its outcome asserted a verdict on evidence its own run never produced, so command
+  closure is part of admission and an unclosed review is refused as infrastructure, whichever way
+  the verdict fell.
 
 ## 5. Infrastructure failure is not implementation failure
 
