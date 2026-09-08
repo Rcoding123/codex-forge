@@ -7,7 +7,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from .config import ForgeConfig
+from .config import DEFAULT_REVIEW_SANDBOX, ForgeConfig
 from .db import ForgeDB
 from .gitops import (
     BaseCommitUnavailable,
@@ -27,12 +27,14 @@ from .prompts import implementation_prompt, review_prompt, validation_failure_su
 from .runner import (
     BLOCK_REVIEW_OUTPUT_UNUSABLE,
     BLOCK_REVIEW_TRANSPORT_FAILED,
+    REVIEW_OUTPUT_COMMANDS_UNCLOSED,
     CodexRunner,
     decode_review_result,
     ReviewInfrastructureBlock,
     ReviewTransportError,
     SandboxResolution,
     detect_review_infrastructure_block,
+    review_command_closure,
     sandbox_infrastructure_block,
     transport_http_status,
 )
@@ -67,9 +69,10 @@ from .utils import ControllerAlreadyRunning, controller_lock, ensure_dir, flatte
 from .validation import run_validations
 
 
-# The reviewer is asked for a read-only sandbox. Whether it gets one is decided by whether that
-# sandbox can launch a command on this host, not assumed.
-REVIEW_SANDBOX = "read-only"
+# The mode the reviewer is asked for when the operator has not configured one. Whether the reviewer
+# gets what was asked for is decided by whether that sandbox can launch a command on this host, not
+# assumed; `codex.review_sandbox` chooses what is asked for, never what is recorded as having run.
+REVIEW_SANDBOX = DEFAULT_REVIEW_SANDBOX
 
 # Written next to the review evidence, and the prefix `control_plane._safe_task_error` matches so
 # Shared Chat reports an infrastructure fault rather than a generic task error.
@@ -322,7 +325,7 @@ class Orchestrator:
         self.db.update_task(task.id, state=TaskState.REVIEWING)
         # Resolved before the reviewer is paid for: a sandbox that cannot launch a command produces
         # a review that inspects nothing, and the model call that produces it is pure waste.
-        resolution = self.runner.resolve_sandbox(REVIEW_SANDBOX, cwd=worktree)
+        resolution = self.runner.resolve_sandbox(self.config.review_sandbox, cwd=worktree)
         if resolution.sandbox is None:
             return self._fail_review_infrastructure(
                 task, artifact_dir, sandbox_infrastructure_block(resolution)
@@ -670,11 +673,31 @@ class Orchestrator:
         returned. On failure the attempt is classified through the unusable-output
         infrastructure path and the terminal outcome comes back instead: no semantic
         blocking_reason, no finding, no repair, no candidate-quality conclusion.
+
+        Valid bytes are necessary but not sufficient. A decoded result is admitted only if the
+        run's own event stream also certifies that every command the review launched recorded an
+        outcome: a reviewer that started the full gate, never observed it and answered anyway
+        asserted its verdict on evidence that does not exist, and the same is true whichever way
+        the verdict fell — an unobserved gate impeaches a `pass` and a `changes_required` alike,
+        so this runs before conformance and before any repair decision. Decoding is checked
+        first, so every failure class the controller already names keeps its existing kind and
+        its existing failure identity; closure only reaches the results the controller would
+        otherwise have trusted.
         """
         decoded, kind = decode_review_result(review, self._review_result_schema())
         if decoded is None:
             return None, self._retry_or_fail_review_output_unusable(
                 task, artifact_dir, resolution, review, kind
+            )
+        closure = review_command_closure(review)
+        if not closure.certified:
+            return None, self._retry_or_fail_review_output_unusable(
+                task,
+                artifact_dir,
+                resolution,
+                review,
+                REVIEW_OUTPUT_COMMANDS_UNCLOSED,
+                commands=closure.open_commands,
             )
         return enforce_specification_conformance(task, decoded), None
 
@@ -685,6 +708,7 @@ class Orchestrator:
         resolution: SandboxResolution,
         review: CodexRunResult,
         kind: str | None,
+        commands: tuple[str, ...] = (),
     ) -> str:
         """Bounded retry for a review whose exit-0 output never became a valid ReviewResult.
 
@@ -702,6 +726,11 @@ class Orchestrator:
         text, and the block's evidence map points at them. Two malformed outputs with different
         volatile content but the same controller-observable failure are therefore the same
         bounded failure class, and loop detection still terminates the retrying.
+
+        `commands` — the launched commands whose outcome an unclosed review never recorded — is
+        the one reviewer-influenced input here, and it reaches the block artifact's
+        `failed_commands` field and nothing else. It is bounded at its source and stays out of
+        `last_error`, the summary and the fingerprint, exactly like every other raw byte.
         """
         summary = f"review output unusable; kind={kind}"
         if review.exit_code is not None:
@@ -715,15 +744,27 @@ class Orchestrator:
             f"exit_code={review.exit_code}",
             "status=None",
         ]
+        # Controller-authored and safe for the durable record: an unaccounted command launch and
+        # an event stream that cannot be read are different operator-facing facts, and the block
+        # artifact says which one refused this review.
+        detail_lead = ""
+        if kind == REVIEW_OUTPUT_COMMANDS_UNCLOSED:
+            detail_lead = (
+                "The reviewer's own event stream never recorded an outcome for a command it "
+                "launched, so the verdict rests on evidence the run never produced. "
+                if commands
+                else "The reviewer's event stream could not be read, so no launched command "
+                "could be shown to have recorded an outcome. "
+            )
         block = ReviewInfrastructureBlock(
             reason=BLOCK_REVIEW_OUTPUT_UNUSABLE,
             requested_sandbox=resolution.requested,
             sandbox=resolution.sandbox,
             exit_codes=(review.exit_code,) if review.exit_code is not None else (),
-            commands=(),
+            commands=commands,
             detail=(
-                f"{summary}. The reviewer's raw final output, event stream and stderr are "
-                "retained in the attempt's raw artifacts."
+                f"{summary}. {detail_lead}The reviewer's raw final output, event stream and "
+                "stderr are retained in the attempt's raw artifacts."
             ),
             evidence={
                 "events": str(review.jsonl_path),

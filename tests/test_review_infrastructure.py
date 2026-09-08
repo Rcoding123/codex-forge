@@ -33,7 +33,7 @@ from types import SimpleNamespace
 import pytest
 
 from codex_forge.cli import package_root
-from codex_forge.config import ForgeConfig, TelemetryConfig
+from codex_forge.config import DEFAULT_REVIEW_SANDBOX, ForgeConfig, TelemetryConfig
 from codex_forge.control_plane import _safe_task_error
 from codex_forge.models import CodexRunResult, Project, Task, TaskState, ValidationResult
 from codex_forge.orchestrator import (
@@ -457,8 +457,10 @@ class RecordingRunner:
         self.resolution = resolution
         self.phases: list[str] = []
         self.sandboxes: list[str | None] = []
+        self.requested_sandboxes: list[str] = []
 
     def resolve_sandbox(self, requested: str, *, cwd: Path) -> SandboxResolution:
+        self.requested_sandboxes.append(requested)
         return self.resolution
 
     def run(self, *, prompt, cwd, artifact_dir, phase, model, effort, schema_name, sandbox=None):
@@ -517,6 +519,7 @@ def build_orchestrator(
     finals: dict[str, tuple[dict, list[str]]],
     resolution: SandboxResolution | None = None,
     validations_pass: bool = True,
+    review_sandbox: str = REVIEW_SANDBOX,
 ) -> tuple[Orchestrator, RecordingDB, RecordingRunner, Task]:
     worktree = tmp_path / "worktree"
     worktree.mkdir(parents=True, exist_ok=True)
@@ -539,6 +542,7 @@ def build_orchestrator(
         evidence_root=tmp_path / "evidence",
         workspace_root=tmp_path / "worktrees",
         sandbox="danger-full-access",
+        review_sandbox=review_sandbox,
         max_repair_cycles=2,
         max_identical_failures=2,
         max_task_tokens=0,
@@ -755,6 +759,157 @@ def test_the_review_runs_under_the_resolved_sandbox(tmp_path: Path, monkeypatch)
     # Implementation keeps the configured sandbox (passed as None, meaning "the configured one");
     # review runs under the mode that was proven able to launch a command.
     assert runner.sandboxes == [None, "danger-full-access"]
+
+
+# --------------------------------------------------------------------------------------------
+# Part 3b - the operator chooses what the reviewer is asked for, never what evidence records
+#
+# The canary above is one failure mode of a restricted reviewer: nothing launches at all, and the
+# probe catches it. The other is a reviewer that launches but cannot do its job under the restricted
+# token. That is an operator decision, not something the controller can detect, so `codex.review_
+# sandbox` selects the requested mode. It changes only the request: resolution, fallback and the
+# recorded requested/effective pair are untouched, so widening the reviewer stays visible.
+# --------------------------------------------------------------------------------------------
+
+
+def test_the_default_review_sandbox_is_still_read_only():
+    """No configuration change means no behaviour change for an existing installation."""
+    assert DEFAULT_REVIEW_SANDBOX == "read-only"
+    assert REVIEW_SANDBOX == DEFAULT_REVIEW_SANDBOX
+    # The dataclass default and the constant the controller documents cannot drift apart.
+    assert ForgeConfig(
+        config_path=Path("forge.toml"),
+        workspace_root=Path("w"),
+        data_root=Path("d"),
+        repository_root=Path("r"),
+        inbox_root=Path("i"),
+        database_path=Path("f.db"),
+        evidence_root=Path("e"),
+        knowledge_root=Path("k"),
+    ).review_sandbox == REVIEW_SANDBOX
+
+
+def test_an_unconfigured_controller_still_requests_the_read_only_reviewer(tmp_path: Path, monkeypatch):
+    orchestrator, db, runner, task = build_orchestrator(
+        tmp_path,
+        monkeypatch,
+        finals={
+            "implementation": (COMPLETED_IMPLEMENTATION_FINAL, []),
+            "review": (PASSING_REVIEW_FINAL, INSPECTED_REVIEW_EVENTS),
+        },
+    )
+
+    orchestrator._execute_task_body(task)
+
+    assert runner.requested_sandboxes == ["read-only"]
+
+
+def test_the_configured_review_sandbox_is_the_one_requested(tmp_path: Path, monkeypatch):
+    """The controller asks for the operator's mode, not the hard-coded default."""
+    orchestrator, db, runner, task = build_orchestrator(
+        tmp_path,
+        monkeypatch,
+        finals={
+            "implementation": (COMPLETED_IMPLEMENTATION_FINAL, []),
+            "review": (PASSING_REVIEW_FINAL, INSPECTED_REVIEW_EVENTS),
+        },
+        review_sandbox="danger-full-access",
+        resolution=SandboxResolution(
+            requested="danger-full-access", sandbox="danger-full-access", probe=None
+        ),
+    )
+
+    orchestrator._execute_task_body(task)
+
+    assert runner.requested_sandboxes == ["danger-full-access"]
+    # Implementation still passes None, meaning "the configured worker sandbox"; only the review
+    # phase carries an explicit mode, and it is the resolved one.
+    assert runner.sandboxes == [None, "danger-full-access"]
+
+
+def test_terminal_evidence_records_the_configured_request_and_the_effective_mode(
+    tmp_path: Path, monkeypatch
+):
+    """A completed task states what was asked for and what actually ran, both truthfully."""
+    orchestrator, db, runner, task = build_orchestrator(
+        tmp_path,
+        monkeypatch,
+        finals={
+            "implementation": (COMPLETED_IMPLEMENTATION_FINAL, []),
+            "review": (PASSING_REVIEW_FINAL, INSPECTED_REVIEW_EVENTS),
+        },
+        review_sandbox="danger-full-access",
+        resolution=SandboxResolution(
+            requested="danger-full-access", sandbox="danger-full-access", probe=None
+        ),
+    )
+
+    orchestrator._execute_task_body(task)
+
+    result = db.updates[-1][1]["result"]
+    assert result["status"] == "completed"
+    assert result["review_sandbox_requested"] == "danger-full-access"
+    assert result["review_sandbox"] == "danger-full-access"
+
+
+def test_terminal_evidence_still_reports_a_fallback_against_the_configured_request(
+    tmp_path: Path, monkeypatch
+):
+    """Configuring the request does not let a degraded review be recorded as the requested one."""
+    orchestrator, db, runner, task = build_orchestrator(
+        tmp_path,
+        monkeypatch,
+        finals={
+            "implementation": (COMPLETED_IMPLEMENTATION_FINAL, []),
+            "review": (PASSING_REVIEW_FINAL, INSPECTED_REVIEW_EVENTS),
+        },
+        review_sandbox="workspace-write",
+        resolution=SandboxResolution(
+            requested="workspace-write", sandbox="danger-full-access", probe=None
+        ),
+    )
+
+    orchestrator._execute_task_body(task)
+
+    result = db.updates[-1][1]["result"]
+    assert result["review_sandbox_requested"] == "workspace-write"
+    assert result["review_sandbox"] == "danger-full-access"
+
+
+def test_a_configured_open_review_sandbox_is_never_probed(tmp_path: Path, monkeypatch):
+    """`danger-full-access` uses no restricted token, so probing it would be a pointless launch."""
+    config = make_config(tmp_path, review_sandbox="danger-full-access")
+    runner = CodexRunner(config, tmp_path / "schemas")
+    monkeypatch.setattr(
+        runner,
+        "probe_sandbox_launch",
+        lambda **_: pytest.fail("an explicitly configured open reviewer must not be probed"),
+    )
+
+    resolution = runner.resolve_sandbox(config.review_sandbox, cwd=tmp_path)
+
+    assert resolution.requested == "danger-full-access"
+    assert resolution.sandbox == "danger-full-access"
+    assert resolution.probe is None
+    assert not resolution.degraded
+
+
+def test_a_configured_restricted_review_sandbox_still_probes_and_falls_back(tmp_path: Path):
+    """The canary protection survives: any restricted request is still proven before it is used."""
+    config = make_config(
+        tmp_path,
+        review_sandbox="workspace-write",
+        codex_executable=str(fake_codex(tmp_path, SANDBOX_REFUSES_TO_LAUNCH)),
+    )
+    runner = CodexRunner(config, tmp_path / "schemas")
+
+    resolution = runner.resolve_sandbox(config.review_sandbox, cwd=tmp_path)
+
+    assert resolution.requested == "workspace-write"
+    assert resolution.probe is not None and resolution.probe.exit_code == STATUS_DLL_INIT_FAILED
+    # The fallback is still the mode the operator already trusts for implementation, never wider.
+    assert resolution.sandbox == "danger-full-access"
+    assert resolution.degraded
 
 
 # --------------------------------------------------------------------------------------------

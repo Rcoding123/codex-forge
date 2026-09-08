@@ -40,6 +40,18 @@ ReviewResult, so missing, empty, malformed or schema-invalid exit-0 output is cl
 blocking_reason, no repair, a controller-owned kind as the only new identity fact, and the raw
 attempt artifacts keeping sole custody of the unusable bytes.
 
+Part 6 closes the gap W3R2 exposed between those two checks. That review launched the full gate,
+its own event stream never recorded an outcome for it, and it answered `pass` anyway: the
+launch-dead detector reads only `item.completed` events and never saw the abandoned command, while
+the decoder validates only the final bytes and passed a well-formed report. So a schema-valid
+verdict resting on evidence the run never produced was trusted. Admission now also requires the
+run's own stream to account for every command it launched — refused as `commands_unclosed` under
+the same bounded `REVIEW_INFRASTRUCTURE_BLOCKED` ownership, verdict-agnostically, so an
+unobserved gate can neither certify conformance nor launch paid repair against phantom findings.
+The rule is one-directional and evidential: an unobserved *outcome* impeaches, an unobserved
+launch does not, and closure of the recorded stream is never a claim about operating-system
+process exit.
+
 **No test in this file makes a model request, and none validates against the live provider.**
 """
 
@@ -56,20 +68,28 @@ from codex_forge.orchestrator import (
     REVIEW_INFRASTRUCTURE_BLOCKED,
 )
 from codex_forge.runner import (
+    BLOCK_COMMANDS_NEVER_EXECUTED,
     BLOCK_REVIEW_TRANSPORT_FAILED,
+    REVIEW_OUTPUT_COMMANDS_UNCLOSED,
     REVIEW_OUTPUT_INVALID_JSON,
     REVIEW_OUTPUT_MISSING,
     REVIEW_OUTPUT_SCHEMA_INVALID,
     BLOCK_REVIEW_OUTPUT_UNUSABLE,
+    _MAX_RECORDED_COMMAND_CHARS,
+    _MAX_RECORDED_COMMANDS,
     decode_review_result,
+    review_command_closure,
     transport_http_status,
 )
 from codex_forge.telemetry import OUTCOME_REVIEW_INFRASTRUCTURE_BLOCKED
 from strict_schema import instance_violations, schema_metrics, structural_strict_schema_violations
 from test_review_infrastructure import (
+    BLOCKED_REVIEW_EVENTS,
+    CANARY_BLOCKED_FINAL,
     COMPLETED_IMPLEMENTATION_FINAL,
     GENUINE_CHANGES_REQUIRED_FINAL,
     INSPECTED_REVIEW_EVENTS,
+    PASSING_REVIEW_FINAL,
     RecordingRunner,
     build_orchestrator,
 )
@@ -1345,3 +1365,462 @@ def test_decode_review_result_is_the_single_trusted_transition(tmp_path):
         decoded, kind = decode_review_result(final_probe(tmp_path, final_bytes), schema)
         assert decoded is None, final_bytes
         assert kind == expected_kind, final_bytes
+
+
+# --------------------------------------------------------------------------------------------
+# Part 6 - W3R2: a decoded verdict is admitted only if its own stream closed every command
+# --------------------------------------------------------------------------------------------
+# Acceptance run W3R2 launched the full validation gate inside the review phase, never recorded an
+# outcome for it, and returned a schema-valid `pass`. Both existing checks were silent by
+# construction: `detect_review_infrastructure_block` reads only `item.completed` events, so an
+# abandoned launch is invisible to it, and `decode_review_result` inspects only the final bytes,
+# which were well formed. The verdict was therefore trusted on an evidentiary basis part of which
+# never existed. Admission now consults the run's own event stream as well.
+#
+# What the stream can prove is exactly what is asserted here: that no outcome was recorded for a
+# command the reviewer launched. It cannot prove whether a child process was orphaned, killed, or
+# finished after the stream closed, and closure is never a claim about operating-system process
+# exit - every one of those cases impeaches the evidence identically, so the correction stays
+# purely epistemic and adds no process-ownership machinery.
+
+W3R2_GATE_COMMAND = r'"C:\Program Files\PowerShell\7\pwsh.exe" -Command "python -m pytest"'
+
+
+def command_item(command: str, **fields) -> dict:
+    """A `command_execution` item in the shape the Codex CLI emits, minus any field omitted."""
+    return {"type": "command_execution", "command": command, "aggregated_output": "", **fields}
+
+
+def started(command: str, **fields) -> str:
+    """An `item.started` line. `id` is passed explicitly so id-less starts stay expressible."""
+    return json.dumps(
+        {
+            "type": "item.started",
+            "item": command_item(command, exit_code=None, status="in_progress", **fields),
+        }
+    )
+
+
+def completed(command: str, exit_code: int = 0, **fields) -> str:
+    return json.dumps(
+        {
+            "type": "item.completed",
+            "item": command_item(
+                command,
+                exit_code=exit_code,
+                status="failed" if exit_code else "completed",
+                **fields,
+            ),
+        }
+    )
+
+
+THREAD_STARTED = json.dumps({"type": "thread.started", "thread_id": "thread-1"})
+# The W3R2 shape: the gate was launched and its outcome was never recorded.
+UNCLOSED_GATE_EVENTS = [THREAD_STARTED, started(W3R2_GATE_COMMAND, id="item_7")]
+CLOSED_GATE_EVENTS = [
+    THREAD_STARTED,
+    started(W3R2_GATE_COMMAND, id="item_7"),
+    completed(W3R2_GATE_COMMAND, 0, id="item_7"),
+]
+# A review that ran no command at all: legitimate, and never forced to run one.
+STATIC_REVIEW_EVENTS = [THREAD_STARTED]
+
+
+def closure_probe(tmp_path, events, *, name="stream") -> CodexRunResult:
+    """A minimal exit-0 run shape whose event stream holds `events`."""
+    directory = tmp_path / "closure" / name
+    directory.mkdir(parents=True, exist_ok=True)
+    jsonl = directory / "review.events.jsonl"
+    jsonl.write_text("".join(f"{line}\n" for line in events), encoding="utf-8")
+    final_path = directory / "review.final.json"
+    final_path.write_text(json.dumps(CONFORMING_REVIEW_RESULT), encoding="utf-8")
+    stderr = directory / "review.stderr.log"
+    stderr.write_text("", encoding="utf-8")
+    return CodexRunResult(
+        exit_code=0,
+        final={},
+        jsonl_path=jsonl,
+        final_path=final_path,
+        stderr_path=stderr,
+        thread_id="thread-1",
+        usage={},
+    )
+
+
+def test_a_started_command_with_a_recorded_outcome_is_certified_closed(tmp_path):
+    """Any recorded outcome closes a launch. The exit code is not the question here: a command
+    that ran and failed was still observed, and launch-failure semantics stay the sibling
+    detector's alone."""
+    for name, exit_code in (("zero", 0), ("nonzero", 1), ("launch-failure", -1073741502)):
+        closure = review_command_closure(
+            closure_probe(
+                tmp_path,
+                [
+                    THREAD_STARTED,
+                    started("pytest", id="item_1"),
+                    completed("pytest", exit_code, id="item_1"),
+                ],
+                name=name,
+            )
+        )
+        assert closure.certified, exit_code
+        assert closure.open_commands == ()
+
+
+def test_the_w3r2_shape_a_launched_command_with_no_recorded_outcome_is_refused(tmp_path):
+    """The defect itself: the gate was started, no outcome was ever recorded, and the open
+    command comes back so the block artifact can name what the reviewer abandoned."""
+    closure = review_command_closure(closure_probe(tmp_path, UNCLOSED_GATE_EVENTS))
+
+    assert not closure.certified
+    assert closure.open_commands == (W3R2_GATE_COMMAND,)
+
+
+def test_a_review_that_ran_no_command_is_trivially_closed(tmp_path):
+    """A static review is legitimate; this check never obliges a reviewer to execute anything."""
+    closure = review_command_closure(closure_probe(tmp_path, STATIC_REVIEW_EVENTS))
+
+    assert closure.certified and closure.open_commands == ()
+
+
+def test_a_recorded_outcome_without_a_recorded_launch_is_certified(tmp_path):
+    """The rule is one-directional: an unobserved *outcome* impeaches, an unobserved launch does
+    not. This is also the shape every pre-existing fixture in the suite emits."""
+    assert review_command_closure(
+        closure_probe(tmp_path, INSPECTED_REVIEW_EVENTS, name="completion-only")
+    ).certified
+    # Including a completion carrying no id at all, which is what the Part 5 runner writes.
+    assert review_command_closure(
+        closure_probe(
+            tmp_path, [THREAD_STARTED, completed("git diff master...HEAD")], name="idless-completion"
+        )
+    ).certified
+
+
+def test_duplicate_and_out_of_order_ids_cannot_manufacture_a_refusal(tmp_path):
+    """Set semantics over ids: multiplicity and line order are stream noise, not evidence."""
+    noisy = [
+        THREAD_STARTED,
+        completed("pytest", 0, id="item_1"),  # completion observed before its own start line
+        started("pytest", id="item_1"),
+        started("pytest", id="item_1"),  # duplicate launch line for the same id
+        completed("ruff check .", 0, id="item_2"),
+        completed("ruff check .", 0, id="item_2"),  # duplicate completion
+        started("ruff check .", id="item_2"),
+    ]
+    assert review_command_closure(closure_probe(tmp_path, noisy, name="noisy")).certified
+
+    # The same noise around one genuinely unaccounted launch still refuses, and names only it.
+    closure = review_command_closure(
+        closure_probe(tmp_path, noisy + [started(W3R2_GATE_COMMAND, id="item_9")], name="noisy-open")
+    )
+    assert not closure.certified
+    assert closure.open_commands == (W3R2_GATE_COMMAND,)
+
+
+def test_a_launch_with_no_usable_identity_can_never_be_paired(tmp_path):
+    """Identity is explicit: a start pairs only through a non-empty string id. Nothing is inferred
+    from counts or chronology, so an unidentifiable launch stays open even beside a completion."""
+    for name, fields in (
+        ("missing-id", {}),
+        ("null-id", {"id": None}),
+        ("numeric-id", {"id": 7}),
+        ("empty-id", {"id": ""}),
+    ):
+        closure = review_command_closure(
+            closure_probe(
+                tmp_path,
+                [
+                    THREAD_STARTED,
+                    started(W3R2_GATE_COMMAND, **fields),
+                    completed(W3R2_GATE_COMMAND, 0, id="item_1"),
+                ],
+                name=name,
+            )
+        )
+        assert not closure.certified, name
+        assert closure.open_commands == (W3R2_GATE_COMMAND,), name
+
+
+def test_unrelated_item_types_are_not_command_outcome_claims(tmp_path):
+    """Only `command_execution` items assert that a command produced an outcome. Widening the
+    check to other item types would refuse on evidence that says nothing about commands."""
+    events = [
+        THREAD_STARTED,
+        json.dumps({"type": "item.started", "item": {"id": "r1", "type": "reasoning"}}),
+        json.dumps({"type": "item.started", "item": {"id": "f1", "type": "file_change"}}),
+        json.dumps({"type": "item.started", "item": {"id": "a1", "type": "agent_message"}}),
+        json.dumps({"type": "turn.started"}),
+    ]
+    assert review_command_closure(closure_probe(tmp_path, events, name="unrelated")).certified
+
+
+def test_malformed_lines_are_skipped_and_a_real_open_command_is_still_caught(tmp_path):
+    """Tolerant per-line parsing is the existing convention. A lost completion line therefore
+    reads as unclosed, which is the fail-closed direction; garbage alone never refuses."""
+    garbage = [
+        "",
+        "not json at all",
+        '{"type": "item.completed", "item": {"type": "command_execution"',  # truncated
+        json.dumps(5),  # valid JSON, not an object
+        json.dumps({"type": "item.completed", "item": "not-an-object"}),
+        json.dumps({"type": "item.started", "item": None}),
+    ]
+    assert review_command_closure(closure_probe(tmp_path, garbage, name="garbage-only")).certified
+
+    closure = review_command_closure(
+        closure_probe(tmp_path, garbage + UNCLOSED_GATE_EVENTS, name="garbage-and-open")
+    )
+    assert not closure.certified
+    assert closure.open_commands == (W3R2_GATE_COMMAND,)
+
+
+def test_an_unreadable_event_stream_is_refused_with_nothing_to_name(tmp_path):
+    """Evidence ambiguity fails closed on admission: a verdict whose evidence stream cannot be
+    read is not admitted. `certified` and `open_commands` are separate fields precisely so this
+    case cannot be confused with a healthy review at the call site."""
+    absent = closure_probe(tmp_path, [], name="absent")
+    absent.jsonl_path.unlink()
+    readable = closure_probe(tmp_path, [], name="directory")
+    unreadable = CodexRunResult(
+        exit_code=0,
+        final={},
+        jsonl_path=readable.jsonl_path.parent,  # a directory: readable path, unreadable stream
+        final_path=readable.final_path,
+        stderr_path=readable.stderr_path,
+        thread_id="thread-1",
+        usage={},
+    )
+
+    for result in (absent, unreadable):
+        closure = review_command_closure(result)
+        assert not closure.certified
+        assert closure.open_commands == ()
+
+
+def test_open_command_evidence_is_bounded_in_count_and_in_length(tmp_path):
+    """Reviewer-influenced bytes stay bounded exactly like the sibling detector's, while
+    `certified` still reflects every open command beyond the recorded bound."""
+    overlong = "python -m pytest " + "x" * (_MAX_RECORDED_COMMAND_CHARS * 3)
+    events = [THREAD_STARTED] + [
+        started(overlong, id=f"item_{index}") for index in range(_MAX_RECORDED_COMMANDS + 5)
+    ]
+
+    closure = review_command_closure(closure_probe(tmp_path, events, name="bounded"))
+
+    assert not closure.certified
+    assert len(closure.open_commands) == _MAX_RECORDED_COMMANDS
+    for command in closure.open_commands:
+        assert len(command) == _MAX_RECORDED_COMMAND_CHARS + len("...")
+        assert command.endswith("...")
+
+
+# --- controller routing ----------------------------------------------------------------------
+
+
+def build_review_stream(tmp_path, monkeypatch, *, final=None, events=None, **kwargs):
+    """The controller with one scripted review phase, whose event stream the test chooses."""
+    return build_orchestrator(
+        tmp_path,
+        monkeypatch,
+        finals={
+            "implementation": (COMPLETED_IMPLEMENTATION_FINAL, []),
+            "review": (final if final is not None else PASSING_REVIEW_FINAL, events or []),
+        },
+        **kwargs,
+    )
+
+
+UNCLOSED_LAST_ERROR = (
+    f"{REVIEW_INFRASTRUCTURE_BLOCKED}: review output unusable; "
+    f"kind={REVIEW_OUTPUT_COMMANDS_UNCLOSED}; exit_code=0"
+)
+
+
+def test_a_schema_valid_pass_on_an_unobserved_gate_is_infrastructure_not_semantic(
+    tmp_path, monkeypatch
+):
+    """The W3R2 replay. The report decodes, conforms and says `pass`; its own stream says the gate
+    it launched was never observed. The task must not complete on it, and no finding, no repair
+    and no candidate-quality conclusion may be produced from an environment fault."""
+    orchestrator, db, runner, task = build_review_stream(
+        tmp_path, monkeypatch, events=UNCLOSED_GATE_EVENTS
+    )
+
+    outcome = orchestrator._execute_task_body(task)
+
+    assert outcome == OUTCOME_REVIEW_INFRASTRUCTURE_BLOCKED
+    assert never_completed(db)
+    assert db.state == TaskState.READY  # bounded retry, exactly like any other unusable output
+    assert runner.phases == ["implementation", "review"]
+    assert not [phase for phase in runner.phases if "repair" in phase]
+    assert db.last_error == UNCLOSED_LAST_ERROR
+    record = block_record(tmp_path, task, attempt=1)
+    assert record["error_code"] == REVIEW_INFRASTRUCTURE_BLOCKED
+    assert record["reason"] == BLOCK_REVIEW_OUTPUT_UNUSABLE
+    assert record["kind"] == REVIEW_OUTPUT_COMMANDS_UNCLOSED
+    assert record["exit_codes"] == [0]
+    assert "http_status" not in record
+    # The abandoned command is evidence: it reaches `failed_commands` and nothing else.
+    assert record["failed_commands"] == [W3R2_GATE_COMMAND]
+    assert W3R2_GATE_COMMAND not in db.last_error
+    assert Path(record["evidence"]["events"]).is_file()
+    assert Path(record["evidence"]["final"]).is_file()
+    # The control plane still reads this as an environment fault, not a defect in the code.
+    code, message = _safe_task_error(db.last_error)
+    assert code == REVIEW_INFRASTRUCTURE_BLOCKED
+    assert "not a finding about the task's code" in message
+
+
+def test_an_unclosed_changes_required_verdict_launches_no_repair(tmp_path, monkeypatch):
+    """Verdict-agnostic by design: an abandoned gate impeaches `changes_required` exactly as it
+    impeaches `pass`, so no paid repair phase runs against findings from an unobserved run."""
+    orchestrator, db, runner, task = build_review_stream(
+        tmp_path,
+        monkeypatch,
+        final=GENUINE_CHANGES_REQUIRED_FINAL,
+        events=UNCLOSED_GATE_EVENTS,
+    )
+
+    outcome = orchestrator._execute_task_body(task)
+
+    assert outcome == OUTCOME_REVIEW_INFRASTRUCTURE_BLOCKED
+    assert never_completed(db)
+    assert runner.phases == ["implementation", "review"]
+    assert not [phase for phase in runner.phases if "repair" in phase]
+    assert db.last_error == UNCLOSED_LAST_ERROR
+    assert block_record(tmp_path, task, attempt=1)["kind"] == REVIEW_OUTPUT_COMMANDS_UNCLOSED
+
+
+def test_a_review_whose_launched_command_closed_still_completes(tmp_path, monkeypatch):
+    """The positive law: an observed gate is a healthy review and nothing about it changes."""
+    orchestrator, db, runner, task = build_review_stream(
+        tmp_path, monkeypatch, events=CLOSED_GATE_EVENTS
+    )
+
+    outcome = orchestrator._execute_task_body(task)
+
+    assert outcome == "completed"
+    assert db.state == TaskState.COMPLETED
+    assert runner.phases == ["implementation", "review"]
+
+
+def test_a_review_that_launched_no_command_still_completes(tmp_path, monkeypatch):
+    """No-command compatibility: a static review is trivially closed and completes as before."""
+    orchestrator, db, runner, task = build_review_stream(
+        tmp_path, monkeypatch, events=STATIC_REVIEW_EVENTS
+    )
+
+    assert orchestrator._execute_task_body(task) == "completed"
+    assert db.state == TaskState.COMPLETED
+
+
+def test_a_completion_only_stream_still_completes(tmp_path, monkeypatch):
+    """The shape every pre-existing fixture emits keeps completing: no test in the suite has to
+    fabricate `item.started` lines to stay healthy."""
+    orchestrator, db, runner, task = build_review_stream(
+        tmp_path, monkeypatch, events=INSPECTED_REVIEW_EVENTS
+    )
+
+    assert orchestrator._execute_task_body(task) == "completed"
+    assert db.state == TaskState.COMPLETED
+
+
+def test_repeated_unclosed_reviews_share_one_fingerprint_and_the_loop_terminates(
+    tmp_path, monkeypatch
+):
+    """Failure identity stays controller-owned: two abandoned reviews are the same class even
+    when the abandoned command text differs, so bounded loop detection still terminates and the
+    owning class survives into the terminal error."""
+    orchestrator, db, runner, task = build_review_stream(
+        tmp_path, monkeypatch, events=UNCLOSED_GATE_EVENTS
+    )
+
+    orchestrator._execute_task_body(task)
+    first = latest_fingerprint(db)
+    reclaim_for_next_attempt(db, task)
+    other_command = f"python -m pytest -k {SECRET_VALUE}"
+    runner.finals["review"] = (
+        PASSING_REVIEW_FINAL,
+        [THREAD_STARTED, started(other_command, id="item_42")],
+    )
+    orchestrator._execute_task_body(task)
+    second = latest_fingerprint(db)
+
+    assert first is not None and first == second
+    assert db.state == TaskState.FAILED
+    assert db.last_error == (
+        f"{REVIEW_INFRASTRUCTURE_BLOCKED}: LOOP_DETECTED after 2 identical failures.\n"
+        f"review output unusable; kind={REVIEW_OUTPUT_COMMANDS_UNCLOSED}; exit_code=0"
+    )
+    assert SECRET_VALUE not in db.last_error
+    assert block_record(tmp_path, task, attempt=2)["failed_commands"] == [other_command]
+    assert SECRET_VALUE not in block_path(tmp_path, task, attempt=1).read_text(encoding="utf-8")
+
+
+def test_an_unclosed_review_is_a_different_failure_class_from_unusable_bytes(tmp_path, monkeypatch):
+    """A review that produced garbage and a review that abandoned its gate are different facts,
+    and the controller-owned kind keeps their failure identities disjoint."""
+    orchestrator, db, runner, task = build_review_stream(
+        tmp_path, monkeypatch, events=UNCLOSED_GATE_EVENTS
+    )
+
+    orchestrator._execute_task_body(task)
+    unclosed = latest_fingerprint(db)
+    reclaim_for_next_attempt(db, task)
+    orchestrator.runner = UnusableReviewOutputRunner(
+        runner.finals, runner.resolution, {"review"}, final_bytes="{not json"
+    )
+    orchestrator._execute_task_body(task)
+    invalid_json = latest_fingerprint(db)
+
+    assert unclosed is not None and invalid_json is not None
+    assert unclosed != invalid_json
+    assert db.last_error == (
+        f"{REVIEW_INFRASTRUCTURE_BLOCKED}: review output unusable; "
+        f"kind={REVIEW_OUTPUT_INVALID_JSON}; exit_code=0"
+    )
+
+
+def test_a_launch_dead_review_stays_terminal_even_with_an_unclosed_command(tmp_path, monkeypatch):
+    """Precedence pin 1: the launch-dead detector runs first and keeps its terminal, no-retry
+    ownership. A stream that is both launch-dead and unclosed is still `commands_never_executed`."""
+    orchestrator, db, runner, task = build_review_stream(
+        tmp_path,
+        monkeypatch,
+        final=CANARY_BLOCKED_FINAL,
+        events=BLOCKED_REVIEW_EVENTS + [started(W3R2_GATE_COMMAND, id="item_9")],
+    )
+
+    outcome = orchestrator._execute_task_body(task)
+
+    assert outcome == OUTCOME_REVIEW_INFRASTRUCTURE_BLOCKED
+    assert db.state == TaskState.FAILED  # terminal, not the unusable path's bounded retry
+    assert never_completed(db)
+    record = block_record(tmp_path, task, attempt=1)
+    assert record["reason"] == BLOCK_COMMANDS_NEVER_EXECUTED
+    assert "kind" not in record
+    assert db.last_error != UNCLOSED_LAST_ERROR
+
+
+def test_a_decode_failure_outranks_an_unclosed_command(tmp_path, monkeypatch):
+    """Precedence pin 2: decoding is judged before closure, so every failure class the controller
+    already names keeps its existing kind - and therefore its existing fingerprint - unchanged."""
+    orchestrator, db, runner, task = build_review_stream(
+        tmp_path,
+        monkeypatch,
+        final={"verdict": "pass", "summary": "Half a report.", "findings": []},
+        events=UNCLOSED_GATE_EVENTS,
+    )
+
+    outcome = orchestrator._execute_task_body(task)
+
+    assert outcome == OUTCOME_REVIEW_INFRASTRUCTURE_BLOCKED
+    assert db.last_error == (
+        f"{REVIEW_INFRASTRUCTURE_BLOCKED}: review output unusable; "
+        f"kind={REVIEW_OUTPUT_SCHEMA_INVALID}; exit_code=0"
+    )
+    record = block_record(tmp_path, task, attempt=1)
+    assert record["kind"] == REVIEW_OUTPUT_SCHEMA_INVALID
+    assert record["failed_commands"] == []

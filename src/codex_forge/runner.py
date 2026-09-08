@@ -44,6 +44,11 @@ BLOCK_REVIEW_OUTPUT_UNUSABLE = "review_output_unusable"
 REVIEW_OUTPUT_MISSING = "missing_output"
 REVIEW_OUTPUT_INVALID_JSON = "invalid_json"
 REVIEW_OUTPUT_SCHEMA_INVALID = "schema_invalid"
+# Decoding proves the bytes; it does not prove the run behind them. A review whose own event stream
+# shows a command it launched and never recorded an outcome for — or whose stream cannot be read at
+# all — asserted its verdict on evidence the run never produced, so the verdict is refused with the
+# same controller-owned ownership as any other unusable output.
+REVIEW_OUTPUT_COMMANDS_UNCLOSED = "commands_unclosed"
 
 # Evidence stays useful without becoming unbounded: enough failing commands to identify the runner,
 # each cut to a length a reader can scan.
@@ -225,6 +230,85 @@ def detect_review_infrastructure_block(
             "final": str(result.final_path),
             "stderr": str(result.stderr_path),
         },
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewCommandClosure:
+    """Whether a review run's own event stream accounted for every command the run launched.
+
+    Two explicit fields rather than an optional tuple: a certified review and a review whose event
+    stream could not be read at all both carry no open commands, and they must not be
+    distinguishable only by truthiness at the call site — one is admitted, the other refused.
+    """
+
+    certified: bool
+    open_commands: tuple[str, ...]
+
+
+def review_command_closure(result: CodexRunResult) -> ReviewCommandClosure:
+    """Report the commands a review launched whose outcome its own event stream never recorded.
+
+    The rule is deliberately one-directional: what impeaches a verdict is an *unobserved outcome*,
+    not an unobserved launch. Over `command_execution` items only, the open set is the started ids
+    minus the completed ids, so a completion with no matching start is fine, duplicate ids and
+    out-of-order lines cannot manufacture a refusal, and a review that ran no command at all is
+    trivially closed — this never obliges a reviewer to execute anything.
+
+    Identity is explicit and never inferred from counts or chronology: a start pairs only through a
+    non-empty string `id`, so a start carrying no usable identity is unmatchable and stays open.
+    Anything the stream does not claim an outcome for — malformed lines, other item types — is
+    outside the judgment; only `command_execution` items assert command outcomes.
+
+    Timing is settled rather than racy: `CodexRunner.run` joins the CLI process and writes the full
+    stream before returning, so at the caller's door "no matching completion" is a final fact about
+    the run's recorded evidence. Note the deliberate asymmetry with
+    `detect_review_infrastructure_block`, whose consequence is terminal and which therefore stays
+    silent when the stream cannot be read: here the consequence is a bounded retry, and admitting a
+    verdict whose evidence stream cannot be read at all would be evidence ambiguity failing open,
+    so an unreadable stream is refused with no open commands to name.
+
+    What this certifies is the reviewer's recorded evidence, never the operating system: a closed
+    command proves an outcome was recorded, not that a child process exited.
+
+    The returned command texts are bounded exactly like the sibling detector's — at most
+    `_MAX_RECORDED_COMMANDS` entries, each cut to `_MAX_RECORDED_COMMAND_CHARS` — because they are
+    reviewer-influenced bytes and belong only in the raw-facing block artifact. `certified` reflects
+    every open command, including any beyond that bound.
+    """
+    started: dict[str, str] = {}
+    unidentified: list[str] = []
+    completed: set[str] = set()
+    try:
+        stream = result.jsonl_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ReviewCommandClosure(certified=False, open_commands=())
+    for line in stream.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "command_execution":
+            continue
+        identity = item.get("id")
+        identified = isinstance(identity, str) and identity != ""
+        if event.get("type") == "item.started":
+            if not identified:
+                unidentified.append(_bounded_command(item.get("command")))
+            elif identity not in started:
+                started[identity] = _bounded_command(item.get("command"))
+        elif event.get("type") == "item.completed" and identified:
+            completed.add(identity)
+    open_commands = [
+        command for identity, command in started.items() if identity not in completed
+    ]
+    open_commands.extend(unidentified)
+    return ReviewCommandClosure(
+        certified=not open_commands,
+        open_commands=tuple(open_commands[:_MAX_RECORDED_COMMANDS]),
     )
 
 

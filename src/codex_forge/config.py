@@ -10,6 +10,18 @@ from typing import Any
 from urllib.parse import urlsplit
 
 
+# The sandbox modes Codex accepts. `read-only` and `workspace-write` are enforced on Windows with a
+# restricted token; `danger-full-access` is not. The worker mode and the reviewer mode are both
+# checked against this set when the configuration is read, so an unsupported name fails there rather
+# than as an unexplained Codex launch failure part-way through a task.
+SANDBOX_MODES = frozenset({"read-only", "workspace-write", "danger-full-access"})
+
+# The reviewer keeps the least-privilege default it has always had. An operator whose host cannot run
+# a useful review under a restricted token may widen it deliberately through `codex.review_sandbox`.
+# Widening it is never silent: the requested and effective modes are both recorded in terminal
+# evidence, so a review that ran unrestricted says so.
+DEFAULT_REVIEW_SANDBOX = "read-only"
+
 # Telemetry is opt-in and local-only. Every bound below exists so a misconfigured `[telemetry]`
 # section fails when the configuration is read rather than by emitting something unintended at
 # runtime: an unbounded service name would become an unbounded resource attribute, and a
@@ -54,6 +66,7 @@ class ForgeConfig:
     knowledge_root: Path
     codex_executable: str = "codex"
     sandbox: str = "danger-full-access"
+    review_sandbox: str = DEFAULT_REVIEW_SANDBOX
     approval_policy: str = "never"
     implementation_model: str = "gpt-5.6-terra"
     escalation_model: str = "gpt-5.6-sol"
@@ -235,6 +248,7 @@ def load_config(path: str | Path | None = None) -> ForgeConfig:
         knowledge_root=knowledge_root,
         codex_executable=_get(data, "codex", "executable", "codex"),
         sandbox=_get(data, "codex", "sandbox", "danger-full-access"),
+        review_sandbox=_get(data, "codex", "review_sandbox", DEFAULT_REVIEW_SANDBOX),
         approval_policy=_get(data, "codex", "approval_policy", "never"),
         implementation_model=_get(data, "models", "implementation", "gpt-5.6-terra"),
         escalation_model=_get(
@@ -276,8 +290,13 @@ def load_config(path: str | Path | None = None) -> ForgeConfig:
     )
     if config.approval_policy != "never":
         raise ValueError("Codex Forge requires codex.approval_policy='never' for unattended execution.")
-    if config.sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
+    # A TOML array or table is unhashable, so a bare membership test against `SANDBOX_MODES` would
+    # raise `TypeError` instead of the configuration error every other malformed value here gets.
+    # Check the type first so any non-string mode fails the same controlled way an unknown name does.
+    if not isinstance(config.sandbox, str) or config.sandbox not in SANDBOX_MODES:
         raise ValueError(f"Unsupported Codex sandbox mode: {config.sandbox}")
+    if not isinstance(config.review_sandbox, str) or config.review_sandbox not in SANDBOX_MODES:
+        raise ValueError(f"Unsupported Codex review sandbox mode: {config.review_sandbox}")
     if config.task_timeout_minutes <= 0:
         raise ValueError("limits.task_timeout_minutes must be positive.")
     if config.max_repair_cycles < 0:
