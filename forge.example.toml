@@ -10,6 +10,10 @@ knowledge_root = "E:/CodexData/knowledge"
 [codex]
 executable = "codex"
 sandbox = "danger-full-access"
+# The independent reviewer's own sandbox. Least privilege by default. Widen it only on a host whose
+# restricted-token sandbox cannot run a useful review; terminal evidence records both the requested
+# and the effective mode, so a widened reviewer is visible in every completed task.
+review_sandbox = "read-only"
 approval_policy = "never"
 extra_args = []
 disabled_features = ["apps", "browser_use", "browser_use_external", "goals", "image_generation", "memories", "multi_agent", "plugins", "skill_search"]

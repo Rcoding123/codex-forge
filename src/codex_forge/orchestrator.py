@@ -7,7 +7,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from .config import ForgeConfig
+from .config import DEFAULT_REVIEW_SANDBOX, ForgeConfig
 from .db import ForgeDB
 from .gitops import (
     BaseCommitUnavailable,
@@ -67,9 +67,10 @@ from .utils import ControllerAlreadyRunning, controller_lock, ensure_dir, flatte
 from .validation import run_validations
 
 
-# The reviewer is asked for a read-only sandbox. Whether it gets one is decided by whether that
-# sandbox can launch a command on this host, not assumed.
-REVIEW_SANDBOX = "read-only"
+# The mode the reviewer is asked for when the operator has not configured one. Whether the reviewer
+# gets what was asked for is decided by whether that sandbox can launch a command on this host, not
+# assumed; `codex.review_sandbox` chooses what is asked for, never what is recorded as having run.
+REVIEW_SANDBOX = DEFAULT_REVIEW_SANDBOX
 
 # Written next to the review evidence, and the prefix `control_plane._safe_task_error` matches so
 # Shared Chat reports an infrastructure fault rather than a generic task error.
@@ -322,7 +323,7 @@ class Orchestrator:
         self.db.update_task(task.id, state=TaskState.REVIEWING)
         # Resolved before the reviewer is paid for: a sandbox that cannot launch a command produces
         # a review that inspects nothing, and the model call that produces it is pure waste.
-        resolution = self.runner.resolve_sandbox(REVIEW_SANDBOX, cwd=worktree)
+        resolution = self.runner.resolve_sandbox(self.config.review_sandbox, cwd=worktree)
         if resolution.sandbox is None:
             return self._fail_review_infrastructure(
                 task, artifact_dir, sandbox_infrastructure_block(resolution)

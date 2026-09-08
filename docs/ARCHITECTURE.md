@@ -83,6 +83,8 @@ The implementation worker emits schema-constrained machine-readable output. Forg
 
 Review is a separate Codex run with a read-only role. Follow-up reviews receive prior findings and are scoped to those findings instead of repeating full implementation exploration. A blocking review finding must be repaired and re-reviewed before final validation and commit.
 
+The reviewer's execution sandbox is `codex.review_sandbox`, defaulting to `read-only`. It selects only what the reviewer is *asked* for. A restricted request is still proven launchable before it is used, and still falls back to the configured worker sandbox when it is not; an explicit `danger-full-access` reviewer uses no restricted token and is therefore not probed. Widening it never widens the reviewer's role: review remains a no-source-edit phase judged solely on a schema-valid `ReviewResult`. Terminal evidence records the requested and the effective mode separately, so a review that ran under a widened sandbox says so.
+
 Implementation and repair phase results remain immutable descriptions of those individual model runs. The controller captures the task branch's Git base before implementation begins. On terminal success it does not reuse the latest phase's changed-file claim: it derives both `task-result.json.changed_files` and `changes.patch` from that base to the final candidate commit. Terminal evidence therefore describes the complete candidate snapshot even when later attempts only repaired a subset of files.
 
 ## Limits and loop resistance
