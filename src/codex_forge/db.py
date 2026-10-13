@@ -86,6 +86,17 @@ CREATE TABLE IF NOT EXISTS runs (
     started_at TEXT NOT NULL,
     completed_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS execution_checkpoints (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    repository_registration_id TEXT,
+    base_commit TEXT NOT NULL,
+    candidate_commit TEXT,
+    completion_json TEXT,
+    specification_digest TEXT,
+    publication_required INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -539,6 +550,47 @@ class ForgeDB:
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         return self._task_from_row(row) if row else None
+
+    def execution_checkpoint(self, task_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM execution_checkpoints WHERE task_id=?", (task_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def establish_execution_base(self, task_id: str, registration: str | None, base: str) -> None:
+        """Set once under a write lock, proving the task still names this generation."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            owner = connection.execute(
+                "SELECT p.repository_registration_id FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.id=?",
+                (task_id,),
+            ).fetchone()
+            if not owner or owner[0] != registration:
+                raise ValueError("Execution checkpoint repository generation changed.")
+            connection.execute(
+                "INSERT INTO execution_checkpoints(task_id,repository_registration_id,base_commit,updated_at) "
+                "VALUES(?,?,?,?) ON CONFLICT(task_id) DO NOTHING", (task_id, registration, base, utc_now()),
+            )
+            saved = connection.execute(
+                "SELECT repository_registration_id,base_commit FROM execution_checkpoints WHERE task_id=?", (task_id,),
+            ).fetchone()
+            if tuple(saved) != (registration, base):
+                raise ValueError("Execution checkpoint identity is immutable.")
+
+    def save_completion_checkpoint(
+        self, task_id: str, candidate: str, final: dict, digest: str, publication_required: bool,
+    ) -> None:
+        """Store verified local completion before attempting fallible publication."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "UPDATE execution_checkpoints SET candidate_commit=?,completion_json=?,specification_digest=?,"
+                "publication_required=?,updated_at=? WHERE task_id=? AND candidate_commit IS NULL",
+                (candidate, json_dumps(final), digest, int(publication_required), utc_now(), task_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Execution completion checkpoint already exists or has no base.")
 
     def list_tasks(self, state: TaskState | None = None) -> list[Task]:
         query = "SELECT * FROM tasks"

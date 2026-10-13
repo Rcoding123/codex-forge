@@ -60,7 +60,7 @@ def base_authority(project: Project, task: Task) -> str:
     candidate delta are all computed from the immutable base. A task admitted without one keeps
     the default-branch wording it has always had.
     """
-    return task.admission_base_commit or project.default_branch
+    return task.admission_base_commit or task.execution_base_commit or project.default_branch
 
 
 def _base_line(project: Project, task: Task) -> str:
@@ -69,6 +69,11 @@ def _base_line(project: Project, task: Task) -> str:
             f"- Base commit: {task.admission_base_commit}\n"
             "- That commit is this task's immutable admission base. Compare against it, not "
             "against the default branch, which may have moved since admission."
+        )
+    if task.execution_base_commit:
+        return (
+            f"- Execution base commit: {task.execution_base_commit}\n"
+            "- This is the controller's immutable comparison base. Compare against it, not a movable branch."
         )
     return f"- Base branch: {project.default_branch}"
 
@@ -127,6 +132,8 @@ If an external runtime prevents complete validation, perform every available off
 
 def _review_base_note(task: Task) -> str:
     if not task.admission_base_commit:
+        if task.execution_base_commit:
+            return "\nThat commit is the controller's immutable execution base and terminal evidence comparison authority."
         return ""
     return (
         "\nThat commit is this task's immutable admission base and the exact base its terminal "
@@ -169,7 +176,13 @@ A candidate that does not satisfy a binding requirement requires `changes_requir
 naming that requirement, even when every candidate-authored test passes. Scope and out-of-scope are
 reviewer context: report work that crosses those boundaries as ordinary findings.
 """.strip()
-        binding_block = f"\n\n{binding_conformance}"
+        canonical = "\n".join(f"- {text}" for text in task.binding_requirements)
+        binding_block = (
+            f"\n\n{binding_conformance}\n\n"
+            "BINDING REQUIREMENTS TO REPORT (ordered exact-text union)\n"
+            "Identical text in both source sections is one requirement. Report it once.\n"
+            f"{canonical}"
+        )
     follow_up = ""
     if previous_findings:
         follow_up = f"""

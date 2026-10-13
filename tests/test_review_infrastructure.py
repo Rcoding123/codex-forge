@@ -477,6 +477,20 @@ class RecordingDB:
         self.updates: list[tuple[str, dict]] = []
         self.runs: list[dict] = []
         self.project = Project(id="project-1", name="canary", repo_path=Path("repo"), auto_commit=False)
+        self.checkpoint = None
+
+    def execution_checkpoint(self, task_id):
+        return self.checkpoint
+
+    def establish_execution_base(self, task_id, registration, base):
+        if self.checkpoint is None:
+            self.checkpoint = {
+                "repository_registration_id": registration, "base_commit": base,
+                "candidate_commit": None, "completion_json": None,
+            }
+
+    def save_completion_checkpoint(self, *args):
+        raise AssertionError("This test fixture does not commit candidates.")
 
     def get_project(self, project_id: str) -> Project:
         return self.project
