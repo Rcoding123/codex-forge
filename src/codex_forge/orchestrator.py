@@ -25,6 +25,7 @@ from .knowledge import KnowledgeStore
 from .models import CodexRunResult, Project, Task, TaskState, ValidationResult
 from .prompts import implementation_prompt, review_prompt, validation_failure_summary
 from .processes import ProcessSupervisionError
+from .schema_resources import load_schema
 from .runner import (
     BLOCK_REVIEW_OUTPUT_UNUSABLE,
     BLOCK_REVIEW_TRANSPORT_FAILED,
@@ -92,7 +93,7 @@ class Orchestrator:
         self.package_root = package_root
         self.db = ForgeDB(config.database_path)
         self.db.initialize()
-        self.runner = CodexRunner(config, package_root / "schemas")
+        self.runner = CodexRunner(config)
         self.knowledge = KnowledgeStore(config.knowledge_root)
         # Inert unless `[telemetry] enabled = true`. Built before any worker thread starts.
         self.telemetry = build_telemetry(config.telemetry)
@@ -657,8 +658,7 @@ class Orchestrator:
         """The review-result schema document, loaded once from the same file the transport ships."""
         schema = getattr(self, "_review_result_schema_document", None)
         if schema is None:
-            path = self.package_root / "schemas" / "review-result.schema.json"
-            schema = json.loads(path.read_text(encoding="utf-8"))
+            schema = load_schema("review-result.schema.json")
             self._review_result_schema_document = schema
         return schema
 
