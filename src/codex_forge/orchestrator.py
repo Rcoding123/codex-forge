@@ -24,6 +24,7 @@ from .gitops import (
 from .knowledge import KnowledgeStore
 from .models import CodexRunResult, Project, Task, TaskState, ValidationResult
 from .prompts import implementation_prompt, review_prompt, validation_failure_summary
+from .processes import ProcessSupervisionError
 from .runner import (
     BLOCK_REVIEW_OUTPUT_UNUSABLE,
     BLOCK_REVIEW_TRANSPORT_FAILED,
@@ -842,6 +843,9 @@ class Orchestrator:
         )
 
     def _handle_unexpected_failure(self, task: Task, exc: Exception) -> None:
+        if isinstance(exc, ProcessSupervisionError):
+            self.db.update_task(task.id, state=TaskState.FAILED, last_error="PROCESS_SUPERVISION_FAILED")
+            return
         if isinstance(exc, TaskUsageBudgetExceeded):
             self.db.update_task(task.id, state=TaskState.FAILED, last_error=str(exc))
             return

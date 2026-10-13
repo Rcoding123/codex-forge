@@ -12,6 +12,7 @@ from typing import Any
 
 from .config import ForgeConfig
 from .models import CodexRunResult
+from .processes import run_supervised
 from .utils import ensure_dir, tail_text
 
 
@@ -626,7 +627,7 @@ class CodexRunner:
             "w", encoding="utf-8"
         ) as stderr_handle:
             try:
-                process = subprocess.run(
+                process = run_supervised(
                     command,
                     cwd=str(cwd),
                     input=prompt,
