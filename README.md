@@ -4,6 +4,11 @@ Codex Forge is a Windows-first controller for long-running, non-interactive Code
 
 Release: **v0.2.0**. License: [MIT](LICENSE).
 
+For sequential project builds, `forge project plan` declares tasks and phase acceptance checks.
+Forge integrates reviewed commits onto a dedicated project branch and advances only after checks
+pass. See [project operation](docs/OPERATIONS.md#run-a-declared-project-in-phases) for setup,
+restart recovery, progress, and extending a completed pilot.
+
 > [!WARNING]
 > Forge's default `danger-full-access` sandbox and `approval_policy = "never"` are intended only for a dedicated, isolated development or simulation VPS. Do not use this configuration on a personal workstation, a host containing unrelated credentials, or a machine connected to production deployment, live brokerage, live order-routing, or financial-account systems.
 
