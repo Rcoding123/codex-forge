@@ -1,6 +1,39 @@
 from pathlib import Path
 
+import pytest
+
 from codex_forge.config import DEFAULT_REVIEW_SANDBOX, load_config
+
+
+@pytest.mark.parametrize("section,key,minimum", [
+    ("workers", "max_parallel", 1), ("workers", "poll_seconds", 1),
+    ("limits", "max_output_chars", 1), ("limits", "task_timeout_minutes", 1),
+    ("limits", "max_repair_cycles", 0), ("limits", "max_identical_failures", 2),
+    ("limits", "max_task_tokens", 0),
+])
+@pytest.mark.parametrize("bad", ["true", "1.5", '"2"', "-1"])
+def test_integer_limits_reject_wrong_types_and_invalid_bounds(tmp_path, section, key, minimum, bad):
+    path = tmp_path / "forge.toml"
+    path.write_text(f"[{section}]\n{key} = {bad}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=rf"{section}\.{key} must be an integer >= {minimum}"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("section,key", [
+    ("workers", "max_parallel"), ("workers", "poll_seconds"), ("limits", "max_output_chars"),
+])
+def test_positive_limits_reject_zero(tmp_path, section, key):
+    path = tmp_path / "forge.toml"
+    path.write_text(f"[{section}]\n{key} = 0\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_config(path)
+
+
+def test_zero_token_budget_and_zero_repairs_remain_supported(tmp_path):
+    path = tmp_path / "forge.toml"
+    path.write_text("[limits]\nmax_task_tokens = 0\nmax_repair_cycles = 0\n", encoding="utf-8")
+    config = load_config(path)
+    assert config.max_task_tokens == config.max_repair_cycles == 0
 
 
 def test_load_config_resolves_relative_paths(tmp_path: Path):

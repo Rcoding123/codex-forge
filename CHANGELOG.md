@@ -4,6 +4,21 @@ All notable changes to Codex Forge are documented here. This project follows sem
 
 ## [Unreleased]
 
+### Runtime hardening
+
+- Supervise Codex and validation process trees, including Windows command shims. Contain workers
+  before execution, close descendants on every exit path, and retain partial raw output.
+- Persist immutable execution bases separately from admission provenance and checkpoint verified
+  candidates before publication. Retry failed pushes without repeated model work, publish the exact
+  candidate without force, and require remote confirmation even for clean reused candidates.
+- Reject ambiguous legacy resumption and changed checkpoint identity; remove operational
+  checkpoints with task registry deletion while retaining evidence.
+- Deduplicate binding text across submitted sections while continuing to reject duplicate review
+  reports. Include fresh validation failures in review repairs and terminal diagnoses.
+- Package both output schemas as resources and test a clean wheel through the installed CLI.
+- Validate integer configuration types and bounds; zero-length utility truncation returns empty
+  output. Model defaults, token-budget accounting, and public JSON versions remain unchanged.
+
 ### Added
 
 - Repository-generation admission (contract `1.4`, PR #12). A task submission carries

@@ -93,6 +93,25 @@ def _heading(label: str) -> str:
     return label[:1].upper() + label[1:]
 
 
+def test_cross_section_binding_text_is_one_requirement_but_duplicate_reports_still_fail():
+    task = _task(architecture_decisions=[ITEM], constraints=[ITEM, OTHER_ITEM])
+    final = {
+        "verdict": "pass", "findings": [], "acceptance_criteria": [],
+        "binding_requirements": [_entry("text", ITEM), _entry("text", OTHER_ITEM)],
+    }
+    assert task.binding_requirements == [ITEM, OTHER_ITEM]
+    assert enforce_specification_conformance(task, final) == final
+    duplicate = {**final, "binding_requirements": [*final["binding_requirements"], _entry("text", ITEM)]}
+    assert enforce_specification_conformance(task, duplicate)["verdict"] == "changes_required"
+    assert task.architecture_decisions == [ITEM]
+    assert task.constraints == [ITEM, OTHER_ITEM]
+    project = Project(id="project-1", name="example", repo_path=Path("repo"))
+    prompt = review_prompt(project, task, Path("checkout"))
+    canonical = prompt.split("BINDING REQUIREMENTS TO REPORT", 1)[1]
+    assert canonical.count(ITEM) == 1
+    assert "Report it once." in canonical
+
+
 # --------------------------------------------------------------------------------------------
 # Part 1 - exactly one verbatim report per required item, with evidence
 # --------------------------------------------------------------------------------------------

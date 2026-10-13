@@ -108,6 +108,13 @@ def _get(data: dict[str, Any], section: str, key: str, default: Any) -> Any:
     return data.get(section, {}).get(key, default)
 
 
+def _integer_option(data: dict[str, Any], section: str, key: str, default: int, minimum: int) -> int:
+    value = _get(data, section, key, default)
+    if type(value) is not int or value < minimum:
+        raise ValueError(f"{section}.{key} must be an integer >= {minimum}.")
+    return value
+
+
 def _bounded_label(section: dict[str, Any], key: str, default: str, limit: int, *, allow_empty: bool) -> str:
     """Read one short identifier that is safe to publish as a telemetry resource attribute."""
     value = section.get(key, default)
@@ -260,13 +267,13 @@ def load_config(path: str | Path | None = None) -> ForgeConfig:
             data, "reasoning", "escalation", _get(data, "reasoning", "planning", "high")
         ),
         review_effort=_get(data, "reasoning", "review", "medium"),
-        max_parallel=int(_get(data, "workers", "max_parallel", 2)),
-        poll_seconds=int(_get(data, "workers", "poll_seconds", 15)),
-        task_timeout_minutes=int(_get(data, "limits", "task_timeout_minutes", 180)),
-        max_repair_cycles=int(_get(data, "limits", "max_repair_cycles", 2)),
-        max_identical_failures=int(_get(data, "limits", "max_identical_failures", 2)),
-        max_task_tokens=int(_get(data, "limits", "max_task_tokens", 2_000_000)),
-        max_output_chars=int(_get(data, "limits", "max_output_chars", 12_000)),
+        max_parallel=_integer_option(data, "workers", "max_parallel", 2, 1),
+        poll_seconds=_integer_option(data, "workers", "poll_seconds", 15, 1),
+        task_timeout_minutes=_integer_option(data, "limits", "task_timeout_minutes", 180, 1),
+        max_repair_cycles=_integer_option(data, "limits", "max_repair_cycles", 2, 0),
+        max_identical_failures=_integer_option(data, "limits", "max_identical_failures", 2, 2),
+        max_task_tokens=_integer_option(data, "limits", "max_task_tokens", 2_000_000, 0),
+        max_output_chars=_integer_option(data, "limits", "max_output_chars", 12_000, 1),
         extra_codex_args=list(_get(data, "codex", "extra_args", [])),
         worker_disabled_features=list(
             _get(
@@ -297,12 +304,4 @@ def load_config(path: str | Path | None = None) -> ForgeConfig:
         raise ValueError(f"Unsupported Codex sandbox mode: {config.sandbox}")
     if not isinstance(config.review_sandbox, str) or config.review_sandbox not in SANDBOX_MODES:
         raise ValueError(f"Unsupported Codex review sandbox mode: {config.review_sandbox}")
-    if config.task_timeout_minutes <= 0:
-        raise ValueError("limits.task_timeout_minutes must be positive.")
-    if config.max_repair_cycles < 0:
-        raise ValueError("limits.max_repair_cycles cannot be negative.")
-    if config.max_identical_failures < 2:
-        raise ValueError("limits.max_identical_failures must be at least 2.")
-    if config.max_task_tokens < 0:
-        raise ValueError("limits.max_task_tokens cannot be negative.")
     return config

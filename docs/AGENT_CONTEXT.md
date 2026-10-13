@@ -39,16 +39,17 @@ Source in `src/codex_forge/`.
 | Subsystem | Start here |
 | --- | --- |
 | Task submission / persistence | `task_submission.py` (validation/normalization/serialization), `db.py` (SQLite store), `models.py`; inbox template `templates/task.yaml` |
-| Review / trusted output | `runner.py` (`decode_review_result`, `ReviewTransportError`, conformance), `schemas/review-result.schema.json` |
+| Review / trusted output | `runner.py` (`decode_review_result`, `ReviewTransportError`, conformance), `schema_resources.py`, `src/codex_forge/schemas/review-result.schema.json` |
 | Orchestrator / execution | `orchestrator.py` (claims READY work, phases, limits, recovery), `runner.py` (`CodexRunner`), `usage.py` (token-usage normalization) |
-| Evidence | `evidence.py` (read-only, versioned external access), `schemas/task-result.schema.json` |
+| Evidence | `evidence.py` (read-only, versioned external access), `src/codex_forge/schemas/task-result.schema.json` |
 | Git / worktrees | `gitops.py` |
 | Task / project deletion | no dedicated module — lives in `db.py` / `orchestrator.py` / `cli.py`; contract in `docs/CONTROL-PLANE-API.md` (Task delete / Project delete); behavior proven by `tests/test_delete.py` |
 | Repository generation / admission | `task_submission.py` (`require_expected_registration`, `verify_expected_registration`, `admit_task`, `_locked_generation_guard`, `resolve_base_commit`), `db.py` (`add_project_guarded` mints the registration, `relocate_project`), `control_plane.py` (`*_SINCE` version gates); proven by `tests/test_repository_registration.py`, `tests/test_binding_contract.py` (boundary fixture pin), `tests/test_admission_base_commit.py` |
 | CLI / control plane | `cli.py`, `control_plane.py`, `docs/CONTROL-PLANE-API.md` |
 | Config / prompts / knowledge | `config.py`, `prompts.py`, `knowledge.py`, `validation.py` |
 | Telemetry | `telemetry.py` (OTel tracing), `agent_telemetry.py` (Gate 4 primitives — implemented, tested, unwired) |
-| Schemas | `schemas/*.schema.json`; schema versioning policy is textual in `docs/CONTROL-PLANE-API.md` |
+| Schemas | `schema_resources.py`, `src/codex_forge/schemas/*.schema.json`; schema versioning policy is textual in `docs/CONTROL-PLANE-API.md` |
+| Process supervision / recovery | `processes.py`, `db.py` (`execution_checkpoints`), `orchestrator.py`; regression tests `test_processes.py`, `test_execution_checkpoints.py` |
 
 Tests are flat in `tests/` — start from the test named for the seam:
 `test_delete.py`, `test_task_submission.py`, `test_review_transport.py`,

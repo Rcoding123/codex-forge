@@ -5,6 +5,7 @@ import hashlib
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from pathlib import Path
 
 from .config import DEFAULT_REVIEW_SANDBOX, ForgeConfig
@@ -19,11 +20,14 @@ from .gitops import (
     current_commit,
     explicit_candidate_commit,
     prepare_worktree,
+    push_candidate,
     write_patch,
 )
 from .knowledge import KnowledgeStore
 from .models import CodexRunResult, Project, Task, TaskState, ValidationResult
 from .prompts import implementation_prompt, review_prompt, validation_failure_summary
+from .processes import ProcessSupervisionError
+from .schema_resources import load_schema
 from .runner import (
     BLOCK_REVIEW_OUTPUT_UNUSABLE,
     BLOCK_REVIEW_TRANSPORT_FAILED,
@@ -91,7 +95,7 @@ class Orchestrator:
         self.package_root = package_root
         self.db = ForgeDB(config.database_path)
         self.db.initialize()
-        self.runner = CodexRunner(config, package_root / "schemas")
+        self.runner = CodexRunner(config)
         self.knowledge = KnowledgeStore(config.knowledge_root)
         # Inert unless `[telemetry] enabled = true`. Built before any worker thread starts.
         self.telemetry = build_telemetry(config.telemetry)
@@ -263,17 +267,47 @@ class Orchestrator:
         if not project:
             raise RuntimeError(f"Project missing for task {task.id}: {task.project_id}")
         artifact_dir = ensure_dir(self.config.evidence_root / project.name / task.id / f"attempt-{task.attempts:02d}")
-        branch, worktree = prepare_worktree(project, task, self.config.workspace_root)
+        checkpoint = self.db.execution_checkpoint(task.id)
+        if checkpoint and (
+            checkpoint["repository_registration_id"] != project.repository_registration_id
+            or (task.admission_base_commit and checkpoint["base_commit"] != task.admission_base_commit)
+        ):
+            raise CandidateStateUnavailable("Execution checkpoint identity no longer matches the task.")
+        if checkpoint and ((checkpoint["candidate_commit"] is None) != (checkpoint["completion_json"] is None)):
+            raise CandidateStateUnavailable("Execution completion checkpoint is incomplete.")
+        if not checkpoint and not task.admission_base_commit and task.attempts > 1 and (task.branch or task.worktree_path):
+            raise CandidateStateUnavailable("Older interrupted task has no verifiable execution base checkpoint.")
+        execution_task = replace(task, admission_base_commit=checkpoint["base_commit"]) if checkpoint else task
+        branch, worktree = prepare_worktree(project, execution_task, self.config.workspace_root)
         # A task admitted from an exact commit is compared against that commit and nothing else,
         # on every attempt: `prepare_worktree` has already proven this checkout descends from it,
         # and the durable value cannot drift as the worktree accumulates repair commits. Without
         # one, the branch snapshot taken before any worker runs remains the comparison point --
         # repairs and later controller attempts reuse the worktree, but terminal evidence must
         # retain this task base rather than the most recent model phase.
-        base_commit = task.admission_base_commit or current_commit(worktree)
+        base_commit = checkpoint["base_commit"] if checkpoint else task.admission_base_commit or current_commit(worktree)
+        self.db.establish_execution_base(task.id, project.repository_registration_id, base_commit)
         self.db.update_task(task.id, branch=branch, worktree_path=worktree)
         task.branch = branch
         task.worktree_path = worktree
+        commands = flatten_unique([*project.validation_commands, *task.validation_commands])
+        if checkpoint and checkpoint["completion_json"] is not None:
+            try:
+                final = json.loads(checkpoint["completion_json"])
+                candidate = explicit_candidate_commit(project.repo_path, worktree, base_commit)
+                if (
+                    candidate != checkpoint["candidate_commit"]
+                    or checkpoint["specification_digest"] != _specification_digest(project, task, commands)
+                    or final["commit"] != candidate or final["base_commit"] != base_commit
+                    or final["status"] != "completed"
+                    or checkpoint["publication_required"] != int(project.auto_push)
+                ):
+                    raise ValueError("Completion checkpoint no longer matches the verified candidate.")
+            except (ValueError, KeyError, TypeError) as exc:
+                raise CandidateStateUnavailable("Completion checkpoint is unusable.") from exc
+            return self._complete_task(task, project, worktree, artifact_dir, final)
+        # Prompts share the controller's immutable comparison base without changing admission provenance.
+        prompt_task = replace(task, execution_base_commit=base_commit)
 
         patterns = self.knowledge.relevant(project.id, f"{task.title} {task.objective} {' '.join(task.tags)}")
         result = self._run_codex_phase(
@@ -285,7 +319,7 @@ class Orchestrator:
             effort=self._implementation_effort(task),
             prompt=implementation_prompt(
                 project,
-                task,
+                prompt_task,
                 worktree,
                 patterns,
                 previous_failure=task.last_error if task.attempts > 1 else None,
@@ -296,7 +330,6 @@ class Orchestrator:
         if self._handle_noncompletion(task, result.final):
             return _noncompletion_outcome(result.final)
 
-        commands = flatten_unique([*project.validation_commands, *task.validation_commands])
         validation_results = self._validate(task, worktree, artifact_dir, commands)
         repair_cycle = 0
         while not self._all_passed(validation_results) and repair_cycle < self.config.max_repair_cycles:
@@ -310,7 +343,7 @@ class Orchestrator:
                 phase=f"validation-repair-{repair_cycle}",
                 model=self.config.implementation_model,
                 effort="high",
-                prompt=implementation_prompt(project, task, worktree, patterns, previous_failure=failure),
+                prompt=implementation_prompt(project, prompt_task, worktree, patterns, previous_failure=failure),
                 schema="task-result.schema.json",
                 role=ROLE_IMPLEMENTER,
             )
@@ -338,7 +371,7 @@ class Orchestrator:
                 phase="review",
                 model=self._review_model(task),
                 effort=self._review_effort(task),
-                prompt=review_prompt(project, task, worktree),
+                prompt=review_prompt(project, prompt_task, worktree),
                 schema="review-result.schema.json",
                 sandbox=resolution.sandbox,
                 role=ROLE_REVIEWER,
@@ -355,6 +388,7 @@ class Orchestrator:
             return unusable
 
         review_cycle = 0
+        repair_failure = None
         while review_final.get("verdict") == "changes_required" and review_cycle < self.config.max_repair_cycles:
             review_cycle += 1
             findings = review_final.get("findings") or []
@@ -366,7 +400,9 @@ class Orchestrator:
                 phase=f"review-repair-{review_cycle}",
                 model=self.config.implementation_model,
                 effort="high",
-                prompt=implementation_prompt(project, task, worktree, patterns, review_findings=findings),
+                prompt=implementation_prompt(
+                    project, prompt_task, worktree, patterns, previous_failure=repair_failure, review_findings=findings,
+                ),
                 schema="task-result.schema.json",
                 role=ROLE_IMPLEMENTER,
             )
@@ -375,7 +411,9 @@ class Orchestrator:
             result = repair
             validation_results = self._validate(task, worktree, artifact_dir, commands, suffix=f"review-repair-{review_cycle}")
             if not self._all_passed(validation_results):
+                repair_failure = validation_failure_summary(validation_results)
                 continue
+            repair_failure = None
             try:
                 review = self._run_codex_phase(
                     task,
@@ -384,7 +422,7 @@ class Orchestrator:
                     phase=f"review-{review_cycle + 1}",
                     model=self._review_model(task),
                     effort=self._review_effort(task),
-                    prompt=review_prompt(project, task, worktree, previous_findings=findings),
+                    prompt=review_prompt(project, prompt_task, worktree, previous_findings=findings),
                     schema="review-result.schema.json",
                     sandbox=resolution.sandbox,
                     role=ROLE_REVIEWER,
@@ -400,6 +438,9 @@ class Orchestrator:
             if review_final is None:
                 return unusable
 
+        if repair_failure is not None:
+            self._retry_or_fail(task, repair_failure)
+            return OUTCOME_VALIDATION_FAILED
         if review_final.get("verdict") != "pass":
             self._retry_or_fail(task, json.dumps(review_final, ensure_ascii=False))
             return OUTCOME_REVIEW_CHANGES_REQUIRED
@@ -411,19 +452,17 @@ class Orchestrator:
 
         with self.telemetry.phase_span(phase_name=PHASE_EVIDENCE, role=ROLE_CONTROLLER) as span:
             patch_path = artifact_dir / "changes.patch"
-            commit_hash = commit_task(worktree, task) if project.auto_commit else None
-            candidate_commit = _candidate_commit(
-                project.repo_path, task, worktree, base_commit, commit_hash
+            if project.auto_commit:
+                commit_task(worktree, task)
+            candidate_commit = (
+                explicit_candidate_commit(project.repo_path, worktree, base_commit)
+                if project.auto_commit or task.admission_base_commit else None
             )
             # One base and one candidate feed every terminal field below, so the patch, the
             # changed-file set, the recorded candidate and anything derived from them cannot
             # disagree about which delta this task produced.
             write_patch(worktree, patch_path, base_commit, candidate_commit)
             final_changed_files = changed_files_between(worktree, base_commit, candidate_commit)
-            if project.auto_push and commit_hash:
-                from .gitops import _git
-                _git(worktree, "push", "-u", "origin", branch, timeout=1200)
-
             final_result = {
                 **result.final,
                 "status": "completed",
@@ -446,13 +485,31 @@ class Orchestrator:
                 "patch": str(patch_path),
                 "completed_at": utc_now(),
             }
-            (artifact_dir / "task-result.json").write_text(
-                json.dumps(final_result, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
+            if candidate_commit is not None:
+                self.db.save_completion_checkpoint(
+                    task.id, candidate_commit, final_result, _specification_digest(project, task, commands), project.auto_push,
+                )
             span.set_outcome(OUTCOME_OK)
 
+        return self._complete_task(task, project, worktree, artifact_dir, final_result)
+
+    def _complete_task(self, task: Task, project: Project, worktree: Path, artifact_dir: Path, final: dict) -> str:
+        """Finish verified local work; publication retries never invoke a model."""
+        candidate = final["commit"]
+        if project.auto_push:
+            if candidate is None:
+                raise CandidateStateUnavailable("Publication requires a verified candidate commit.")
+            push_candidate(worktree, task.branch, candidate)
+        patch = artifact_dir / "changes.patch"
+        if str(patch) != final["patch"]:
+            write_patch(worktree, patch, final["base_commit"], candidate)
+        final_result = {**final, "patch": str(patch), "worktree": str(worktree), "completed_at": utc_now()}
+        (artifact_dir / "task-result.json").write_text(
+            json.dumps(final_result, indent=2, ensure_ascii=False), encoding="utf-8",
+        )
+
         with self.telemetry.phase_span(phase_name=PHASE_COMPLETION, role=ROLE_CONTROLLER) as span:
-            self.knowledge.add_patterns(task.id, project.id, result.final.get("reusable_patterns") or [])
+            self.knowledge.add_patterns(task.id, project.id, final_result.get("reusable_patterns") or [])
             self.db.update_task(task.id, state=TaskState.COMPLETED, result=final_result, last_error="")
             span.set_outcome(OUTCOME_OK)
         return OUTCOME_COMPLETED
@@ -656,8 +713,7 @@ class Orchestrator:
         """The review-result schema document, loaded once from the same file the transport ships."""
         schema = getattr(self, "_review_result_schema_document", None)
         if schema is None:
-            path = self.package_root / "schemas" / "review-result.schema.json"
-            schema = json.loads(path.read_text(encoding="utf-8"))
+            schema = load_schema("review-result.schema.json")
             self._review_result_schema_document = schema
         return schema
 
@@ -842,6 +898,9 @@ class Orchestrator:
         )
 
     def _handle_unexpected_failure(self, task: Task, exc: Exception) -> None:
+        if isinstance(exc, ProcessSupervisionError):
+            self.db.update_task(task.id, state=TaskState.FAILED, last_error="PROCESS_SUPERVISION_FAILED")
+            return
         if isinstance(exc, TaskUsageBudgetExceeded):
             self.db.update_task(task.id, state=TaskState.FAILED, last_error=str(exc))
             return
@@ -1076,28 +1135,16 @@ def _contract_item_findings(
     return findings
 
 
-def _candidate_commit(
-    repository: Path,
-    task: Task,
-    worktree: Path,
-    base_commit: str,
-    created: str | None,
-) -> str | None:
-    """The commit terminal evidence names as this task's candidate.
-
-    "This attempt created a commit" and "there is a candidate commit" are different facts, and
-    conflating them loses a candidate. A retried task reuses the branch its earlier attempt left
-    behind; that branch can already carry the candidate, the checkout is then clean, `commit_task`
-    creates nothing, and the candidate is the checkout's own HEAD rather than nothing at all.
-
-    For a task admitted from an exact base the candidate is therefore always the current HEAD,
-    including the base itself for a clean no-change result. Ownership, base availability, descent
-    and cleanliness are all re-proven before HEAD is accepted. A task admitted without a base
-    keeps the historical rule exactly: only a commit this attempt created is a candidate.
-    """
-    if not task.admission_base_commit:
-        return created
-    return explicit_candidate_commit(repository, worktree, base_commit)
+def _specification_digest(project: Project, task: Task, commands: list[str]) -> str:
+    """Bind completion to the exact specification, validation commands, and publication policy."""
+    data = {
+        "project_id": project.id, "registration": project.repository_registration_id,
+        "title": task.title, "objective": task.objective, "acceptance": task.acceptance,
+        "architecture_decisions": task.architecture_decisions, "constraints": task.constraints,
+        "scope": task.scope, "out_of_scope": task.out_of_scope, "commands": commands,
+        "auto_commit": project.auto_commit, "auto_push": project.auto_push,
+    }
+    return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
 def acceptance_conformance_findings(task: Task, review_final: dict) -> list[dict]:
@@ -1131,7 +1178,7 @@ def binding_conformance_findings(task: Task, review_final: dict) -> list[dict]:
     when every candidate-authored test passes and the reviewer's overall verdict says `pass`.
     """
     return _contract_item_findings(
-        (*task.architecture_decisions, *task.constraints),
+        task.binding_requirements,
         review_final.get("binding_requirements") or [],
         text_key="text",
         label="binding requirement",
