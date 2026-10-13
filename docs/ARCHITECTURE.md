@@ -87,6 +87,28 @@ The reviewer's execution sandbox is `codex.review_sandbox`, defaulting to `read-
 
 Implementation and repair phase results remain immutable descriptions of those individual model runs. The controller captures the task branch's Git base before implementation begins. On terminal success it does not reuse the latest phase's changed-file claim: it derives both `task-result.json.changed_files` and `changes.patch` from that base to the final candidate commit. Terminal evidence therefore describes the complete candidate snapshot even when later attempts only repaired a subset of files.
 
+The execution base is established once in an internal SQLite `execution_checkpoints` row. It is
+separate from caller-supplied `admission_base_commit`: starting an implicit-base task never invents
+admission provenance. Retries use the saved execution base for worktree lineage and model-facing
+comparison authority. Missing legacy provenance fails closed when a previously recorded checkout
+could already contain task work. Completed historical evidence is never backfilled or rewritten.
+
+After final validation and semantic review pass, committed candidates receive a completion
+checkpoint before publication. A subsequent attempt can finish a pending push without invoking
+implementation, validation, or review again. It re-proves repository generation, checkout ownership,
+cleanliness, lineage, candidate identity, and the specification/validation/policy digest. Publication
+uses an immutable candidate refspec without force and requires the remote task branch to report
+that exact candidate. Operational checkpoints cascade with task deletion; evidence remains retained.
+
+Binding conformance uses the ordered exact-text union of architecture decisions and constraints.
+Identical submitted text appearing in both sections is reported once; duplicate reviewer entries
+still fail conformance. A review repair that fails controller validation passes the new command
+evidence alongside unresolved findings to the next repair. Exhaustion retains validation ownership.
+
+The transported JSON schemas are package resources under `src/codex_forge/schemas`. Transport
+paths remain valid for the entire worker call, and local review decoding reads the same resources.
+An installed wheel therefore does not depend on the source checkout layout.
+
 ## Limits and loop resistance
 
 Forge enforces complementary bounds:
@@ -99,6 +121,16 @@ Forge enforces complementary bounds:
 - process-scoped singleton lock for the controller.
 
 An unchanged deterministic failure reaches `FAILED` rather than cycling. A human-dependent ambiguity reaches `NEEDS_DECISION`. Limits are durable configuration and are not weakened automatically.
+
+Codex workers and validation commands share process-tree supervision. Windows starts the root
+suspended, assigns a kill-on-close Job Object with no breakaway flags, and then resumes it. POSIX
+starts a new process session. Timeout, interruption, and normal root exit terminate remaining
+descendants and verify closure before returning. Failed containment or closure cannot trigger an
+automatic retry. Output is streamed to evidence files, including partial validation output.
+
+Worker count, polling seconds, phase timeout, and configured summary length must be positive
+integers. Repair cycles and token limits may be zero; zero tokens retains the unlimited-budget
+meaning. Booleans, strings, and fractional values are rejected for integer limits.
 
 ## Model routing and context control
 

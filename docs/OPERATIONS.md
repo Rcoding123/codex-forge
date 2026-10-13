@@ -61,6 +61,31 @@ The restart script targets only a command line verified as the Forge daemon, ter
 
 Investigate repeated failures before retrying. A manual retry cannot exceed the task's configured maximum attempts.
 
+## Runtime hardening and pending publication
+
+Update while the daemon is stopped, back up the data root, and restart after validation. SQLite
+creates the internal checkpoint table automatically; concurrent initialization is supported. The
+CLI JSON contracts and their default version remain unchanged. Checkpoints belong to the controller,
+so operators and clients must not edit them directly.
+
+A failed push retains its reviewed candidate and initial execution base. The next allowed attempt
+re-proves the candidate and retries publication without paying for another model phase. Keep the
+recorded worktree clean and the task specification unchanged. Publication is confirmed against the
+exact remote task-branch tip; no force push is used.
+
+`CANDIDATE_STATE_UNAVAILABLE` on an older interrupted implicit-base task means that its original
+execution base cannot be proven. Do not manufacture a checkpoint from current HEAD. Inspect the
+retained branch and evidence, determine the intended base, and submit a new task with that exact
+`--base-commit` under a new task id. Retain the original task evidence.
+
+`PROCESS_SUPERVISION_FAILED` means containment or process closure could not be proven. The task
+fails without an automatic retry. Inspect host process state and raw logs before resolving the host
+problem and retrying. Timeout evidence retains output produced before termination.
+
+Configuration loading rejects zero/negative worker counts, polling intervals, and summary lengths,
+as well as boolean, string, or fractional integer settings. `max_task_tokens = 0` still disables the
+token ceiling; `max_repair_cycles = 0` still disables repairs.
+
 ## Back up and restore
 
 Back up the configured data root and, when task work must be retained, the Forge work/repository root. Do not copy Codex authentication into the source repository or audit reports.
