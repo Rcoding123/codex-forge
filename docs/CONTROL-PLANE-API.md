@@ -92,6 +92,69 @@ a `1.0` response never carries `1.1` fields. An unsupported version is refused w
 `UNSUPPORTED_SCHEMA` and exit code `2` before the command runs; it is never silently downgraded to
 the default.
 
+## Project plans and progress
+
+New project commands use the existing envelope and support all declared versions. They do not add
+fields to existing project/task payloads or change the default `1.0` version.
+
+```text
+forge project plan <project> --file <definition.json> --json
+forge project progress <project> --json
+forge project resume <project> --json
+forge project extend <project> --file <definition.json> --json
+```
+
+The command names are `project.plan`, `project.progress`, `project.resume`, and `project.extend`.
+Each returns `data: {"project_id": "...", "plan": {...}}`. Progress returns `plan: null` for an
+existing project without a plan. Unknown projects return `PROJECT_NOT_FOUND` (exit 2). Invalid plan
+definitions, missing files, and invalid resume/extension requests return `INVALID_ARGUMENT` (exit 2)
+without exposing raw Git errors or filesystem paths. A busy controller prevents plan mutations;
+the existing `COMMAND_FAILED` envelope reports that operational failure.
+
+A definition contains exactly `branch` (a new `forge-project/<lowercase-name>` ref), `base_commit`
+(full canonical commit ID), and a nonempty `phases` list. Each phase contains exactly `name`, `tasks`,
+and `acceptance_commands`. Names are unique, nonempty, at most 100 characters. Task IDs and command
+lists must contain nonempty strings; every task occupies one position. All tasks must already exist
+in this project, remain unstarted READY/BACKLOG tasks, and have no explicit admission base. Declared
+dependencies must precede their dependent or refer to existing external work. Empty gates are refused.
+The project must commit automatically and have no active task during registration.
+
+The public plan has:
+
+| Field | Meaning |
+|---|---|
+| `id` | Opaque plan generation, owned by Forge. |
+| `previous_workflow_id` | Completed predecessor generation on extension; otherwise null. |
+| `branch` | Dedicated integration branch. |
+| `base_commit`, `head_commit` | Exact initial and most recently recorded integrated commit IDs. |
+| `state` | RUNNING, GATING, BLOCKED, or COMPLETED. |
+| `phase_index`, `task_index` | Zero-based execution cursor; phase index equals phase count at completion. |
+| `last_error` | Empty or controller-owned PROJECT_TASK_BLOCKED, PROJECT_ACCEPTANCE_FAILED, PROJECT_PLAN_CHECK_FAILED. |
+| `phases` | Frozen names, ordered task IDs, and acceptance commands with credential values redacted. |
+| `integrations` | Sealed task ID, base commit, and candidate commit records. |
+| `gates` | Gate ID, phase name, checked commit, and RUNNING/PASSED/FAILED/INTERRUPTED status. |
+
+Progress excludes raw output, paths, prompts, and private specification digests. Project-level raw
+evidence is retained for local operator inspection and has no `task.evidence` artifact class.
+
+Tasks remain isolated and use the durable integrated tip as execution authority. A task becomes
+COMPLETED only after its exact reviewed candidate is integrated and configured publication is
+confirmed. One planned task per project can be claimed; unlisted tasks remain queued. Phase
+acceptance runs against the exact integrated commit in another isolated checkout. Failed or
+interrupted acceptance cannot release later work. Resume enables a blocked plan to recheck its
+existing authority; it does not bypass acceptance or increase attempt/token limits.
+
+An extension requires a COMPLETED plan and the same dedicated branch at exactly its recorded
+head. It freezes new unstarted tasks/phases in a new generation and retains the previous plan,
+results, and logs. Existing phase membership cannot change. A failed plan cannot be replaced through
+extension. Task deletion remains supported; deleting required work before its completed integration
+is sealed blocks progression, while sealed integration history survives deletion.
+
+Relocation during GATING is refused with `PROJECT_ACTIVE` (exit 2). Idle relocation preserves the
+generation and must supply the recorded integration history/ref. Task retry is transactional and
+accepts only FAILED, BLOCKED, or NEEDS_DECISION tasks with attempts remaining; active, completed,
+or already queued tasks are refused.
+
 ## Output streams and exit codes
 
 With `--json`, stdout contains exactly one JSON document. Forge does not write banners, progress text,

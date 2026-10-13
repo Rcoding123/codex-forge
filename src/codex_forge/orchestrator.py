@@ -71,6 +71,7 @@ from .telemetry import (
 from .usage import BUDGET_BASIS, budget_used_tokens
 from .utils import ControllerAlreadyRunning, controller_lock, ensure_dir, flatten_unique, tail_text, utc_now
 from .validation import run_validations
+from .workflows import ProjectWorkflows
 
 
 # The mode the reviewer is asked for when the operator has not configured one. Whether the reviewer
@@ -95,6 +96,7 @@ class Orchestrator:
         self.package_root = package_root
         self.db = ForgeDB(config.database_path)
         self.db.initialize()
+        self.workflows = ProjectWorkflows(config, self.db)
         self.runner = CodexRunner(config)
         self.knowledge = KnowledgeStore(config.knowledge_root)
         # Inert unless `[telemetry] enabled = true`. Built before any worker thread starts.
@@ -120,9 +122,10 @@ class Orchestrator:
 
     def _run_once_unlocked(self) -> int:
         self.import_inbox()
+        progressed = self.workflows.advance_all()
         tasks = self.db.claim_ready_tasks(self.config.max_parallel)
         if not tasks:
-            return 0
+            return progressed
         with ThreadPoolExecutor(max_workers=self.config.max_parallel) as pool:
             futures = {pool.submit(self._execute_task, task): task for task in tasks}
             for future in as_completed(futures):
@@ -131,7 +134,7 @@ class Orchestrator:
                     future.result()
                 except Exception as exc:
                     self._handle_unexpected_failure(task, exc)
-        return len(tasks)
+        return len(tasks) + progressed
 
     def run_daemon(self) -> None:
         try:
@@ -277,7 +280,9 @@ class Orchestrator:
             raise CandidateStateUnavailable("Execution completion checkpoint is incomplete.")
         if not checkpoint and not task.admission_base_commit and task.attempts > 1 and (task.branch or task.worktree_path):
             raise CandidateStateUnavailable("Older interrupted task has no verifiable execution base checkpoint.")
-        execution_task = replace(task, admission_base_commit=checkpoint["base_commit"]) if checkpoint else task
+        workflow_base = self.workflows.execution_base(project, task, checkpoint)
+        execution_base = checkpoint["base_commit"] if checkpoint else workflow_base or task.admission_base_commit
+        execution_task = replace(task, admission_base_commit=execution_base) if execution_base else task
         branch, worktree = prepare_worktree(project, execution_task, self.config.workspace_root)
         # A task admitted from an exact commit is compared against that commit and nothing else,
         # on every attempt: `prepare_worktree` has already proven this checkout descends from it,
@@ -500,6 +505,7 @@ class Orchestrator:
             if candidate is None:
                 raise CandidateStateUnavailable("Publication requires a verified candidate commit.")
             push_candidate(worktree, task.branch, candidate)
+        self.workflows.integrate(project, task, worktree, final)
         patch = artifact_dir / "changes.patch"
         if str(patch) != final["patch"]:
             write_patch(worktree, patch, final["base_commit"], candidate)

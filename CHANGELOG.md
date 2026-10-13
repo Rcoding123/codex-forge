@@ -4,6 +4,19 @@ All notable changes to Codex Forge are documented here. This project follows sem
 
 ## [Unreleased]
 
+### Project progression
+
+- Add opt-in `project plan`, `progress`, `resume`, and `extend` commands. Freeze declared phase
+  membership, integrate exact reviewed commits onto a dedicated branch, and run acceptance in
+  isolated detached worktrees before releasing later phases.
+- Serialize planned work within each project while preserving parallelism for unrelated projects.
+  Persist integration intent before compare-and-swap ref updates; recover without repeated model
+  work and verify configured publication before task completion.
+- Retain project-level gate/integration evidence and archive completed plans before extension.
+  Redact command credentials from public progress. Legacy payloads, models, and budgets stay unchanged.
+- Make task retries transactional and refuse active/completed tasks. Refuse repository relocation
+  during acceptance gates and re-prove phase task truth at the gate-result transaction.
+
 ### Runtime hardening
 
 - Supervise Codex and validation process trees, including Windows command shims. Contain workers

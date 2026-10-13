@@ -170,6 +170,70 @@ read-only, take no locks, and cannot block the controller from writing evidence.
 Do not grant an integration file-system access to the data root as a workaround for a missing
 artifact class; add the class to the contract instead.
 
+## Run a declared project in phases
+
+Register the project and submit its bounded tasks before installing a plan. Tasks must be unstarted,
+belong to this project, and omit `--base-commit`. List dependencies before their dependents.
+Use the exact initial commit returned by `git rev-parse HEAD`, not a branch name.
+
+```json
+{
+  "branch": "forge-project/pilot",
+  "base_commit": "FULL_CANONICAL_COMMIT_ID",
+  "phases": [
+    {
+      "name": "P1 vertical slice",
+      "tasks": ["TASK-engine", "TASK-client"],
+      "acceptance_commands": ["python -m pytest", "dotnet build"]
+    },
+    {
+      "name": "P2 next increment",
+      "tasks": ["TASK-next"],
+      "acceptance_commands": ["python -m pytest"]
+    }
+  ]
+}
+```
+
+Acceptance commands are project-specific, non-interactive checks. Configure real commands for the
+available toolchain. Missing tools fail the gate; Forge never substitutes a passing stub.
+
+```powershell
+forge project plan my-project --file plan.json --json
+forge project progress my-project --json
+forge run --daemon
+```
+
+The controller runs declared tasks sequentially within this project, integrates exact reviewed
+commits, and advances phases only after acceptance. It keeps the source checkout unchanged.
+Other projects retain parallel execution. Unlisted tasks remain queued, including after plan
+completion. Plan registration and resume require the controller singleton lock; stop the daemon
+before changing those operational settings.
+
+A failed task stops the project plan. Resolve its cause, use `forge task retry <id>` when attempts
+remain, and use `forge project resume my-project` to enable progression again. Retry accepts only
+FAILED, BLOCKED, and NEEDS_DECISION tasks; it never reopens completed or active work.
+A failed gate also needs explicit resume. Resume rechecks the existing declaration and branch;
+it does not bypass failed checks or change budgets. If a gate exposes a code defect after task
+completion, stop and revise the declared work through a separate reviewed development change;
+this version does not insert automatic gate-repair tasks or rewrite completed evidence.
+
+Raw project diagnostics remain under `DataRoot/project-evidence/<workflow-id>`. Gate checkouts
+remain under `DataRoot/gate-worktrees/<workflow-id>`. They are retained for operator inspection;
+external consumers use `project progress`, which excludes logs and redacts credential values.
+Do not check out or move the integration branch manually. Relocation is refused during a gate.
+An idle relocation must preserve all recorded commits and the exact integration ref.
+
+After a pilot finishes, submit the next bounded tasks and create `next-plan.json` with the same
+branch, the completed `head_commit`, and only new phases/tasks. Run:
+
+```powershell
+forge project extend my-project --file next-plan.json --json
+```
+
+Extension archives the completed plan and starts a new immutable generation from its proven tip.
+Choose task budgets before running; neither extension nor phase advancement raises them.
+
 ## Optional local tracing
 
 Telemetry is off by default and emits nothing until `[telemetry] enabled = true` is set in

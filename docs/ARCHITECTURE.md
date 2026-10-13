@@ -109,6 +109,42 @@ The transported JSON schemas are package resources under `src/codex_forge/schema
 paths remain valid for the entire worker call, and local review decoding reads the same resources.
 An installed wheel therefore does not depend on the source checkout layout.
 
+## Opt-in project integration and phase gates
+
+`project plan` freezes ordered phase membership and acceptance commands for unstarted tasks.
+Legacy projects keep their existing scheduling and base selection. A planned project claims one
+declared task at a time; other projects still run in parallel. Unlisted tasks stay queued. Plans
+require automatic commits, an exact initial commit, and a new `forge-project/<name>` branch.
+Explicit admission bases are never replaced; the first plan version admits only implicit-base tasks.
+
+Each task snapshots the recorded integration tip as its execution base. After independent review
+and final validation, Forge persists a pending integration before a compare-and-swap ref update.
+The dedicated branch fast-forwards to the exact verified candidate, without changing the stable
+checkout. Automatic publication, when configured, confirms both task and project branches before
+task completion. Restart accepts only the recorded old tip or pending candidate and reuses the
+existing completion checkpoint. Unexpected movement, changed specifications, or a checked-out
+integration branch fails closed. Task admission provenance remains unchanged.
+
+After all phase tasks complete and their integrations are recorded, controller acceptance commands
+run in a fresh detached worktree of the exact integrated tip. The gate must execute at least one
+command, pass every command, leave the checked commit clean and unchanged, and re-prove phase task
+truth under the final SQLite write lock. Only then can the next phase run. Gate interruption keeps
+its raw logs and starts a fresh gate attempt after restart; failures block until explicit resume.
+Completed or active tasks cannot be manually retried. Repository relocation is refused during gates.
+
+`project_workflows` holds operational cursor, generation, integration intent, and gate state.
+Project deletion cascades that state. Raw plan, integration, and gate evidence remains under
+`DataRoot/project-evidence/<workflow-id>`; detached gate worktrees remain under
+`DataRoot/gate-worktrees/<workflow-id>`. These artifacts have no task-evidence disclosure class.
+`project progress` exposes a controller-owned projection and redacts command credentials.
+Sealed integration records survive task deletion; deleting a task before its completion is recorded
+blocks progression. Historical task evidence is never rewritten.
+
+`project extend` creates another frozen plan only after completion, from the same dedicated branch
+and its proven completed tip. It archives the previous complete cursor and gate state alongside
+the original plan and logs. This supports a bounded pilot followed by further declared phases.
+It does not invent new tasks or expand budgets automatically.
+
 ## Limits and loop resistance
 
 Forge enforces complementary bounds:

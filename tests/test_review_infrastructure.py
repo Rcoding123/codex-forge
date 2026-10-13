@@ -546,6 +546,10 @@ def build_orchestrator(
     orchestrator = object.__new__(Orchestrator)
     orchestrator.db = db
     orchestrator.runner = runner
+    # These focused review tests use a non-workflow project and a synthetic Git/DB boundary.
+    orchestrator.workflows = SimpleNamespace(
+        execution_base=lambda *args: None, integrate=lambda *args: None,
+    )
     # The trusted review gate loads the shipped review-result schema through this root.
     orchestrator.package_root = package_root()
     orchestrator.telemetry = build_telemetry(TelemetryConfig())
