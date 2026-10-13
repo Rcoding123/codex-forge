@@ -76,7 +76,9 @@ from .utils import (
     run_process,
     stable_id,
     windows_alias_key,
+    controller_lock,
 )
+from .workflows import ProjectWorkflows
 
 
 class CLIArgumentError(ValueError):
@@ -170,6 +172,18 @@ def build_parser() -> argparse.ArgumentParser:
     project_list = project_sub.add_parser("list", help="List projects")
     _add_schema_version_argument(project_list)
     project_list.add_argument("--json", action="store_true")
+    for action in ("plan", "extend", "progress", "resume"):
+        command = project_sub.add_parser(action, help={
+            "plan": "Install an immutable project integration and phase plan",
+            "extend": "Continue from a completed plan with another immutable phase plan",
+            "progress": "Show project integration and phase progress",
+            "resume": "Resume a blocked project plan after resolving its cause",
+        }[action])
+        command.add_argument("project", help="Project id or exact name")
+        if action in ("plan", "extend"):
+            command.add_argument("--file", required=True, help="JSON plan definition")
+        _add_schema_version_argument(command)
+        command.add_argument("--json", action="store_true")
 
     task = sub.add_parser("task", help="Manage tasks")
     task_sub = task.add_subparsers(dest="task_command", required=True)
@@ -528,6 +542,12 @@ def cmd_project_relocate(
             as_json,
             schema_version,
         )
+    if relocation.outcome == "active_workflow":
+        return _structured_failure(
+            "project.relocate", StructuredError(
+                "PROJECT_ACTIVE", "Project acceptance is running; the repository cannot be relocated.", {},
+            ), as_json, schema_version,
+        )
     if relocation.outcome == "active_tasks":
         return _structured_failure(
             "project.relocate",
@@ -581,6 +601,41 @@ def cmd_project_list(
         return 0
     for project in projects:
         print(f"{project.name}\t{project.repo_path}\tbase={project.default_branch}")
+    return 0
+
+
+def cmd_project_workflow(config: ForgeConfig, args: argparse.Namespace, schema_version: str) -> int:
+    db = ForgeDB(config.database_path)
+    db.initialize()
+    project = db.get_project(args.project)
+    command = f"project.{args.project_command}"
+    if not project:
+        return _structured_failure(
+            command, StructuredError("PROJECT_NOT_FOUND", "Project was not found.", {}), args.json, schema_version,
+        )
+    workflows = ProjectWorkflows(config, db)
+    try:
+        if args.project_command == "progress":
+            document = workflows.get(project.id)
+        else:
+            with controller_lock(config.data_root / "controller.lock"):
+                if args.project_command in ("plan", "extend"):
+                    definition = json.loads(Path(args.file).read_text(encoding="utf-8"))
+                    document = workflows.install(project, definition, extend=args.project_command == "extend")
+                else:
+                    document = workflows.resume(project.id)
+    except (ValueError, GitError, OSError) as exc:
+        if not args.json:
+            print(str(exc), file=sys.stderr)
+        return _structured_failure(
+            command, StructuredError("INVALID_ARGUMENT", "Project plan request was refused.", {}),
+            args.json, schema_version,
+        )
+    data = {"project_id": project.id, "plan": workflows.public(document)}
+    if args.json:
+        write_response(command, data=data, schema_version=schema_version)
+    else:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
     return 0
 
 
@@ -771,17 +826,19 @@ def cmd_task_show(
 
 def cmd_task_retry(config: ForgeConfig, task_id: str) -> int:
     db = ForgeDB(config.database_path)
-    task = db.get_task(task_id)
-    if not task:
+    outcome, task = db.retry_task(task_id)
+    if outcome == "not_found":
         print(f"Unknown task: {task_id}", file=sys.stderr)
         return 2
-    if task.attempts >= task.max_attempts:
+    if outcome == "exhausted":
         print(
             f"Task {task_id} exhausted its attempt limit ({task.attempts}/{task.max_attempts}).",
             file=sys.stderr,
         )
         return 1
-    db.update_task(task_id, state=TaskState.READY)
+    if outcome == "invalid_state":
+        print(f"Task {task_id} cannot retry from {task.state.value}.", file=sys.stderr)
+        return 2
     print(f"Task {task_id} returned to READY.")
     return 0
 
@@ -1403,6 +1460,8 @@ def main(argv: list[str] | None = None) -> int:
                 return cmd_project_relocate(config, args, schema_version)
             if args.project_command == "delete":
                 return cmd_project_delete(config, args, schema_version)
+            if args.project_command in ("plan", "extend", "progress", "resume"):
+                return cmd_project_workflow(config, args, schema_version)
             return cmd_project_list(config, args.json, schema_version)
         if args.command == "task":
             if args.task_command == "add":

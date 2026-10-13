@@ -97,6 +97,12 @@ CREATE TABLE IF NOT EXISTS execution_checkpoints (
     publication_required INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS project_workflows (
+    project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    document_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -457,6 +463,12 @@ class ForgeDB:
             if active:
                 connection.rollback()
                 return ProjectRelocation("active_tasks", project, active_tasks=active)
+            workflow = connection.execute(
+                "SELECT document_json FROM project_workflows WHERE project_id=?", (project.id,),
+            ).fetchone()
+            if workflow and json_loads(workflow[0], {}).get("state") == "GATING":
+                connection.rollback()
+                return ProjectRelocation("active_workflow", project)
             connection.execute(
                 "UPDATE projects SET repo_path=?, updated_at=? WHERE id=?",
                 (target, utc_now(), project.id),
@@ -628,11 +640,29 @@ class ForgeDB:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
-                "SELECT * FROM tasks WHERE state=? ORDER BY priority DESC, created_at ASC LIMIT ?",
-                (TaskState.READY.value, limit),
+                "SELECT * FROM tasks WHERE state=? ORDER BY priority DESC, created_at ASC",
+                (TaskState.READY.value,),
             ).fetchall()
+            from .workflows import eligible_task
+
+            workflows = {
+                row["project_id"]: json_loads(row["document_json"], {})
+                for row in connection.execute("SELECT * FROM project_workflows")
+            }
+            active_projects = {
+                row[0] for row in connection.execute(
+                    "SELECT DISTINCT project_id FROM tasks WHERE state IN (?,?,?,?)",
+                    tuple(state.value for state in ACTIVE_TASK_STATES),
+                )
+            }
             now = utc_now()
             for row in rows:
+                if len(claimed) >= limit:
+                    break
+                if row["project_id"] in workflows:
+                    if row["project_id"] in active_projects or not eligible_task(workflows[row["project_id"]], row["id"]):
+                        continue
+                    active_projects.add(row["project_id"])
                 connection.execute(
                     "UPDATE tasks SET state=?,attempts=attempts+1,updated_at=? WHERE id=? AND state=?",
                     (TaskState.IMPLEMENTING.value, now, row["id"], TaskState.READY.value),
@@ -714,6 +744,23 @@ class ForgeDB:
                 # beats committing a child-row deletion for a task that was not deleted.
                 raise sqlite3.OperationalError(f"task {task_id} changed state during deletion")
         return ("deleted", task)
+
+    def retry_task(self, task_id: str) -> tuple[str, Task | None]:
+        """Serialize retries with claims and gates; completed/active work cannot reopen."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None:
+                return "not_found", None
+            task = self._task_from_row(row)
+            if task.attempts >= task.max_attempts:
+                return "exhausted", task
+            if task.state not in (TaskState.FAILED, TaskState.BLOCKED, TaskState.NEEDS_DECISION):
+                return "invalid_state", task
+            connection.execute(
+                "UPDATE tasks SET state=?,updated_at=? WHERE id=?", (TaskState.READY.value, utc_now(), task_id),
+            )
+            return "retried", task
 
     def add_decision(
         self,

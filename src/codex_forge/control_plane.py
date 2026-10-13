@@ -91,6 +91,7 @@ ERROR_EXIT_CODES: dict[str, int] = {
     "ARTIFACT_CHANGED_DURING_READ": 1,
     "FILESYSTEM_ERROR": 1,
     "TASK_ACTIVE": 2,
+    "PROJECT_ACTIVE": 2,
     "PROJECT_NOT_EMPTY": 2,
     # The submitted task id names retained evidence of a deleted task, or differs only by case
     # from a live task in the same project; either would alias one on-disk generation.
