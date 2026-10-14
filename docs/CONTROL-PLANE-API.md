@@ -66,6 +66,88 @@ returns exit 0 and `success=true`, even if its bounded execution ends FAILED; in
 Data contains `task_id`, `attempt`, `continuation_id`, `repair_slot`, `state`, and `task_state`.
 Refusal returns sanitized `INVALID_ARGUMENT` with exit 2. No new submission fields are introduced.
 
+## Hand off an independently gated prerequisite
+
+`task handoff-prerequisite` is a separate opt-in operator execution operation. It has the same
+attempt ceiling, unused validation-repair slot one, singleton lock, ordinary validation,
+independent review, final validation, integration and postintegration gate as `resolve-blocker`.
+It changes no admitted task fields, original execution base, frozen plan, repair allowance,
+timeout, token accounting or failure counters. It never moves the blocked task's HEAD/ref or
+integration branch to the prerequisite. It requires a controller-sealed original failed candidate;
+the legacy prospective-attestation exception is not available for imports.
+
+First request a nonmutating preflight while the controller is idle:
+
+```powershell
+forge --config forge.toml task handoff-prerequisite TASK-ID --reason "Reviewed shared prerequisite" --dry-run --source-task SOURCE-ID --source-registration repo-reg-HEX --source-candidate FULL-COMMIT --workflow-id workflow-HEX --gate-id HEX --gate-candidate FULL-COMMIT --json
+```
+
+Preflight acquires the singleton lock for consistent inspection, but does not initialize/migrate
+state, reserve a slot, import files, create a task/evidence artifact, or launch a model. The existing
+configuration/database must already exist. Successful `data` contains `dry_run=true`, `receipt`,
+`receipt_json` (the exact UTF-8 text without BOM or added newline), and `receipt_sha256`. The receipt
+exposes the original sealed snapshot/base/output hashes and the source registration, specification
+digest, task fingerprint, exact candidate, workflow/gate identities and exact approved path list.
+The operator can inspect these through the public command without reading private controller
+records. Save `receipt_json` unchanged to a new immutable plain file, then execute:
+
+```powershell
+forge --config forge.toml task handoff-prerequisite TASK-ID --reason "Reviewed shared prerequisite" --receipt C:/operator/prerequisite.json --receipt-sha256 HEX --json
+```
+
+The receipt has the ordinary blocker fields plus a `prerequisite` object with exactly:
+`source_project_id`, `source_registration`, `source_task_id`, `source_candidate`,
+`source_specification_digest`, `source_task_fingerprint`, `workflow_id`, `gate_id`, `gate_candidate`,
+and `allowed_paths` (sorted, unique and equal to the complete source base-to-candidate changed set).
+Execution repeats every proof; preflight is inspection, not a reservation or permission to accept
+later drift. The reason and exact receipt bytes are retained privately with the continuation.
+
+The source must be a separately registered project with a COMPLETED task based on the exact
+original execution base, a matching completion/specification checkpoint, independent passing
+review, exact passing final validation, and a clean owned retained task checkout. Its registered
+repository must also be clean. The same source registration must have a COMPLETED workflow with
+a PASSED gate at the pinned gate candidate, exact source validation commands, matching retained
+gate result, unchanged integration ref and a clean detached gate checkout. The gate may be on the
+source candidate itself, or on a descendant whose entire additional delta is regular files under
+`docs/evidence/`. This permits a later separately admitted evidence-only gate task. No application
+or configuration change between source candidate and gated candidate is accepted. Live gate tasks,
+checkpoints and frozen specifications must still agree with their integration records.
+
+Imports are limited to at most 256 changed paths, 4 MiB per new file and 16 MiB total new bytes.
+Supported roots are `engine/src/`, `engine/tests/`, `engine/scripts/`, `client/`, `contracts/`,
+`content/`, `docs/evidence/`, plus `docs/ARCHITECTURE.md`. All changed entries must be regular Git
+mode `100644` blobs or deletions. Authority filenames `AGENTS.md`, `CLAUDE.md`, `SPEC.md` and
+`SKILL.md`, Git control paths, unsafe Windows components, case aliases, links/reparse points,
+submodules, executable modes, parent/file collisions, and any overlap with the failed worker's
+changed paths are refused. The exact receipt path list is the operator-approved import authority;
+it does not enlarge the original worker's scope. Each source candidate authority and receipt may
+be reserved once; deletion does not erase that use history.
+
+An immutable reservation precedes import. A new intent records the full original candidate and
+old/new path hashes; per-file replacements use reserved temporary files, fsync and atomic rename.
+Restart reconciles only original/new bytes and bounded prefixes in those reserved temporary files.
+An append-only imported checkpoint seals the composite before the existing paid repair slot starts.
+Any unexplained file/index/HEAD/branch/provenance drift fails closed. No exhausted READY row is
+exposed. An identical invocation resumes an unstarted import/repair; a started paid slot cannot
+replay, and a sealed completion can finish publication/integration using the ordinary recovery path.
+
+Imported file bytes, index visibility, modes and final committed blob/deletion identities are
+controller-owned and checked around model calls, validation and completion. The original worker
+must report blocked if a locked prerequisite needs repair. Every implementation/review prompt
+retains the exact original contract and identifies the separate source delta and locked paths.
+The most recent usable, command-closed and conformance-enforced independent verdict is carried
+across earlier attempts; a later blocked implementation or unusable raw pass does not clear its
+unresolved findings. The handoff command response adds an explicit `data.prerequisite_handoff` projection on completed
+execution, also returned by an identical terminal invocation. It contains locked paths, source/gate
+identities, receipt/snapshot/delta hashes and worker-only changed paths; it is null when no terminal
+completion exists. Existing versioned final-result evidence sanitization remains unchanged. Public `prerequisite.patch` and
+`worker-changes.patch` supplement the unchanged full original-base-to-final `changes.patch`.
+Original failed evidence is never rewritten.
+
+Output uses the existing default schema/version and envelope. As for `resolve-blocker`, accepted
+execution returns exit 0 and `success=true`; inspect `data.task_state` for the bounded task outcome.
+Refusal is sanitized `INVALID_ARGUMENT`, exit 2. No submission or frozen-plan schema is extended.
+
 ## Supported commands
 
 ```powershell
