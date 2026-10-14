@@ -111,16 +111,25 @@ class Orchestrator:
         ):
             ensure_dir(path)
 
-    def resolve_blocker(self, task_id: str, reason: str, receipt: Path, receipt_sha256: str) -> dict:
+    def resolve_blocker(self, task_id: str, reason: str, receipt: Path, receipt_sha256: str, *, prerequisite: bool = False) -> dict:
         """Resolve and execute under one lock; legacy controllers never see exhausted READY work."""
         from .blockers import queue_resolution, _public, _prove_plan
 
         with controller_lock(self.config.data_root / "controller.lock"):
-            resolution = queue_resolution(self.config, task_id, reason, receipt, receipt_sha256)
+            resolution = queue_resolution(self.config, task_id, reason, receipt, receipt_sha256, prerequisite=prerequisite)
             existing = self.db.blocker_continuation(task_id, resolution["attempt"])
             document = json.loads(existing["document_json"])
+            def outcome(row):
+                current = self.db.get_task(task_id)
+                data = _public(row, document) | {"task_state": current.state.value}
+                if prerequisite:
+                    from .prerequisites import public_attribution
+
+                    data["prerequisite_handoff"] = public_attribution(current)
+                return data
+
             if existing["state"] == "TERMINAL":
-                return _public(existing, document) | {"task_state": self.db.get_task(task_id).state.value}
+                return outcome(existing)
             task = self.db.get_task(task_id)
             project = self.db.get_project(task.project_id)
             checkpoint = self.db.execution_checkpoint(task.id)
@@ -170,7 +179,7 @@ class Orchestrator:
             self.workflows.advance_all()
             self.workflows.advance_all()
             latest = self.db.blocker_continuation(task.id, task.attempts)
-            return _public(latest, document) | {"task_state": self.db.get_task(task.id).state.value}
+            return outcome(latest)
 
     def run_once(self) -> int:
         try:
@@ -546,7 +555,11 @@ class Orchestrator:
         with self.telemetry.phase_span(phase_name=PHASE_EVIDENCE, role=ROLE_CONTROLLER) as span:
             patch_path = artifact_dir / "changes.patch"
             if project.auto_commit:
+                from .prerequisites import verify_locked
+
+                verify_locked(self.config, self.db, task)
                 commit_task(worktree, task)
+                verify_locked(self.config, self.db, task, committed=True)
             candidate_commit = (
                 explicit_candidate_commit(project.repo_path, worktree, base_commit)
                 if project.auto_commit or task.admission_base_commit else None
@@ -578,6 +591,11 @@ class Orchestrator:
                 "patch": str(patch_path),
                 "completed_at": utc_now(),
             }
+            from .prerequisites import terminal_evidence
+
+            attribution = terminal_evidence(self.config, self.db, task, artifact_dir, base_commit, candidate_commit, final_changed_files)
+            if attribution is not None:
+                final_result["prerequisite_handoff"] = attribution
             if candidate_commit is not None:
                 self.db.save_completion_checkpoint(
                     task.id, candidate_commit, final_result, _specification_digest(project, task, commands), project.auto_push,
@@ -588,6 +606,9 @@ class Orchestrator:
 
     def _complete_task(self, task: Task, project: Project, worktree: Path, artifact_dir: Path, final: dict) -> str:
         """Finish verified local work; publication retries never invoke a model."""
+        from .prerequisites import verify_locked
+
+        verify_locked(self.config, self.db, task, committed=True)
         candidate = final["commit"]
         if project.auto_push:
             if candidate is None:
@@ -631,6 +652,10 @@ class Orchestrator:
             # the budget cannot cover, the one below stops the task as soon as a completed phase
             # has spent it.
             self._enforce_usage_budget(task)
+            from .prerequisites import prompt_context, verify_locked
+
+            verify_locked(self.config, self.db, task)
+            prompt += prompt_context(self.config, self.db, task)
             run_id = self.db.record_run_start(task.id, phase, model, effort, phase_dir)
             result = self.runner.run(
                 prompt=prompt,
@@ -648,6 +673,7 @@ class Orchestrator:
                 exit_code=result.exit_code,
                 usage=result.usage,
             )
+            verify_locked(self.config, self.db, task)
             if (phase == "implementation" and result.exit_code == 0 and isinstance(result.final, dict)
                     and result.final.get("status") == "blocked" and isinstance(self.db, ForgeDB)):
                 from .blockers import record_blocked_candidate
@@ -699,6 +725,9 @@ class Orchestrator:
             if not commands:
                 span.set_outcome(OUTCOME_SKIPPED)
                 return []
+            from .prerequisites import verify_locked
+
+            verify_locked(self.config, self.db, task)
             results = run_validations(
                 commands,
                 cwd=worktree,
@@ -706,6 +735,7 @@ class Orchestrator:
                 timeout_seconds=self.config.task_timeout_minutes * 60,
                 max_summary_chars=self.config.max_output_chars,
             )
+            verify_locked(self.config, self.db, task)
             span.set_outcome(OUTCOME_OK if self._all_passed(results) else OUTCOME_FAILED)
             return results
 

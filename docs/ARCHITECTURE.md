@@ -219,6 +219,28 @@ An identical resolution is idempotent. An unstarted reservation can be explicitl
 restart; a started paid slot cannot replay. A sealed completion can resume publication/integration
 without model calls. All worktree, receipt, task, generation and workflow proofs are rechecked.
 
+A separate `task handoff-prerequisite` uses that same reserved continuation slot when a shared
+prerequisite must be implemented outside the original task scope. Its public preflight computes
+exact receipt identities without mutating task/evidence/operational state or initializing the DB.
+Execution proves the original controller seal, independently COMPLETED source task at the same
+base, source registration/specification/checkpoint, and a PASSED same-registration detached gate.
+A subsequent gate candidate is allowed only when its extra changes are regular evidence files.
+The complete source delta must match the receipt's exact allowed paths and be disjoint from the
+failed worker delta. Portable mode100644 files only are supported within documented implementation
+roots; authority, Git control, owner-data, unsafe path, alias, link and mode changes fail closed.
+
+The immutable continuation retains full original state and source provenance; `prerequisite_receipts`
+retains one-use authority, and `prerequisite_events` appends the imported composite checkpoint.
+Intent precedes filesystem changes. Atomic per-file import and bounded old/new/temp-prefix proofs
+allow a partial import to resume without changing index, HEAD, refs, admission or execution base.
+All other drift is refused. Receipt/event use history survives task deletion. Model/validation
+boundaries lock prerequisite bytes and index visibility; terminal checks require exact committed
+source blobs/modes/deletions. All local proof/context checks precede consumption of the paid slot.
+Review sees the unchanged task contract plus explicit prerequisite attribution and any unresolved
+trusted earlier review findings. Full base..candidate evidence is retained; separately classified
+prerequisite/worker patches and terminal metadata make the two deltas inspectable. The existing
+completion checkpoint and workflow integration/gate paths remain the publication authorities.
+
 The scheduled task uses `IgnoreNew`, and the daemon holds a crash-released process lock, preventing duplicate controllers. At startup, Forge finds tasks left in active states. Tasks below their attempt limit return safely to READY while preserving branch/worktree state; exhausted tasks become FAILED. Recovery events are appended outside the repository.
 
 Controlled scheduled-task restart recovery is validated. Full host reboot recovery remains an explicit release limitation until exercised on a maintenance window.

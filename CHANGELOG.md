@@ -4,6 +4,17 @@ All notable changes to Codex Forge are documented here. This project follows sem
 
 ## [Unreleased]
 
+### Governed prerequisite handoff
+
+- Add public nonmutating `task handoff-prerequisite --dry-run` to expose an exact immutable receipt
+  for a controller-sealed model blocker and a separately completed, reviewed and gated prerequisite.
+- Import only the exact approved, disjoint regular-file delta under an append-only operational
+  journal, with atomic restart-safe replacements and one-use source/receipt authority. Keep the
+  original scope, frozen plan, execution base, attempt/repair limits and time/token accounting.
+- Lock imported bytes, index visibility and final committed blobs/modes through the existing
+  repair, independent review, validation and integration pipeline. Carry usable prior review
+  findings across attempts and retain full, prerequisite-only and worker-only terminal evidence.
+
 ### Compact phase-gate checkouts
 
 - Create new detached phase-gate checkouts at `DataRoot/gate-worktrees/gate-<full-gate-UUID>`

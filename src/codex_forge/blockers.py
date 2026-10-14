@@ -53,8 +53,8 @@ def _plain_document(path: Path, *, maximum: int = 1_048_576) -> tuple[bytes, tup
     return data, _stamp(after)
 
 
-def candidate_snapshot(config, project, task, base: str) -> str:
-    """Bind HEAD, branch, index, and tracked/nonignored-untracked working bytes."""
+def candidate_state(config, project, task, base: str) -> list:
+    """Read a stable complete candidate identity for sealing or import reconciliation."""
     worktree = task.worktree_path
     expected = derived_worktree_path(config.workspace_root, project.name, task.id)
     if worktree is None or worktree.resolve() != expected.resolve():
@@ -68,6 +68,9 @@ def candidate_snapshot(config, project, task, base: str) -> str:
     branch = _git(worktree, "symbolic-ref", "--short", "HEAD").stdout.strip()
     if branch != task.branch or _git(project.repo_path, "rev-parse", f"refs/heads/{branch}").stdout.strip() != head:
         raise CandidateStateUnavailable("Blocker checkout branch identity changed.")
+    flags = _git(worktree, "ls-files", "-v", "-z").stdout
+    if any(record and not record.startswith("H ") for record in flags.split("\0")):
+        raise CandidateStateUnavailable("Blocker candidate has hidden or unmerged index entries.")
     index = _git(worktree, "ls-files", "--stage", "-z").stdout
     status = _git(worktree, "status", "--porcelain", "-z", "--untracked-files=all").stdout
     names = _git(worktree, "ls-files", "-z", "--cached", "--others", "--exclude-standard").stdout
@@ -89,32 +92,41 @@ def candidate_snapshot(config, project, task, base: str) -> str:
         if current != identity:
             raise CandidateStateUnavailable("Blocker file changed during the complete candidate scan.")
     if (current_commit(worktree) != head or _git(worktree, "ls-files", "--stage", "-z").stdout != index
+            or _git(worktree, "ls-files", "-v", "-z").stdout != flags
             or _git(worktree, "status", "--porcelain", "-z", "--untracked-files=all").stdout != status
             or _git(worktree, "symbolic-ref", "--short", "HEAD").stdout.strip() != branch
             or _git(worktree, "ls-files", "-z", "--cached", "--others", "--exclude-standard").stdout != names):
         raise CandidateStateUnavailable("Blocker candidate changed during proof.")
-    return _hash(json.dumps([head, branch, index, status, files], ensure_ascii=False).encode("utf-8"))
+    return [head, branch, index, status, files]
 
 
-def queue_resolution(config, task_id: str, reason: str, receipt: Path, expected_sha256: str) -> dict:
+def candidate_snapshot(config, project, task, base: str) -> str:
+    """Bind HEAD, branch, index, and tracked/nonignored-untracked working bytes."""
+    return _hash(json.dumps(candidate_state(config, project, task, base), ensure_ascii=False).encode("utf-8"))
+
+
+def queue_resolution(config, task_id: str, reason: str, receipt: Path, expected_sha256: str, *, prerequisite: bool = False,
+                     dry_run: bool = False, _receipt_bytes: bytes | None = None) -> dict:
     """Queue only the unused first validation-repair slot; never change attempt/admission truth."""
     reason = reason.strip()
     if not reason or len(reason) > 4_000:
         raise ValueError("A bounded operator reason is required.")
     receipt = receipt.absolute()
-    raw = _plain_bytes(receipt)
+    raw = _plain_bytes(receipt) if _receipt_bytes is None else _receipt_bytes
     digest = _hash(raw)
     if digest != expected_sha256:
         raise ValueError("Operator receipt does not match the supplied SHA-256.")
-    db = ForgeDB(config.database_path)
-    db.initialize()
+    db = ForgeDB(config.database_path, read_only=dry_run)
+    if not dry_run:
+        db.initialize()
     task = db.get_task(task_id)
     if task is None:
         raise ValueError("Task was not found.")
     existing = db.blocker_continuation(task.id, task.attempts)
     if existing:
         document = json.loads(existing["document_json"])
-        if document["reason"] != reason or document["receipt_sha256"] != digest or document["receipt_path"] != str(receipt):
+        if (bool(document.get("prerequisite")) != prerequisite or document["reason"] != reason
+                or document["receipt_sha256"] != digest or document["receipt_path"] != str(receipt)):
             raise ValueError("An existing continuation is bound to a different resolution.")
         return _public(existing, document)
     if (task.state != TaskState.FAILED or task.attempts < 1 or task.attempts != task.max_attempts
@@ -163,6 +175,8 @@ def queue_resolution(config, task_id: str, reason: str, receipt: Path, expected_
                         "implementation_sha256": _hash(final_bytes), "candidate_snapshot_sha256": snapshot,
                         "base_commit": checkpoint["base_commit"], "task_fingerprint": task_fingerprint(task)}:
             raise ValueError("Candidate no longer matches its controller-sealed failed snapshot.")
+    elif prerequisite:
+        raise ValueError("Prerequisite handoff requires a controller-sealed failed candidate.")
     elif not isinstance(proof.get("legacy_attestation"), str) or not proof["legacy_attestation"].strip():
         raise ValueError("Legacy evidence lacks a full failed-tree seal; an explicit supervisor attestation is required.")
     else:
@@ -179,6 +193,16 @@ def queue_resolution(config, task_id: str, reason: str, receipt: Path, expected_
         "worktree": str(task.worktree_path), "branch": task.branch,
         "max_repair_cycles": config.max_repair_cycles, "project_digest": _digest(project, task),
     }
+    if prerequisite:
+        from .prerequisites import prepare_handoff
+
+        document["prerequisite"] = prepare_handoff(config, db, project, task, document, proof)
+    if dry_run:
+        with db.connect() as connection:
+            if connection.execute("SELECT 1 FROM tasks WHERE state IN (?,?,?,?) LIMIT 1",
+                                  tuple(state.value for state in ACTIVE_TASK_STATES)).fetchone():
+                raise ValueError("Active controller task prevents prerequisite preflight.")
+        return {"receipt": proof, "receipt_json": raw.decode("utf-8"), "receipt_sha256": digest, "dry_run": True}
     # Re-prove under the insertion lock. No READY task can be observed without sealed proof.
     with db.connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -193,6 +217,10 @@ def queue_resolution(config, task_id: str, reason: str, receipt: Path, expected_
             raise ValueError("Blocker task changed during resolution.")
         if candidate_snapshot(config, project, task, checkpoint["base_commit"]) != snapshot or _hash(_plain_bytes(receipt)) != digest:
             raise ValueError("Blocker candidate or receipt changed during resolution.")
+        if prerequisite:
+            from .prerequisites import reserve_handoff
+
+            reserve_handoff(config, db, connection, project, task, document)
         artifact_root.mkdir(parents=True, exist_ok=False)
         (artifact_root / "operator-receipt.raw").write_bytes(raw)
         (artifact_root / "resolution.json").write_text(json.dumps(document, indent=2), encoding="utf-8")
@@ -223,12 +251,18 @@ def validate_continuation(config, db, task, project, row, *, resume_completion: 
     root = Path(document["artifact_root"])
     if (_hash(_plain_bytes(Path(document["receipt_path"]))) != document["receipt_sha256"]
             or _hash(_plain_bytes(root / "operator-receipt.raw")) != document["receipt_sha256"]
-            or json.loads(_plain_bytes(root / "resolution.json")) != document
+            or json.loads(_plain_bytes(root / "resolution.json", maximum=32 * 1024 * 1024)) != document
             or _hash(_plain_bytes(Path(document["implementation_path"]))) != document["implementation_sha256"]):
         raise CandidateStateUnavailable("Blocker continuation receipt or historical output changed.")
     if resume_completion:
         if row["state"] != "CONSUMED" or checkpoint["completion_json"] is None:
             raise CandidateStateUnavailable("No sealed completion can resume its consumed repair slot.")
+    elif document.get("prerequisite"):
+        from .prerequisites import import_handoff
+
+        if row["state"] != "CLAIMED":
+            raise CandidateStateUnavailable("Prerequisite continuation slot was already consumed.")
+        import_handoff(config, db, project, task, document)
     elif row["state"] != "CLAIMED" or candidate_snapshot(config, project, task, document["base_commit"]) != document["candidate_snapshot"]:
         raise CandidateStateUnavailable("Blocker continuation candidate changed or its slot was already consumed.")
     return document

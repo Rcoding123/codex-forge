@@ -276,7 +276,7 @@ def classify_attempt_file(name: str) -> ArtifactClass | None:
     """Classify a file that sits directly in an attempt directory."""
     if name == "task-result.json":
         return _STRUCTURED_CLASSES["final_result"]
-    if name == "changes.patch":
+    if name in ("changes.patch", "prerequisite.patch", "worker-changes.patch"):
         return _PATCH_CLASS
     return None
 

@@ -292,3 +292,32 @@ Forge's controller validation preserves raw stdout/stderr regardless, so the lim
 ## Release limitation
 
 Controlled service restarts and in-progress task recovery have been validated. A full Windows OS reboot recovery test remains outstanding. Perform it only in a maintenance window with state and evidence backed up, then verify scheduled-task start, singleton behavior, queue progress, task worktree consistency, and raw evidence retention.
+
+
+## Shared prerequisites for an exhausted model blocker
+
+Use `task handoff-prerequisite` when a schema-valid, controller-sealed blocker needs a separately
+scoped shared change. Keep the original task contract, frozen workflow and comparison base intact.
+Admit the prerequisite to a separate registered repository/project at that exact base and let Forge
+complete implementation, independent review and final validation. Gate that candidate with the
+same exact commands in a source-project workflow. If the source task ran standalone, a separately
+admitted evidence-only task can establish the gate workflow at its candidate; its additional files
+must remain under `docs/evidence/` and leave application inputs unchanged.
+
+Wait for both source completion and its PASSED gate, then run public `task handoff-prerequisite
+--dry-run` with exact source-task/registration/candidate/workflow/gate pins. See the full command and
+receipt contract in [CONTROL-PLANE-API.md](CONTROL-PLANE-API.md#hand-off-an-independently-gated-prerequisite).
+Inspect the complete approved path list. Save the returned `receipt_json` as exact UTF-8 bytes in a
+new immutable operator file and use the returned SHA-256 for execution. No private DB, candidate seal
+file or raw event access is needed. Preflight neither reserves a repair nor changes task state.
+
+The execution command holds the existing singleton lock through import, the unused same-attempt
+repair, review, validation, integration and actual original-project phase gate. It preserves all
+budgets and never exposes attempt four to another launcher. Retry the identical reason/receipt
+only to resume an unstarted import/slot or finish a sealed completion; a consumed interrupted slot
+cannot be replayed. Never copy source files into the failed checkout manually, change its base,
+reset counters, move refs or edit original evidence. Conflicts, source drift, changed receipts or
+locked-file changes need a new governed decision; the command refuses them. Inspect public task
+state, the handoff command response's `data.prerequisite_handoff` attribution (repeat the identical
+terminal command to inspect it without execution), and all three patch artifacts, then project progress for the
+actual postintegration gate. A successful source gate is a prerequisite, not a replacement for it.

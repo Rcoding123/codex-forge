@@ -244,6 +244,16 @@ def build_parser() -> argparse.ArgumentParser:
     blocker.add_argument("--receipt-sha256", required=True)
     _add_schema_version_argument(blocker)
     blocker.add_argument("--json", action="store_true")
+    handoff = task_sub.add_parser("handoff-prerequisite", help="Import a gated prerequisite and continue one sealed model blocker")
+    handoff.add_argument("task_id")
+    handoff.add_argument("--reason", required=True)
+    handoff.add_argument("--receipt", type=Path)
+    handoff.add_argument("--receipt-sha256")
+    handoff.add_argument("--dry-run", action="store_true")
+    for pin in ("source-task", "source-registration", "source-candidate", "workflow-id", "gate-id", "gate-candidate"):
+        handoff.add_argument("--" + pin)
+    _add_schema_version_argument(handoff)
+    handoff.add_argument("--json", action="store_true")
     active_states = ", ".join(state.value for state in ACTIVE_TASK_STATES)
     task_delete = task_sub.add_parser(
         "delete",
@@ -852,18 +862,33 @@ def cmd_task_retry(config: ForgeConfig, task_id: str) -> int:
 
 
 def cmd_task_resolve_blocker(config: ForgeConfig, args: argparse.Namespace, schema_version: str) -> int:
-    orchestrator = Orchestrator(config, package_root())
+    orchestrator = None
+    command = getattr(args, "task_command", "resolve-blocker")
     try:
-        data = orchestrator.resolve_blocker(args.task_id, args.reason, args.receipt, args.receipt_sha256)
+        handoff = command == "handoff-prerequisite"
+        if handoff and args.dry_run:
+            from .prerequisites import preflight_handoff
+
+            ForgeDB(config.database_path, read_only=True)  # Refuse before lock setup can create a missing parent.
+            if not config.data_root.is_dir():
+                raise ValueError("An existing controller data root is required for preflight.")
+            with controller_lock(config.data_root / "controller.lock"):
+                data = preflight_handoff(config, args.task_id, args.reason, args)
+        else:
+            if not args.receipt or not args.receipt_sha256:
+                raise ValueError("Pinned receipt is required.")
+            orchestrator = Orchestrator(config, package_root())
+            data = orchestrator.resolve_blocker(args.task_id, args.reason, args.receipt, args.receipt_sha256, prerequisite=handoff)
     except (ValueError, GitError, OSError, ControllerAlreadyRunning):
         return _structured_failure(
-            "task.resolve-blocker", StructuredError("INVALID_ARGUMENT", "Blocker continuation was refused.", {}),
+            f"task.{command}", StructuredError("INVALID_ARGUMENT", "Blocker continuation was refused.", {}),
             args.json, schema_version,
         )
     finally:
-        orchestrator.telemetry.shutdown()
+        if orchestrator is not None:
+            orchestrator.telemetry.shutdown()
     if args.json:
-        write_response("task.resolve-blocker", data=data, schema_version=schema_version)
+        write_response(f"task.{command}", data=data, schema_version=schema_version)
     else:
         print(json.dumps(data, indent=2))
     # Successful invocation is distinct from its task outcome, as with `run --once`.
@@ -1497,7 +1522,7 @@ def main(argv: list[str] | None = None) -> int:
                 return cmd_task_list(config, args, schema_version)
             if args.task_command == "show":
                 return cmd_task_show(config, args.task_id, args.json, schema_version)
-            if args.task_command == "resolve-blocker":
+            if args.task_command in ("resolve-blocker", "handoff-prerequisite"):
                 return cmd_task_resolve_blocker(config, args, schema_version)
             if args.task_command == "delete":
                 return cmd_task_delete(config, args, schema_version)

@@ -104,6 +104,24 @@ CREATE TABLE IF NOT EXISTS project_workflows (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS prerequisite_receipts (
+    receipt_sha256 TEXT PRIMARY KEY,
+    source_registration TEXT NOT NULL,
+    source_task TEXT NOT NULL,
+    source_candidate TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    UNIQUE(source_registration,source_task,source_candidate)
+);
+
+CREATE TABLE IF NOT EXISTS prerequisite_events (
+    task_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    event TEXT NOT NULL,
+    document_json TEXT NOT NULL,
+    PRIMARY KEY(task_id,attempt,event)
+);
+
 CREATE TABLE IF NOT EXISTS blocker_continuations (
     task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     attempt INTEGER NOT NULL,
@@ -169,13 +187,26 @@ class ProjectRelocation:
 
 
 class ForgeDB:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, read_only: bool = False):
         self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.read_only = read_only
+        if read_only:
+            if not path.is_file():
+                raise ValueError("An existing Forge database is required for read-only inspection.")
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=30)
+        try:
+            connection = sqlite3.connect(
+                self.path.absolute().as_uri() + "?mode=ro" if self.read_only else self.path,
+                timeout=30, uri=self.read_only,
+            )
+        except sqlite3.OperationalError as exc:
+            if self.read_only:
+                raise ValueError("The existing Forge database is unavailable for read-only inspection.") from exc
+            raise
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         try:
