@@ -50,6 +50,7 @@ Source in `src/codex_forge/`.
 | Telemetry | `telemetry.py` (OTel tracing), `agent_telemetry.py` (Gate 4 primitives — implemented, tested, unwired) |
 | Schemas | `schema_resources.py`, `src/codex_forge/schemas/*.schema.json`; schema versioning policy is textual in `docs/CONTROL-PLANE-API.md` |
 | Process supervision / recovery | `processes.py`, `db.py` (`execution_checkpoints`), `orchestrator.py`; regression tests `test_processes.py`, `test_execution_checkpoints.py` |
+| Exhausted model-blocker continuation | `blockers.py`, `db.py` (`blocker_continuations`), `orchestrator.py` / `cli.py` (`task resolve-blocker`); `test_blocker_continuations.py` |
 | Project integration / phase gates | `workflows.py`, `db.py` (`project_workflows`, claims/retries/relocation), `cli.py` (`project plan/progress/resume/extend`); `test_project_workflows.py` |
 
 Tests are flat in `tests/` — start from the test named for the seam:

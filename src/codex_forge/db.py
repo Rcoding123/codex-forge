@@ -103,6 +103,15 @@ CREATE TABLE IF NOT EXISTS project_workflows (
     document_json TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS blocker_continuations (
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    attempt INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    document_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(task_id,attempt)
+);
 """
 
 
@@ -745,6 +754,38 @@ class ForgeDB:
                 raise sqlite3.OperationalError(f"task {task_id} changed state during deletion")
         return ("deleted", task)
 
+    def blocker_continuation(self, task_id: str, attempt: int) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM blocker_continuations WHERE task_id=? AND attempt=?", (task_id, attempt),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def claim_blocker_continuation(self, task_id: str, attempt: int) -> Task:
+        """Claim the reserved repair without ever exposing an exhausted READY task."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            continuation = connection.execute(
+                "SELECT * FROM blocker_continuations WHERE task_id=? AND attempt=?", (task_id, attempt),
+            ).fetchone()
+            completion = connection.execute(
+                "SELECT completion_json FROM execution_checkpoints WHERE task_id=?", (task_id,),
+            ).fetchone()
+            resumable_completion = bool(completion and completion[0] is not None and continuation and continuation["state"] == "CONSUMED")
+            if (not row or row["attempts"] != attempt or row["state"] not in (TaskState.BLOCKED.value, TaskState.FAILED.value)
+                    or not continuation or (continuation["state"] not in ("QUEUED", "CLAIMED") and not resumable_completion)):
+                raise ValueError("Blocker continuation cannot be claimed.")
+            if not resumable_completion:
+                connection.execute(
+                    "UPDATE blocker_continuations SET state='CLAIMED',updated_at=? WHERE task_id=? AND attempt=?",
+                    (utc_now(), task_id, attempt),
+                )
+            connection.execute("UPDATE tasks SET state=?,updated_at=? WHERE id=?", (TaskState.REPAIRING.value, utc_now(), task_id))
+            updated = dict(row)
+            updated["state"] = TaskState.REPAIRING.value
+            return self._task_from_mapping(updated)
+
     def retry_task(self, task_id: str) -> tuple[str, Task | None]:
         """Serialize retries with claims and gates; completed/active work cannot reopen."""
         with self.connect() as connection:
@@ -786,6 +827,19 @@ class ForgeDB:
         self, task_id: str, phase: str, model: str, effort: str, artifact_dir: Path
     ) -> int:
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task = connection.execute("SELECT attempts FROM tasks WHERE id=?", (task_id,)).fetchone()
+            continuation = connection.execute(
+                "SELECT * FROM blocker_continuations WHERE task_id=? AND attempt=?", (task_id, task[0]),
+            ).fetchone() if task else None
+            if continuation and continuation["state"] == "CLAIMED":
+                document = json_loads(continuation["document_json"], {})
+                if phase != f"validation-repair-{document['repair_slot']}":
+                    raise ValueError("A blocker continuation must consume its reserved repair first.")
+                connection.execute(
+                    "UPDATE blocker_continuations SET state='CONSUMED',updated_at=? WHERE task_id=? AND attempt=?",
+                    (utc_now(), task_id, task[0]),
+                )
             cursor = connection.execute(
                 "INSERT INTO runs(task_id,phase,model,effort,artifact_dir,started_at) VALUES(?,?,?,?,?,?)",
                 (task_id, phase, model, effort, str(artifact_dir), utc_now()),
