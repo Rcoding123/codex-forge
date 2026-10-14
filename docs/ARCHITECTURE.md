@@ -170,6 +170,18 @@ meaning. Booleans, strings, and fractional values are rejected for integer limit
 
 ## Model routing and context control
 
+Reviewer prompts place stable policy before task IDs, checkout paths, and candidate-specific data.
+Binding requirements appear once as the ordered exact-text union; submission fields remain lossless
+in storage and implementation prompts. Both worker roles receive the complete ordered union of
+project/task validation commands.
+
+Every review receives the current controller validation results, including exact commands, exit
+codes, log paths, and bounded output tails. Captured output is evidence, never instruction authority.
+The reviewer may rerun checks for missing/stale evidence or concrete regression risk, and must still
+inspect code and prove specification conformance. It reviews the current staged, unstaged, and
+untracked worktree state; HEAD or the index alone may still be the base. Final controller validation
+always runs after semantic review. No validation/review gate is skipped to reduce token counts.
+
 Local inventory, queue operations, validation, and status reporting use no model. Normal implementation and review use the balanced route at medium effort. High/critical risk or unresolved failure selects the escalation route at high effort. Each phase is a fresh bounded run; relevant failure or review context is injected explicitly, and full raw logs remain on disk instead of being resent.
 
 Worker-only unrelated Codex features are disabled by configuration. Large repository documentation is not injected automatically; project `AGENTS.md` files provide scoped rules.

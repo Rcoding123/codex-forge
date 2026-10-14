@@ -376,7 +376,10 @@ class Orchestrator:
                 phase="review",
                 model=self._review_model(task),
                 effort=self._review_effort(task),
-                prompt=review_prompt(project, prompt_task, worktree),
+                prompt=review_prompt(
+                    project, prompt_task, worktree, validation_results=validation_results,
+                    max_output_chars=self.config.max_output_chars,
+                ),
                 schema="review-result.schema.json",
                 sandbox=resolution.sandbox,
                 role=ROLE_REVIEWER,
@@ -427,7 +430,10 @@ class Orchestrator:
                     phase=f"review-{review_cycle + 1}",
                     model=self._review_model(task),
                     effort=self._review_effort(task),
-                    prompt=review_prompt(project, prompt_task, worktree, previous_findings=findings),
+                    prompt=review_prompt(
+                        project, prompt_task, worktree, previous_findings=findings,
+                        validation_results=validation_results, max_output_chars=self.config.max_output_chars,
+                    ),
                     schema="review-result.schema.json",
                     sandbox=resolution.sandbox,
                     role=ROLE_REVIEWER,
