@@ -4,6 +4,17 @@ All notable changes to Codex Forge are documented here. This project follows sem
 
 ## [Unreleased]
 
+### Context efficiency
+
+- Give initial and follow-up reviews the current bounded controller validation evidence, with raw
+  log references. Avoid unnecessary successful-command repetition while retaining independent
+  inspection, exact conformance, and mandatory final validation.
+- Place stable reviewer policy ahead of variable metadata and render each binding requirement once.
+  Clarify that the review candidate includes staged, unstaged, and untracked worktree content.
+- Include both project and task validation commands in worker prompts, matching controller order.
+  Compact advisory-pattern JSON without deleting its content. Keep models, budgets, and public
+  contracts unchanged; document the existing unlimited-token option separately from loop limits.
+
 ### Project progression
 
 - Add opt-in `project plan`, `progress`, `resume`, and `extend` commands. Freeze declared phase

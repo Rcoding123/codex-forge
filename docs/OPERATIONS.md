@@ -234,6 +234,28 @@ forge project extend my-project --file next-plan.json --json
 Extension archives the completed plan and starts a new immutable generation from its proven tip.
 Choose task budgets before running; neither extension nor phase advancement raises them.
 
+## Context efficiency and flexible task budgets
+
+Forge keeps stable reviewer policy before variable task data, reports each exact binding once, and
+passes fresh controller validation evidence to review. Reviewers still investigate stale or
+insufficient evidence and concrete risks. Complete task contracts, raw logs, semantic review,
+and final controller validation are retained. Models are not downgraded merely to fit a token count.
+
+`limits.max_output_chars` bounds captured review output, capped at 6,000 characters across all
+command summaries. Commands, result metadata, and specification text remain complete. Truncated
+summaries name their raw log files. This is a context bound, not an execution budget.
+
+For work whose token needs are not predictable, `limits.max_task_tokens = 0` disables the task
+token ceiling. Attempt, repair, identical-failure, and timeout limits still apply. A positive token
+ceiling is checked at phase boundaries and can be exceeded by one in-flight phase; it is not an
+instantaneous provider quota. Choose that policy explicitly in the run configuration. Defaults and
+public usage accounting remain unchanged.
+
+See [OpenAI prompt caching guidance](https://developers.openai.com/api/docs/guides/prompt-caching)
+for stable-prefix layout. Forge does not inject undocumented CLI cache controls. Cache availability
+and actual savings depend on the provider, model, timing, and request contents; measure new tokens,
+cached input, commands, and successful completion together.
+
 ## Optional local tracing
 
 Telemetry is off by default and emits nothing until `[telemetry] enabled = true` is set in
