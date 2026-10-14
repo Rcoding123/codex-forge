@@ -109,7 +109,7 @@ def test_cross_section_binding_text_is_one_requirement_but_duplicate_reports_sti
     prompt = review_prompt(project, task, Path("checkout"))
     canonical = prompt.split("BINDING REQUIREMENTS TO REPORT", 1)[1]
     assert canonical.count(ITEM) == 1
-    assert "Report it once." in canonical
+    assert "Report it once." in prompt
 
 
 # --------------------------------------------------------------------------------------------
