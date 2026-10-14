@@ -188,6 +188,33 @@ Worker-only unrelated Codex features are disabled by configuration. Large reposi
 
 ## Recovery
 
+An explicit `task resolve-blocker` operation can continue an exhausted, closed original
+implementation whose schema-valid result is `blocked`, using the unused first validation-repair
+slot of that same attempt. Reservation never increments/decrements attempts, changes admitted text,
+resets failure counters, or expands repair/token/time limits; later failures use normal accounting. Any prior current-attempt validation/review
+or repair activity, ambiguous run provenance, completed task, or generic process failure is refused.
+
+The command holds the controller singleton lock through reservation, claim, repair, validation,
+independent review, final validation, integration, and phase progression. Reservations use BLOCKED,
+then REPAIRING; an exhausted READY task is never exposed to an older running controller. The
+existing frozen workflow may resume only its current task-blocked cursor. Postintegration phase
+acceptance remains controller-owned and cannot be replaced by operator prerequisite evidence.
+
+Future model-blocked implementation runs retain a controller-owned failed-tree snapshot. Operator
+receipts bind the exact output, base and full current candidate. Legacy runs without that snapshot
+are eligible only for an explicit evidence-only prospective-input attestation: HEAD must equal
+the persisted base; changed files remain within an admitted `docs/evidence/` root; retained exact
+validation commands, logs, and application hashes must match that base and current inputs.
+This attestation does not reconstruct a historical tree or approve implementation correctness.
+
+Operational reservations live in `blocker_continuations`, separate from task admission and frozen
+plan signatures. New artifacts use distinct `attempt-NN-c-<8hex>` roots, with the same attempt number;
+old failed files remain untouched. Raw operator receipts and resolution metadata are private.
+Standard phase results/validation logs/terminal artifacts retain the existing disclosure classes.
+An identical resolution is idempotent. An unstarted reservation can be explicitly reclaimed after
+restart; a started paid slot cannot replay. A sealed completion can resume publication/integration
+without model calls. All worktree, receipt, task, generation and workflow proofs are rechecked.
+
 The scheduled task uses `IgnoreNew`, and the daemon holds a crash-released process lock, preventing duplicate controllers. At startup, Forge finds tasks left in active states. Tasks below their attempt limit return safely to READY while preserving branch/worktree state; exhausted tasks become FAILED. Recovery events are appended outside the repository.
 
 Controlled scheduled-task restart recovery is validated. Full host reboot recovery remains an explicit release limitation until exercised on a maintenance window.

@@ -67,7 +67,7 @@ _FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x
 # A repair phase and the validation run that follows it deliberately share one group directory, so
 # classification is driven by the file name in its group context rather than by the directory alone.
 # The digit run is bounded so an absurd directory name cannot raise on integer conversion.
-_ATTEMPT_DIRECTORY = re.compile(r"^attempt-(?P<number>\d{1,9})$")
+_ATTEMPT_DIRECTORY = re.compile(r"^attempt-(?P<number>\d{1,9})(?:-c-[0-9a-f]{8})?$")
 _VALIDATION_LOG = re.compile(r"^validation-(?P<index>\d+)\.(?P<stream>stdout|stderr)\.log$")
 _IMPLEMENTATION_GROUP = re.compile(r"^implementation$")
 _REVIEW_GROUP = re.compile(r"^review(?:-\d+)?$")

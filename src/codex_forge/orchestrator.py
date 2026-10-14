@@ -111,6 +111,67 @@ class Orchestrator:
         ):
             ensure_dir(path)
 
+    def resolve_blocker(self, task_id: str, reason: str, receipt: Path, receipt_sha256: str) -> dict:
+        """Resolve and execute under one lock; legacy controllers never see exhausted READY work."""
+        from .blockers import queue_resolution, _public, _prove_plan
+
+        with controller_lock(self.config.data_root / "controller.lock"):
+            resolution = queue_resolution(self.config, task_id, reason, receipt, receipt_sha256)
+            existing = self.db.blocker_continuation(task_id, resolution["attempt"])
+            document = json.loads(existing["document_json"])
+            if existing["state"] == "TERMINAL":
+                return _public(existing, document) | {"task_state": self.db.get_task(task_id).state.value}
+            task = self.db.get_task(task_id)
+            project = self.db.get_project(task.project_id)
+            checkpoint = self.db.execution_checkpoint(task.id)
+            if existing["state"] in ("QUEUED", "CLAIMED"):
+                from .blockers import validate_continuation
+
+                validate_continuation(self.config, self.db, task, project, {**existing, "state": "CLAIMED"})
+            elif existing["state"] == "CONSUMED" and checkpoint["completion_json"] is not None:
+                from .blockers import validate_continuation
+
+                validate_continuation(self.config, self.db, task, project, existing, resume_completion=True)
+            _prove_plan(self.config, self.db, project, task, checkpoint)
+            plan = self.workflows.get(project.id)
+            if plan and plan["state"] == "BLOCKED":
+                self.workflows.resume(project.id)
+            task = self.db.claim_blocker_continuation(task_id, task.attempts)
+            try:
+                self._execute_task(task)
+            except BaseException as exc:
+                latest = self.db.blocker_continuation(task.id, task.attempts)
+                if latest["state"] == "CLAIMED":
+                    # No paid call started: an explicit retry may use the same reservation.
+                    self.db.update_task(task.id, state=TaskState.BLOCKED)
+                    with self.db.connect() as connection:
+                        connection.execute(
+                            "UPDATE blocker_continuations SET state='QUEUED',updated_at=? WHERE task_id=? AND attempt=?",
+                            (utc_now(), task.id, task.attempts),
+                        )
+                    raise
+                if isinstance(exc, Exception):
+                    self._handle_unexpected_failure(task, exc)
+                else:
+                    self.db.update_task(task.id, state=TaskState.FAILED, last_error="BLOCKER_CONTINUATION_INTERRUPTED")
+                    raise
+            finally:
+                current = self.db.get_task(task.id)
+                checkpoint = self.db.execution_checkpoint(task.id)
+                latest = self.db.blocker_continuation(task.id, task.attempts)
+                if (latest["state"] == "CONSUMED" and current.state in (TaskState.FAILED, TaskState.COMPLETED, TaskState.READY, TaskState.NEEDS_DECISION)
+                        and (current.state != TaskState.FAILED or checkpoint["completion_json"] is None)):
+                    with self.db.connect() as connection:
+                        connection.execute(
+                            "UPDATE blocker_continuations SET state='TERMINAL',updated_at=? WHERE task_id=? AND attempt=?",
+                            (utc_now(), task.id, task.attempts),
+                        )
+            # Integration and actual postintegration acceptance use the existing controller path.
+            self.workflows.advance_all()
+            self.workflows.advance_all()
+            latest = self.db.blocker_continuation(task.id, task.attempts)
+            return _public(latest, document) | {"task_state": self.db.get_task(task.id).state.value}
+
     def run_once(self) -> int:
         try:
             with controller_lock(self.config.data_root / "controller.lock"):
@@ -270,6 +331,14 @@ class Orchestrator:
         if not project:
             raise RuntimeError(f"Project missing for task {task.id}: {task.project_id}")
         artifact_dir = ensure_dir(self.config.evidence_root / project.name / task.id / f"attempt-{task.attempts:02d}")
+        continuation = getattr(self.db, "blocker_continuation", lambda *_: None)(task.id, task.attempts)
+        if continuation and continuation["state"] in ("CLAIMED", "CONSUMED"):
+            # New artifacts never overwrite the failed attempt's original implementation/logs.
+            artifact_dir = Path(json.loads(continuation["document_json"])["artifact_root"])
+            if continuation["state"] == "CLAIMED":
+                from .blockers import validate_continuation
+
+                validate_continuation(self.config, self.db, task, project, continuation)
         checkpoint = self.db.execution_checkpoint(task.id)
         if checkpoint and (
             checkpoint["repository_registration_id"] != project.repository_registration_id
@@ -315,19 +384,32 @@ class Orchestrator:
         prompt_task = replace(task, execution_base_commit=base_commit)
 
         patterns = self.knowledge.relevant(project.id, f"{task.title} {task.objective} {' '.join(task.tags)}")
+        phase, initial_repair_cycle, failure = "implementation", 0, task.last_error if task.attempts > 1 else None
+        if continuation:
+            from .blockers import validate_continuation
+
+            document = validate_continuation(self.config, self.db, task, project, continuation)
+            phase, initial_repair_cycle = f"validation-repair-{document['repair_slot']}", document["repair_slot"]
+            failure = (
+                f"Operator resolved the recorded execution blocker: {document['reason']}\n"
+                f"Immutable supporting receipt: {document['receipt_path']}\n"
+                f"Receipt SHA-256: {document['receipt_sha256']}\n"
+                "Inspect that evidence; preserve all admitted requirements and prior evidence. "
+                "The controller retains independent review and the postintegration phase gate."
+            )
         result = self._run_codex_phase(
             task,
             project,
             artifact_dir,
-            phase="implementation",
-            model=self._implementation_model(task),
-            effort=self._implementation_effort(task),
+            phase=phase,
+            model=self.config.implementation_model if continuation else self._implementation_model(task),
+            effort="high" if continuation else self._implementation_effort(task),
             prompt=implementation_prompt(
                 project,
                 prompt_task,
                 worktree,
                 patterns,
-                previous_failure=task.last_error if task.attempts > 1 else None,
+                previous_failure=failure,
             ),
             schema="task-result.schema.json",
             role=ROLE_IMPLEMENTER,
@@ -336,7 +418,7 @@ class Orchestrator:
             return _noncompletion_outcome(result.final)
 
         validation_results = self._validate(task, worktree, artifact_dir, commands)
-        repair_cycle = 0
+        repair_cycle = initial_repair_cycle
         while not self._all_passed(validation_results) and repair_cycle < self.config.max_repair_cycles:
             repair_cycle += 1
             self.db.update_task(task.id, state=TaskState.REPAIRING)
@@ -566,6 +648,11 @@ class Orchestrator:
                 exit_code=result.exit_code,
                 usage=result.usage,
             )
+            if (phase == "implementation" and result.exit_code == 0 and isinstance(result.final, dict)
+                    and result.final.get("status") == "blocked" and isinstance(self.db, ForgeDB)):
+                from .blockers import record_blocked_candidate
+
+                record_blocked_candidate(self.config, self.db, task, project, run_id, phase_dir)
             if span.recording:
                 span.set_many(phase_usage_attributes(result.usage))
             self._enforce_usage_budget(task)

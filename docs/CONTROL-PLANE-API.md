@@ -6,9 +6,65 @@ reading `forge.db`, depending on SQLite table details, or parsing Forge's human-
 output.
 
 This contract covers inspection, task submission, and deletion of non-running tasks and empty
-projects. It does not provide retry, cancellation,
+projects. The inspection/submission commands do not provide retry, cancellation,
 reconciliation, merge, push, daemon control, HTTP, or named-pipe operations, and it never starts
-task execution — a submitted task waits for the existing controller loop.
+task execution — a submitted task waits for the existing controller loop. The explicit operator
+`task resolve-blocker` command below is a separate, opt-in execution operation.
+
+## Resolve an exhausted model blocker
+
+```powershell
+forge --config forge.toml task resolve-blocker TASK-ID --reason "Verified execution prerequisite supplied" --receipt C:/operator/receipt.json --receipt-sha256 HEX --json
+```
+
+This command reserves and executes the unused first validation-repair slot of the latest exhausted
+failed attempt. It requires exactly one completed, exit-zero original implementation run and a
+schema-valid `blocked` final, owned worktree/branch/base/generation, no other current-attempt phase
+evidence, no active controller/tasks, and at least one existing configured repair slot. Generic
+failures, below-ceiling tasks, completed work, stale proofs and consumed slots are refused.
+Use ordinary `task retry` when attempts remain; this command never expands that ceiling.
+
+The operator supplies a plain, bounded JSON receipt and its SHA-256. Required receipt members are
+`task_id`, `attempt`, `candidate_base`, `candidate_snapshot_sha256`, and
+`implementation_sha256`. Snapshot identity covers HEAD, branch, index, tracked/nonignored-untracked
+file bytes and missing tracked files; a complete-scan file/stat/namespace recheck refuses changing
+inputs. `codex_forge.blockers.candidate_snapshot` is the read-only canonical digest helper.
+Future controller-sealed failed snapshots must match that candidate exactly.
+
+Legacy attempts without a controller seal require a nonempty `legacy_attestation` explicitly
+describing the current prospective repair input, not claiming reconstruction of all historical
+failed bytes. Their `legacy_proof` must contain:
+
+- `allowed_change_root`: an admitted `docs/evidence/` scope root; all changes must be confined there.
+- `application_inputs`: a nonempty relative-path/SHA-256 map matching retained inputs/current bytes.
+- `historical_input_manifest`: absolute `path` and `sha256` of the retained list of `{path,sha256}`.
+- `historical_validation_record`: absolute `path` and `sha256` of the retained candidate record.
+
+Both retained files must be inside that evidence scope. The record must bind `stage=candidate`,
+`comparison_base`, `head`, `branch`, `integration_ref_at_start`, `source_manifest_sha256`, and a
+`results` list of every exact admitted validation command in order, with integer `exit_code=0`,
+`status=passed` and a present plain `log` file. HEAD must still equal the persisted execution base;
+no prior committed/validated candidate is inferred. Subsequent repair, independent review and
+controller validation assess the prospective input; the attestation is not semantic approval.
+
+Resolution and execution hold the singleton lock together. The durable reservation uses BLOCKED
+and then REPAIRING, never an exhausted READY row that older controller code could claim. The
+reserved repair consumes validation slot one; at most the remaining configured validation slots
+and ordinary review slots may run. Reservation leaves task attempts, max attempts, admission, frozen signatures and identical-failure
+counters intact; subsequent failures use ordinary fingerprint accounting. Token basis/ceiling and
+per-phase timeouts are unchanged.
+Raw resolution/receipt metadata stays private; new standard artifacts use distinct
+`attempt-NN-c-<8hex>` roots and remain available through existing evidence commands.
+
+An identical invocation is idempotent. Restart before the reserved paid run starts permits explicit
+reclaim of the same reservation. A started slot cannot replay after interruption. Sealed terminal
+completion may resume publication/integration without another model call. The original failed
+evidence is retained, and the actual postintegration phase gate still runs before the next phase.
+
+The command uses the existing default schema version and normal JSON envelope. Successful operation
+returns exit 0 and `success=true`, even if its bounded execution ends FAILED; inspect `data.task_state`.
+Data contains `task_id`, `attempt`, `continuation_id`, `repair_slot`, `state`, and `task_state`.
+Refusal returns sanitized `INVALID_ARGUMENT` with exit 2. No new submission fields are introduced.
 
 ## Supported commands
 

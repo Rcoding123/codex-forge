@@ -4,6 +4,19 @@ All notable changes to Codex Forge are documented here. This project follows sem
 
 ## [Unreleased]
 
+### Governed blocker continuation
+
+- Add explicit `task resolve-blocker` for a closed, schema-valid model blocker at the attempt
+  ceiling, consuming an unused existing validation-repair slot without changing admission,
+  counters, signatures, time/token limits or review/integration/phase acceptance requirements.
+- Bind an immutable operator receipt and full current candidate; retain controller seals for
+  future blocked attempts. Legacy evidence-only inputs require explicit prospective attestation,
+  matching retained application/validation provenance and the exact persisted base.
+- Execute under the singleton lock with BLOCKED/REPAIRING operational states, so an older launcher
+  cannot accidentally claim attempt four. Retain original failed evidence and write distinct
+  same-attempt continuation artifacts. Never replay a consumed paid slot after interruption;
+  reuse sealed completion for publication/integration recovery.
+
 ### Context efficiency
 
 - Give initial and follow-up reviews the current bounded controller validation evidence, with raw

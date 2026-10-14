@@ -77,6 +77,7 @@ from .utils import (
     stable_id,
     windows_alias_key,
     controller_lock,
+    ControllerAlreadyRunning,
 )
 from .workflows import ProjectWorkflows
 
@@ -236,6 +237,13 @@ def build_parser() -> argparse.ArgumentParser:
     task_show.add_argument("--json", action="store_true")
     task_retry = task_sub.add_parser("retry", help="Retry a failed or blocked task")
     task_retry.add_argument("task_id")
+    blocker = task_sub.add_parser("resolve-blocker", help="Continue a closed model blocker using an unused existing repair slot")
+    blocker.add_argument("task_id")
+    blocker.add_argument("--reason", required=True)
+    blocker.add_argument("--receipt", type=Path, required=True)
+    blocker.add_argument("--receipt-sha256", required=True)
+    _add_schema_version_argument(blocker)
+    blocker.add_argument("--json", action="store_true")
     active_states = ", ".join(state.value for state in ACTIVE_TASK_STATES)
     task_delete = task_sub.add_parser(
         "delete",
@@ -840,6 +848,25 @@ def cmd_task_retry(config: ForgeConfig, task_id: str) -> int:
         print(f"Task {task_id} cannot retry from {task.state.value}.", file=sys.stderr)
         return 2
     print(f"Task {task_id} returned to READY.")
+    return 0
+
+
+def cmd_task_resolve_blocker(config: ForgeConfig, args: argparse.Namespace, schema_version: str) -> int:
+    orchestrator = Orchestrator(config, package_root())
+    try:
+        data = orchestrator.resolve_blocker(args.task_id, args.reason, args.receipt, args.receipt_sha256)
+    except (ValueError, GitError, OSError, ControllerAlreadyRunning):
+        return _structured_failure(
+            "task.resolve-blocker", StructuredError("INVALID_ARGUMENT", "Blocker continuation was refused.", {}),
+            args.json, schema_version,
+        )
+    finally:
+        orchestrator.telemetry.shutdown()
+    if args.json:
+        write_response("task.resolve-blocker", data=data, schema_version=schema_version)
+    else:
+        print(json.dumps(data, indent=2))
+    # Successful invocation is distinct from its task outcome, as with `run --once`.
     return 0
 
 
@@ -1470,6 +1497,8 @@ def main(argv: list[str] | None = None) -> int:
                 return cmd_task_list(config, args, schema_version)
             if args.task_command == "show":
                 return cmd_task_show(config, args.task_id, args.json, schema_version)
+            if args.task_command == "resolve-blocker":
+                return cmd_task_resolve_blocker(config, args, schema_version)
             if args.task_command == "delete":
                 return cmd_task_delete(config, args, schema_version)
             if args.task_command == "evidence":
