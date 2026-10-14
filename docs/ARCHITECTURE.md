@@ -135,7 +135,11 @@ Completed or active tasks cannot be manually retried. Repository relocation is r
 `project_workflows` holds operational cursor, generation, integration intent, and gate state.
 Project deletion cascades that state. Raw plan, integration, and gate evidence remains under
 `DataRoot/project-evidence/<workflow-id>`; detached gate worktrees remain under
-`DataRoot/gate-worktrees/<workflow-id>`. These artifacts have no task-evidence disclosure class.
+`DataRoot/gate-worktrees/gate-<gate-id>`, using the full globally unique 32-hex gate ID without
+another workflow path component. This shortens Windows Git and .NET build paths. Each checkout
+directory is atomically reserved; an existing destination fails closed, including an empty one.
+Older `gate-worktrees/<workflow-id>/<gate-id>` directories remain untouched; no state migration
+occurs. Evidence still uses the complete workflow/gate identities. These artifacts have no task-evidence disclosure class.
 `project progress` exposes a controller-owned projection and redacts command credentials.
 Sealed integration records survive task deletion; deleting a task before its completion is recorded
 blocks progression. Historical task evidence is never rewritten.

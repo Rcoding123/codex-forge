@@ -4,6 +4,14 @@ All notable changes to Codex Forge are documented here. This project follows sem
 
 ## [Unreleased]
 
+### Compact phase-gate checkouts
+
+- Create new detached phase-gate checkouts at `DataRoot/gate-worktrees/gate-<full-gate-UUID>`
+  to reduce Windows Git and .NET build path lengths. Atomically reserve each directory and
+  refuse collisions; keep exact-candidate validation and full workflow/gate evidence identities.
+- Preserve historical checkout directories and logs in place without migrating state or
+  bypassing ownership, validation, or phase acceptance.
+
 ### Governed blocker continuation
 
 - Add explicit `task resolve-blocker` for a closed, schema-valid model blocker at the attempt

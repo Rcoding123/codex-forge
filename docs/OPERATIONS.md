@@ -219,7 +219,12 @@ completion, stop and revise the declared work through a separate reviewed develo
 this version does not insert automatic gate-repair tasks or rewrite completed evidence.
 
 Raw project diagnostics remain under `DataRoot/project-evidence/<workflow-id>`. Gate checkouts
-remain under `DataRoot/gate-worktrees/<workflow-id>`. They are retained for operator inspection;
+are created under `DataRoot/gate-worktrees/gate-<gate-id>` using the full 32-hex gate UUID, without
+an extra workflow directory. The compact layout reduces Windows Git/.NET path-length failures;
+keep DataRoot itself short enough for the project's generated build paths. Existing checkout
+destinations are refused rather than reused, even when empty. Historical directories using
+`gate-worktrees/<workflow-id>/<gate-id>` and all prior logs are retained without migration.
+Full workflow/gate identities and project-evidence paths remain unchanged. Checkouts are retained for operator inspection;
 external consumers use `project progress`, which excludes logs and redacts credential values.
 Do not check out or move the integration branch manually. Relocation is refused during a gate.
 An idle relocation must preserve all recorded commits and the exact integration ref.
