@@ -4,6 +4,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from test_execution_checkpoints import Worker
@@ -277,6 +278,125 @@ def test_interrupted_gate_reruns_in_a_new_checkout_and_preserves_the_previous_at
     assert gates[1]["id"] != prior and gates[1]["status"] == "PASSED"
     assert next((o.config.data_root / "project-evidence").rglob("partial.log")).read_text() == "partial gate evidence"
     assert o.runner.implementations == 1
+
+
+def test_gate_checkouts_are_compact_detached_and_validate_the_exact_integrated_tip(tmp_path, monkeypatch):
+    from codex_forge import workflows
+
+    o, project, _, _, definition = setup(tmp_path, monkeypatch)
+    observed = []
+    original = workflows.run_validations
+
+    def verify_checkout(commands, **kwargs):
+        checkout = kwargs["cwd"]
+        document = o.workflows.get(project.id)
+        gate = document["gates"][-1]
+        assert checkout == o.config.data_root / "gate-worktrees" / f"gate-{gate['id']}"
+        assert len(gate["id"]) == 32
+        assert kwargs["artifact_dir"] == o.config.data_root / "project-evidence" / document["id"] / f"gate-{gate['id']}"
+        assert git(checkout, "rev-parse", "--abbrev-ref", "HEAD").strip() == "HEAD"
+        assert git(checkout, "rev-parse", "HEAD").strip() == gate["commit"] == document["head_commit"]
+        assert git(project.repo_path, "rev-parse", definition["branch"]).strip() == gate["commit"]
+        assert commands == gate["commands"]
+        observed.append(checkout)
+        return original(commands, **kwargs)
+
+    monkeypatch.setattr(workflows, "run_validations", verify_checkout)
+    install(o, project, definition)
+    for _ in range(8):
+        o.run_once()
+    assert len(observed) == 2 and len(set(observed)) == 2
+    assert all(path.is_dir() for path in observed)
+
+
+@pytest.mark.parametrize("occupied", ["empty", "nonempty"])
+def test_gate_checkout_collision_is_refused_before_git_or_validation(tmp_path, monkeypatch, occupied):
+    from codex_forge import workflows
+
+    o, project, _, _, definition = setup(tmp_path, monkeypatch)
+    install(o, project, definition)
+    o.run_once()
+    o.run_once()
+    gate_id = "f" * 32
+    collision = o.config.data_root / "gate-worktrees" / f"gate-{gate_id}"
+    collision.mkdir(parents=True)
+    marker = collision / "foreign.txt"
+    if occupied == "nonempty":
+        marker.write_text("retain this directory", encoding="utf-8")
+    monkeypatch.setattr(workflows.uuid, "uuid4", lambda: SimpleNamespace(hex=gate_id))
+    original = workflows._git
+
+    def no_add(repo, *args, **kwargs):
+        assert args[:2] != ("worktree", "add")
+        return original(repo, *args, **kwargs)
+
+    monkeypatch.setattr(workflows, "_git", no_add)
+    monkeypatch.setattr(workflows, "run_validations", lambda *_, **__: pytest.fail("colliding checkout must not validate"))
+    assert o.workflows.advance_all() == 0
+    document = o.workflows.get(project.id)
+    assert document["state"] == "BLOCKED" and document["gates"][-1]["status"] == "FAILED"
+    assert collision.is_dir()
+    assert marker.read_text(encoding="utf-8") == "retain this directory" if occupied == "nonempty" else not list(collision.iterdir())
+    assert git(project.repo_path, "rev-parse", definition["branch"]).strip() == document["head_commit"]
+
+
+def test_new_gate_retains_legacy_workflow_checkout_and_old_gate_logs(tmp_path, monkeypatch):
+    o, project, _, _, definition = setup(tmp_path, monkeypatch)
+    install(o, project, definition)
+    o.run_once()
+    o.run_once()
+    document = o.workflows.get(project.id)
+    old_id = "e" * 32
+    old_checkout = o.config.data_root / "gate-worktrees" / document["id"] / old_id
+    old_checkout.parent.mkdir(parents=True)
+    git(project.repo_path, "worktree", "add", "--detach", str(old_checkout), document["head_commit"])
+    old_logs = o.config.data_root / "project-evidence" / document["id"] / f"gate-{old_id}"
+    old_logs.mkdir()
+    (old_logs / "partial.log").write_bytes(b"original interrupted evidence\n")
+    document["gates"].append({"id": old_id, "phase": "P1", "commit": document["head_commit"], "commands": definition["phases"][0]["acceptance_commands"], "status": "RUNNING"})
+    with o.db.connect() as connection:
+        o.workflows._save(connection, project.id, document)
+    before = git(old_checkout, "rev-parse", "HEAD").strip()
+    o.workflows.advance_all()
+    latest = o.workflows.get(project.id)
+    assert latest["gates"][0]["id"] == old_id and latest["gates"][0]["status"] == "INTERRUPTED"
+    assert latest["gates"][1]["status"] == "PASSED"
+    assert (o.config.data_root / "gate-worktrees" / f"gate-{latest['gates'][1]['id']}").is_dir()
+    assert old_checkout.is_dir() and git(old_checkout, "rev-parse", "HEAD").strip() == before
+    assert (old_logs / "partial.log").read_bytes() == b"original interrupted evidence\n"
+
+
+def test_compact_gate_checkouts_are_isolated_across_workflow_extension(tmp_path, monkeypatch):
+    from codex_forge import workflows
+
+    o, project, first, _, definition = setup(tmp_path, monkeypatch)
+    checkouts = []
+    original = workflows.run_validations
+
+    def observe(commands, **kwargs):
+        checkouts.append(kwargs["cwd"])
+        return original(commands, **kwargs)
+
+    monkeypatch.setattr(workflows, "run_validations", observe)
+    install(o, project, definition)
+    for _ in range(8):
+        o.run_once()
+    previous = o.workflows.get(project.id)
+    old_results = {path: path.read_bytes() for path in (o.config.data_root / "project-evidence" / previous["id"]).rglob("result.json")}
+    third = replace(first, id="third-task", state=TaskState.READY, attempts=0, branch=None, worktree_path=None, result={})
+    o.db.add_task(third)
+    extension = {"branch": definition["branch"], "base_commit": previous["head_commit"],
+                 "phases": [{"name": "P3", "tasks": [third.id], "acceptance_commands": ["python -c \"print('third gate')\""]}]}
+    with controller_lock(o.config.data_root / "controller.lock"):
+        extended = o.workflows.install(project, extension, extend=True)
+    for _ in range(4):
+        o.run_once()
+    assert extended["id"] != previous["id"]
+    assert len(checkouts) == 3 and len(set(checkouts)) == 3
+    assert all(path.parent == o.config.data_root / "gate-worktrees" for path in checkouts)
+    assert all(path.is_dir() for path in checkouts)
+    assert all(path.read_bytes() == content for path, content in old_results.items())
+    assert o.workflows.get(project.id)["state"] == "COMPLETED"
 
 
 def test_multiple_tasks_in_one_phase_use_the_integrated_tip(tmp_path, monkeypatch):

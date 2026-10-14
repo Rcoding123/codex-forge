@@ -341,8 +341,10 @@ class ProjectWorkflows:
         with self.db.connect() as connection:
             self._save(connection, project.id, document)
         logs = ensure_dir(self._artifacts(project, document) / f"gate-{gate_id}")
-        worktree = self.config.data_root / "gate-worktrees" / document["id"] / gate_id
+        # Gate UUIDs are globally unique; avoid a redundant workflow component on Windows.
+        worktree = self.config.data_root / "gate-worktrees" / f"gate-{gate_id}"
         ensure_dir(worktree.parent)
+        worktree.mkdir(exist_ok=False)  # Reserve the fresh checkout; even an empty collision is refused.
         _git(project.repo_path, "worktree", "add", "--detach", str(worktree), tip)
         explicit_candidate_commit(project.repo_path, worktree, tip)
         results = run_validations(
