@@ -321,3 +321,45 @@ locked-file changes need a new governed decision; the command refuses them. Insp
 state, the handoff command response's `data.prerequisite_handoff` attribution (repeat the identical
 terminal command to inspect it without execution), and all three patch artifacts, then project progress for the
 actual postintegration gate. A successful source gate is a prerequisite, not a replacement for it.
+
+## Terminal prerequisite finalization
+
+Do not replay a terminal failed handoff, reset exhausted attempts, unlock imports manually or
+modify a private checkpoint. After the separately scoped replacement source is independently
+COMPLETED and its exact same-base phase gate PASSES, use public `task finalize-prerequisite`
+preflight. Supply an explicit attestation that the current worker files are prospective inputs,
+not a reconstructed historical seal. Inspect the finite replacement and unchanged worker-file
+hashes; save the exact receipt bytes and SHA in a new operator evidence directory.
+
+Execute explicitly with the pinned receipt through a verified runtime under the shared controller
+lock. Preserve healthy launchers/runtimes. No implementation/repair follows; original checks and
+one new independent review determine completion. On failure retain evidence and stop. A paid
+review with ambiguous outcome must not be relaunched. A resumed unstarted import or proven cached
+review/completion uses the identical receipt; no counter/budget/default/plan changes are allowed.
+Verify public finalization attribution, original admission/attempt/base and evidence identities,
+full committed patches, normal integration lineage and actual postintegration gate separately.
+
+
+If current prospective product metadata becomes stale after the capability transition, do not edit
+an exhausted task in place or pretend earlier bytes are sealed. Admit a separately budgeted typed
+reconciliation source at the same original base, retaining the capability tree and current worker
+inputs except explicit approved metadata spans. Require its own independent review and exact gate.
+Pass its committed selection manifest and the capability's six exact pins to finalization preflight;
+retain the canonical receipt bytes and verify both source identities before the sole original-task
+review. Historical tests/evidence remain unchanged. A refusal spends no review; a started uncertain
+review cannot be replayed. Inspect the new operation's public attribution and classified patches;
+legacy task-result projections intentionally do not expose new internal fields.
+
+
+Finalization ignore exemptions use committed versioned ignore policy only. Unknown generated
+ignore files are permitted solely below entire ancestors ignored by that policy, proved in an
+isolated case-sensitive Git context with ambient Git config/environment removed. Self-hiding root/nested/staged ignores and mutable local/global exclusions
+cannot hide candidate inputs. Effective external clean filters are refused before the sole review.
+Worker and imported files require raw working-byte identity with staged/committed blobs; unchanged
+baseline files retain both their exact prospective checkout bytes and original committed blob/mode.
+The existing builtin CRLF/LF checkout representation of an unchanged baseline is preserved, never
+used as authority to rewrite worker input. The final complete staged/committed tree is re-proved;
+Git conversion introduced during validation/review cannot produce a completed unreviewed candidate.
+
+The target, old parent source, capability source, reconciliation source and each retained gate
+are guarded before existing conversion-capable source proof commands.

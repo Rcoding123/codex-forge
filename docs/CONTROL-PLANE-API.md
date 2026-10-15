@@ -1567,3 +1567,79 @@ members within schema `1.0`. Consumers must treat an unrecognized `artifact_kind
 `structured_status`, or `content.representation` as unknown rather than as an error, and must not
 depend on `display_name` remaining stable across controller versions — `artifact_id` is the stable
 handle within a task.
+
+## Finalize a superseding prerequisite
+
+`task finalize-prerequisite TASK --reason TEXT --attestation TEXT --parent-continuation ID
+--source-task SOURCE --source-registration REG --source-candidate COMMIT --workflow-id WORKFLOW
+--gate-id GATE --gate-candidate COMMIT --dry-run --json` is a nonmutating prospective preflight.
+It returns exact `receipt_json` and `receipt_sha256`; retain those UTF8 bytes without a BOM or
+added newline. Execute with `task finalize-prerequisite TASK --reason TEXT --receipt PATH
+--receipt-sha256 SHA --json`. Source pins and the prospective attestation are in the receipt.
+
+Eligibility is an exhausted FAILED task whose exact parent handoff is TERMINAL, latest closed
+review repair is schema-valid blocked, unresolved independent review is trusted, original owned
+base/candidate/admission remain provable, and the new separately registered source is independently
+COMPLETED/reviewed/exactly gated at that base. The receipt binds current prospective HEAD/index/
+working bytes, worker paths/hashes, old/new source, finite approved replacement, original evidence
+and limits. This is expressly not a reconstructed historical candidate seal. Original worker paths remain unchanged and disjoint from imports unless the optional typed
+selection authority below explicitly binds a separately budgeted, reviewed/gated reconciliation. Historical evidence/authority, aliases, links,
+unsafe modes, hidden index/global/local exclude tricks and unrelated paths fail closed.
+
+One successor per parent/task is permitted. Execution performs original validation, at most one
+fresh independent review, final validation and normal completion/integration, with zero model
+implementation/repair calls. Any failure ends without repair. Started review is consumed before
+launch; an ambiguous outcome never replays. Only exact controller-certified cached review or
+completion can resume. Idempotent terminal invocation returns the recorded outcome.
+
+The new command reports finalization/parent identity, original attempt/base, prospective
+attestation/hashes, previous/new source and gate pins, prospective worker paths/hashes and explicitly selected metadata, outcome,
+review consumption and final attribution when completed. Full base/prerequisite/worker patches
+use existing disclosure classes. Default schema versions and legacy final-result projection are
+unchanged. Accepted execution is exit0/success=true; inspect task_state/state. Refusal is sanitized
+INVALID_ARGUMENT/exit2. Token usage remains cumulative on the original task; timeouts remain per
+model call/per validation command and no aggregate remaining-time allowance is invented.
+
+
+An optional `--selection-manifest REPOSITORY_PATH` selects narrowly reconciled metadata from the
+pinned source C. Supply all six independently completed/gated capability W pins as
+`--capability-source-task`, `--capability-source-registration`, `--capability-source-candidate`,
+`--capability-workflow-id`, `--capability-gate-id`, and `--capability-gate-candidate`. C and W must
+both have the original base. C preserves every W blob and every current prospective worker input,
+except one or two explicitly selected metadata files, and may add only its own new manifest evidence
+directory. Existing historical evidence/tests are never selected. The C admission, review and gate
+consume its own separately attributed budget; they do not create an original-task repair allowance.
+
+The committed UTF8 manifest has exactly `version: "1"`, `capability_candidate`,
+`prospective_worker_inputs` (all current worker paths to SHA256), and `selections`.
+Each selection has `kind`, `path`, `before_sha256`, and `after_sha256`. A
+`python_literal_list_removal` additionally has `call` (plain dotted name), `keyword`,
+`removed_literal`, `old_span`, `new_span` (empty). It removes one exact literal element from one
+uniquely selected all-string list, with full AST equality outside that removal and raw byte equality
+outside the declared span. `utf8_text_replacements` has one to eight `replacements`, each exactly
+`old`/`new`; original spans are unique, nonoverlapping, bounded and limited to plain Markdown/text
+product documents. Arbitrary patches, executable changes, authority/test/history selection, extra
+keys, mismatched before/after hashes or undeclared source changes are refused. Selectors and paths
+are repository data, never product-specific controller code.
+
+The public new-command output binds `selection` (manifest hash/policy/W proof) and `capability`
+(W proof), alongside `prerequisite` (C proof). Prospective before hashes explicitly describe current
+input, never a reconstructed historical seal. `reconciliation.patch` attributes the typed before/after
+metadata changes through the existing patch disclosure class. `prerequisite.patch` attributes W;
+`worker-changes.patch` includes final original-task files, including selected metadata. Full
+`changes.patch` still describes the complete original-base candidate. No legacy final-result fields
+or default schema versions change.
+
+
+Finalization ignore exemptions use committed versioned ignore policy only. Unknown generated
+ignore files are permitted solely below entire ancestors ignored by that policy, proved in an
+isolated case-sensitive Git context with ambient Git config/environment removed. Self-hiding root/nested/staged ignores and mutable local/global exclusions
+cannot hide candidate inputs. Effective external clean filters are refused before the sole review.
+Worker and imported files require raw working-byte identity with staged/committed blobs; unchanged
+baseline files retain both their exact prospective checkout bytes and original committed blob/mode.
+The existing builtin CRLF/LF checkout representation of an unchanged baseline is preserved, never
+used as authority to rewrite worker input. The final complete staged/committed tree is re-proved;
+Git conversion introduced during validation/review cannot produce a completed unreviewed candidate.
+
+The target, old parent source, capability source, reconciliation source and each retained gate
+are guarded before existing conversion-capable source proof commands.

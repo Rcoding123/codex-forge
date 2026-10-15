@@ -254,6 +254,20 @@ def build_parser() -> argparse.ArgumentParser:
         handoff.add_argument("--" + pin)
     _add_schema_version_argument(handoff)
     handoff.add_argument("--json", action="store_true")
+    finalization = task_sub.add_parser("finalize-prerequisite", help="Replace a terminal prerequisite and finalize with one review, no repairs")
+    finalization.add_argument("task_id")
+    finalization.add_argument("--reason", required=True)
+    finalization.add_argument("--attestation")
+    finalization.add_argument("--parent-continuation")
+    finalization.add_argument("--receipt", type=Path)
+    finalization.add_argument("--receipt-sha256")
+    finalization.add_argument("--dry-run", action="store_true")
+    for pin in ("source-task", "source-registration", "source-candidate", "workflow-id", "gate-id", "gate-candidate"):
+        finalization.add_argument("--" + pin)
+        finalization.add_argument("--capability-" + pin)
+    finalization.add_argument("--selection-manifest")
+    _add_schema_version_argument(finalization)
+    finalization.add_argument("--json", action="store_true")
     active_states = ", ".join(state.value for state in ACTIVE_TASK_STATES)
     task_delete = task_sub.add_parser(
         "delete",
@@ -866,7 +880,23 @@ def cmd_task_resolve_blocker(config: ForgeConfig, args: argparse.Namespace, sche
     command = getattr(args, "task_command", "resolve-blocker")
     try:
         handoff = command == "handoff-prerequisite"
-        if handoff and args.dry_run:
+        if command == "finalize-prerequisite":
+            from .finalization import execute, preflight, terminal_outcome
+
+            if args.dry_run:
+                ForgeDB(config.database_path, read_only=True)
+                if not config.data_root.is_dir():
+                    raise ValueError("An existing controller data root is required for preflight.")
+                with controller_lock(config.data_root / "controller.lock"):
+                    data = preflight(config, args.task_id, args.reason, args.attestation or '', args)
+            else:
+                if not args.receipt or not args.receipt_sha256:
+                    raise ValueError("Pinned prospective receipt is required.")
+                data = terminal_outcome(config, args.task_id, args.reason, args.receipt, args.receipt_sha256)
+                if data is None:
+                    orchestrator = Orchestrator(config, package_root())
+                    data = execute(orchestrator, args.task_id, args.reason, args.receipt, args.receipt_sha256)
+        elif handoff and args.dry_run:
             from .prerequisites import preflight_handoff
 
             ForgeDB(config.database_path, read_only=True)  # Refuse before lock setup can create a missing parent.
@@ -1522,7 +1552,7 @@ def main(argv: list[str] | None = None) -> int:
                 return cmd_task_list(config, args, schema_version)
             if args.task_command == "show":
                 return cmd_task_show(config, args.task_id, args.json, schema_version)
-            if args.task_command in ("resolve-blocker", "handoff-prerequisite"):
+            if args.task_command in ("resolve-blocker", "handoff-prerequisite", "finalize-prerequisite"):
                 return cmd_task_resolve_blocker(config, args, schema_version)
             if args.task_command == "delete":
                 return cmd_task_delete(config, args, schema_version)

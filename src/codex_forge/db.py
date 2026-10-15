@@ -130,6 +130,15 @@ CREATE TABLE IF NOT EXISTS blocker_continuations (
     updated_at TEXT NOT NULL,
     PRIMARY KEY(task_id,attempt)
 );
+
+CREATE TABLE IF NOT EXISTS prerequisite_finalizations (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    parent_id TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL,
+    document_json TEXT NOT NULL,
+    checkpoint_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -854,11 +863,30 @@ class ForgeDB:
                 "SELECT * FROM decisions WHERE status='OPEN' ORDER BY created_at"
             ).fetchall()
 
+    def prerequisite_finalization(self, task_id: str) -> dict | None:
+        with self.connect() as connection:
+            if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='prerequisite_finalizations'").fetchone():
+                return None  # Read-only preflight must also work before this additive table is initialized.
+            row = connection.execute("SELECT * FROM prerequisite_finalizations WHERE task_id=?", (task_id,)).fetchone()
+        return dict(row) if row else None
+
     def record_run_start(
         self, task_id: str, phase: str, model: str, effort: str, artifact_dir: Path
     ) -> int:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            finalization = connection.execute(
+                "SELECT state,checkpoint_json FROM prerequisite_finalizations WHERE task_id=?", (task_id,),
+            ).fetchone()
+            if finalization:
+                if finalization['state'] != 'REVIEW_READY' or phase != 'review':
+                    raise ValueError("Prerequisite finalization permits exactly one independent review and no repairs.")
+                checkpoint = json_loads(finalization['checkpoint_json'], {})
+                checkpoint['review_started'] = True
+                connection.execute(
+                    "UPDATE prerequisite_finalizations SET state='REVIEW_STARTED',checkpoint_json=?,updated_at=? WHERE task_id=?",
+                    (json_dumps(checkpoint), utc_now(), task_id),
+                )
             task = connection.execute("SELECT attempts FROM tasks WHERE id=?", (task_id,)).fetchone()
             continuation = connection.execute(
                 "SELECT * FROM blocker_continuations WHERE task_id=? AND attempt=?", (task_id, task[0]),

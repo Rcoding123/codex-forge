@@ -552,12 +552,23 @@ class Orchestrator:
             self._retry_or_fail(task, validation_failure_summary(validation_results))
             return OUTCOME_VALIDATION_FAILED
 
+        return self._finish_validated_candidate(
+            task, project, worktree, artifact_dir, base_commit, result.final, review_final, validation_results, resolution,
+        )
+
+    def _finish_validated_candidate(self, task, project, worktree, artifact_dir, base_commit, result_final, review_final, validation_results, resolution):
+        """Shared normal evidence, commit, checkpoint, publication and integration tail."""
+        branch = task.branch
+        commands = flatten_unique([*project.validation_commands, *task.validation_commands])
         with self.telemetry.phase_span(phase_name=PHASE_EVIDENCE, role=ROLE_CONTROLLER) as span:
             patch_path = artifact_dir / "changes.patch"
             if project.auto_commit:
                 from .prerequisites import verify_locked
 
                 verify_locked(self.config, self.db, task)
+                from .finalization import before_commit
+
+                before_commit(self.config, self.db, task)
                 commit_task(worktree, task)
                 verify_locked(self.config, self.db, task, committed=True)
             candidate_commit = (
@@ -570,7 +581,7 @@ class Orchestrator:
             write_patch(worktree, patch_path, base_commit, candidate_commit)
             final_changed_files = changed_files_between(worktree, base_commit, candidate_commit)
             final_result = {
-                **result.final,
+                **result_final,
                 "status": "completed",
                 # Phase results retain the model's incremental claim. Terminal evidence is instead
                 # the complete Git truth integration will compare: approved base -> final candidate.
@@ -595,7 +606,8 @@ class Orchestrator:
 
             attribution = terminal_evidence(self.config, self.db, task, artifact_dir, base_commit, candidate_commit, final_changed_files)
             if attribution is not None:
-                final_result["prerequisite_handoff"] = attribution
+                key = "prerequisite_finalization" if "parent_continuation_id" in attribution else "prerequisite_handoff"
+                final_result[key] = attribution
             if candidate_commit is not None:
                 self.db.save_completion_checkpoint(
                     task.id, candidate_commit, final_result, _specification_digest(project, task, commands), project.auto_push,
