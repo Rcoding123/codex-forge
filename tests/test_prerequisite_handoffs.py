@@ -39,8 +39,11 @@ class PrerequisiteWorker(BlockedWorker):
         return run_result(Path(artifact_dir), phase, completed_result(files, 'separate prerequisite'), [])
 
 
-def fixture(tmp_path, monkeypatch):
+def fixture(tmp_path, monkeypatch, *, target_scope=None):
     o, project, first, _second, definition = setup(tmp_path, monkeypatch)
+    if target_scope is not None:
+        with o.db.connect() as connection:
+            connection.execute('UPDATE tasks SET scope=? WHERE id=?', (target_scope, first.id))
     o.config = replace(o.config, max_repair_cycles=2, max_identical_failures=3)
     target_worker = BlockedWorker()
     o.runner = target_worker

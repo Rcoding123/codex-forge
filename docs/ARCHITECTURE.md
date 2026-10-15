@@ -248,3 +248,54 @@ Controlled scheduled-task restart recovery is validated. Full host reboot recove
 ## Safety boundary
 
 The VPS is the sandbox boundary for `danger-full-access`. Git worktrees isolate tasks from each other, but they are not an operating-system security boundary. Forge therefore belongs only on a dedicated development VPS without personal secrets, production deployment authority, or live financial connectivity.
+
+## Prospective prerequisite finalization
+
+A separate `task finalize-prerequisite` can supersede a TERMINAL failed handoff with one
+independently completed, reviewed, exact-base gated prerequisite. The parent row and all previous
+evidence remain immutable. A new `prerequisite_finalizations` journal has a unique task/parent,
+transactional review-start boundary and operational task-delete cascade; retained evidence and
+one-use prerequisite authority survive deletion. No implementation or repair phase is permitted.
+
+The operator receipt is a NEW prospective attestation of the current candidate, not a claim that
+a later blocked repair had a historical full-tree seal. It binds original base/admission, full
+current HEAD/index/working identity, latest blocked review repair, trusted unresolved review, old
+source and new source/gate/scope, exact finite replacements, prospective worker paths/hashes and explicitly selected metadata and
+historical evidence. Existing source evidence is immutable. Replacement and original worker delta
+are disjoint except explicitly typed, independently reviewed/gated metadata selection; aliases, links, executable modes, hidden index/exclude tricks and unrelated scope
+changes fail closed. Atomic replacement journals accept only exact old/new/temp-prefix bytes.
+
+Original validation, one independent review and final validation precede the shared ordinary
+commit/completion/integration tail. Any failure terminates without self-repair. A durable started
+review never replays; recovery requires an exact controller-certified cached review or completion.
+Commit intent pins the intended tree and parent before commit so publication recovery never
+substitutes another candidate. Active finalization owns VALIDATING/REVIEWING states, so public deletion cannot remove its checkout
+while importing or validating. An interrupted resumable operation becomes BLOCKED; exhausted daemon
+recovery becomes FAILED. No stage exposes an exhausted READY task.
+
+Attempts/repair history, admission, frozen plans, token accounting and limits stay unchanged.
+Timeout60 means the existing per-Codex-process/per-validation-command limit; this operation does
+not invent an aggregate task-time budget. New review usage accrues to the original task.
+
+
+Typed optional finalization selection separates current prospective worker input, gated capability W,
+and separately budgeted/gated reconciliation C. The controller enforces finite exact metadata
+operations, unchanged unselected worker/test/history bytes and unchanged W blobs. A selected Python
+file may only lose one explicitly identified literal list element, with all other AST and bytes
+preserved; text document operations are exact bounded spans. The immutable receipt and successor
+journal bind both independently proven sources and the prospective before bytes. No repository name,
+lab identifier or application-specific selector is built into the controller.
+
+
+Finalization ignore exemptions use committed versioned ignore policy only. Unknown generated
+ignore files are permitted solely below entire ancestors ignored by that policy, proved in an
+isolated case-sensitive Git context with ambient Git config/environment removed. Self-hiding root/nested/staged ignores and mutable local/global exclusions
+cannot hide candidate inputs. Effective external clean filters are refused before the sole review.
+Worker and imported files require raw working-byte identity with staged/committed blobs; unchanged
+baseline files retain both their exact prospective checkout bytes and original committed blob/mode.
+The existing builtin CRLF/LF checkout representation of an unchanged baseline is preserved, never
+used as authority to rewrite worker input. The final complete staged/committed tree is re-proved;
+Git conversion introduced during validation/review cannot produce a completed unreviewed candidate.
+
+The target, old parent source, capability source, reconciliation source and each retained gate
+are guarded before existing conversion-capable source proof commands.

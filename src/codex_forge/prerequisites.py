@@ -331,6 +331,10 @@ def import_handoff(config, db, project, task, document):
 
 
 def verify_locked(config, db, task, *, document=None, require_event=True, committed=False):
+    if document is None and getattr(db, 'prerequisite_finalization', lambda *_: None)(task.id):
+        from .finalization import verify_candidate
+
+        return verify_candidate(config, db, task, committed=committed)
     row = getattr(db, 'blocker_continuation', lambda *_: None)(task.id, task.attempts)
     if document is None:
         if not row:
@@ -378,6 +382,10 @@ def verify_locked(config, db, task, *, document=None, require_event=True, commit
 
 
 def prompt_context(config, db, task):
+    if getattr(db, 'prerequisite_finalization', lambda *_: None)(task.id):
+        from .finalization import review_context
+
+        return review_context(config, db, task)
     row = getattr(db, 'blocker_continuation', lambda *_: None)(task.id, task.attempts)
     if not row:
         return ''
@@ -487,6 +495,10 @@ def _prior_review(config, db, project, task):
 
 def terminal_evidence(config, db, task, artifact_root, base, candidate, changed_files):
     """Expose full and separately attributable committed deltas without private reservation data."""
+    if getattr(db, 'prerequisite_finalization', lambda *_: None)(task.id):
+        from .finalization import terminal_evidence as finalize_evidence
+
+        return finalize_evidence(config, db, task, artifact_root, base, candidate, changed_files)
     row = getattr(db, 'blocker_continuation', lambda *_: None)(task.id, task.attempts)
     if not row:
         return None

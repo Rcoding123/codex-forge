@@ -4,6 +4,20 @@ All notable changes to Codex Forge are documented here. This project follows sem
 
 ## [Unreleased]
 
+### Prospective prerequisite finalization
+
+- Add public prospective receipt/preflight and a distinct append-only successor to a terminal
+  prerequisite handoff, preserving admission, exhausted attempts, repair history and old evidence.
+- Import only separately reviewed/gated same-base replacements, preserve current worker files except explicit typed selection,
+  run zero implementation/repair calls and at most one durable independent review, then reuse
+  normal validation, commit, integration and gate ownership.
+- Fail closed on candidate/source/history drift and ambiguous paid-review recovery; retain
+  per-call timeouts and cumulative original-task token accounting.
+
+- Optional typed finalization reconciliation binds separately reviewed/gated capability and metadata
+  sources, enforcing exact prospective input hashes, literal-list AST preservation and finite UTF8
+  document spans without another implementation/repair call or any application-specific controller policy.
+
 ### Governed prerequisite handoff
 
 - Add public nonmutating `task handoff-prerequisite --dry-run` to expose an exact immutable receipt
