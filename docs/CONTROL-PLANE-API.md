@@ -1198,8 +1198,27 @@ extensions. An artifact Forge does not positively recognize is excluded.
 | `patch` | `attempt-NN/changes.patch` | `text/x-diff` | no |
 | `implementation_result` | `attempt-NN/implementation/implementation.final.json` | `application/json` | yes |
 | `review_result` | `attempt-NN/review[-N]/review[-N].final.json` | `application/json` | yes |
+| `controller_review_result` | `attempt-NN/review[-N]/controller-review.json` (also governed operation review groups) | `application/json` | yes |
 | `repair_summary` | `attempt-NN/{validation,review}-repair-N/*.final.json` | `application/json` | yes |
 | `validation_log` | `attempt-NN/<group>/validation-NN.{stdout,stderr}.log` | `text/plain` | no |
+
+`controller_review_result` is an optional additive artifact kind within every supported contract
+version. It records the actual trusted effective controller decision prospectively; it is absent
+for historical reviews and invalid or command-unclosed outputs. Its own `format_version` is `"1"`
+and its structured allowlist is `format_version`, `source_review_sha256`, `model_verdict`,
+`effective_verdict`, `acceptance_criteria` (`criterion`, `met`, `evidence`), `binding_requirements`
+(`text`, `met`, `evidence`), and effective `findings` (`severity`, `file`, `line`, `issue`,
+`required_fix`). Report/finding arrays are capped at 500 items in the public projection; existing
+artifact byte limits and free-text/path/secret redaction also apply. `formatted_text` names both
+verdicts and itemized reports/findings. The source hash binds the original raw review file, whose
+bytes and original `review_result` projection are unchanged. Model `pass` can coexist with
+effective `changes_required` when conformance adds findings.
+
+The six existing `availability` keys and existing `review_result`/`final_result` projections are
+unchanged, as are the default schema version and acceptance rules. Find this optional diagnostic
+by `artifacts[].artifact_kind`; consumers must tolerate unknown additive kinds. Listing/showing
+evidence never creates or recomputes a diagnostic. Deleted task registry state retains these
+artifacts under the same evidence-retention rules as other public evidence.
 
 Excluded from the public contract:
 

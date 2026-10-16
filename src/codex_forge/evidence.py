@@ -101,6 +101,7 @@ PUBLIC_ARTIFACT_KINDS: dict[str, str] = {
     "final_result": "The controller's merged final task result.",
     "implementation_result": "The schema-constrained result of an implementation phase.",
     "review_result": "The result of an independent review phase.",
+    "controller_review_result": "The controller's trusted effective review decision and conformance reports.",
     "repair_summary": "The schema-constrained result of a repair phase.",
     "patch": "The unified diff the task produced.",
     "validation_log": "Captured output of a declared validation command.",
@@ -118,6 +119,7 @@ _STRUCTURED_CLASSES = {
     "final_result": ArtifactClass("final_result", "application/json", True),
     "implementation_result": ArtifactClass("implementation_result", "application/json", True),
     "review_result": ArtifactClass("review_result", "application/json", True),
+    "controller_review_result": ArtifactClass("controller_review_result", "application/json", True),
     "repair_summary": ArtifactClass("repair_summary", "application/json", True),
 }
 _PATCH_CLASS = ArtifactClass("patch", "text/x-diff", False)
@@ -283,6 +285,8 @@ def classify_attempt_file(name: str) -> ArtifactClass | None:
 
 def classify_group_file(group: str, name: str) -> ArtifactClass | None:
     """Classify a file inside a phase or validation group directory."""
+    if _REVIEW_GROUP.match(group) and name == "controller-review.json":
+        return _STRUCTURED_CLASSES["controller_review_result"]
     if _VALIDATION_LOG.match(name):
         # A declared validation command's captured output. Both streams are classified evidence:
         # they exist only because an operator registered the command, and the failing stream is
@@ -844,6 +848,22 @@ def _sanitize_review_result(document: Mapping[str, Any], sanitize: Any) -> dict[
     }
 
 
+def _sanitize_controller_review(document: Mapping[str, Any], sanitize: Any) -> dict[str, Any]:
+    return {
+        "format_version": _clean(document.get("format_version"), sanitize),
+        "source_review_sha256": _clean(document.get("source_review_sha256"), sanitize),
+        "model_verdict": _clean(document.get("model_verdict"), sanitize),
+        "effective_verdict": _clean(document.get("effective_verdict"), sanitize),
+        "acceptance_criteria": _object_list(
+            document.get("acceptance_criteria"), ("criterion", "met", "evidence"), sanitize
+        ),
+        "binding_requirements": _object_list(
+            document.get("binding_requirements"), ("text", "met", "evidence"), sanitize
+        ),
+        "findings": _object_list(document.get("findings"), _FINDING_FIELDS, sanitize),
+    }
+
+
 def _sanitize_final_result(
     document: Mapping[str, Any], sanitize: Any, schema_version: str
 ) -> dict[str, Any]:
@@ -891,6 +911,8 @@ def sanitize_structured(
         )
     if kind == "review_result":
         return _sanitize_review_result(document, sanitize)
+    if kind == "controller_review_result":
+        return _sanitize_controller_review(document, sanitize)
     if kind in {"implementation_result", "repair_summary"}:
         return _sanitize_task_result(document, sanitize)
     return None
@@ -898,9 +920,17 @@ def sanitize_structured(
 
 def _format_structured(kind: str, payload: Mapping[str, Any]) -> str:
     lines: list[str] = []
-    if kind == "review_result":
-        lines.append(f"Verdict: {payload.get('verdict')}")
-        lines.append(f"Summary: {payload.get('summary')}")
+    if kind in {"review_result", "controller_review_result"}:
+        if kind == "controller_review_result":
+            lines.append(f"Model verdict: {payload.get('model_verdict')}")
+            lines.append(f"Controller verdict: {payload.get('effective_verdict')}")
+            for key, label in (("acceptance_criteria", "criterion"), ("binding_requirements", "text")):
+                for report in payload.get(key) or []:
+                    lines.append(f"- {report.get(label)}: met={report.get('met')}")
+                    lines.append(f"  Evidence: {report.get('evidence')}")
+        else:
+            lines.append(f"Verdict: {payload.get('verdict')}")
+            lines.append(f"Summary: {payload.get('summary')}")
         findings = payload.get("findings") or []
         lines.append(f"Findings: {len(findings)}")
         for finding in findings:

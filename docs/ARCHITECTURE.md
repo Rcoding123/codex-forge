@@ -105,6 +105,20 @@ Identical submitted text appearing in both sections is reported once; duplicate 
 still fail conformance. A review repair that fails controller validation passes the new command
 evidence alongside unresolved findings to the next repair. Exhaustion retains validation ownership.
 
+The trusted review choke point prospectively retains `review[-N]/controller-review.json` after
+schema and command-closure checks and the existing conformance enforcement. This immutable
+diagnostic binds the raw model review SHA256, model and effective verdicts, original itemized
+acceptance/binding reports and actual effective findings. It records the decision already made;
+public retrieval never reruns policy. Invalid or unclosed reviews have no trusted diagnostic.
+Unique temporary files and no-clobber publication accept identical retries and refuse conflicts
+through the existing nonretryable provenance failure path, without another model or repair call.
+
+Governed finalization includes the diagnostic in its exact trusted-review history before sealing
+the cache. Cached replay verifies/reuses identical evidence; pre-feature sealed caches remain
+read-only and are not backfilled. Historical review readers likewise do not create diagnostics.
+The additive public artifact kind uses existing bounded, redacted evidence retrieval; original
+model files, legacy projections, schema defaults and runtime limits remain unchanged.
+
 The transported JSON schemas are package resources under `src/codex_forge/schemas`. Transport
 paths remain valid for the entire worker call, and local review decoding reads the same resources.
 An installed wheel therefore does not depend on the source checkout layout.

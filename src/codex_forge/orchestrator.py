@@ -27,6 +27,7 @@ from .knowledge import KnowledgeStore
 from .models import CodexRunResult, Project, Task, TaskState, ValidationResult
 from .prompts import implementation_prompt, review_prompt, validation_failure_summary
 from .processes import ProcessSupervisionError
+from .review_evidence import retain_controller_review
 from .schema_resources import load_schema
 from .runner import (
     BLOCK_REVIEW_OUTPUT_UNUSABLE,
@@ -859,7 +860,8 @@ class Orchestrator:
         return schema
 
     def _trusted_review_final(
-        self, task: Task, artifact_dir: Path, resolution: SandboxResolution, review: CodexRunResult
+        self, task: Task, artifact_dir: Path, resolution: SandboxResolution, review: CodexRunResult,
+        *, retain_decision: bool = True,
     ) -> tuple[dict | None, str | None]:
         """The only door from a completed review run into review semantics.
 
@@ -896,7 +898,10 @@ class Orchestrator:
                 REVIEW_OUTPUT_COMMANDS_UNCLOSED,
                 commands=closure.open_commands,
             )
-        return enforce_specification_conformance(task, decoded), None
+        effective = enforce_specification_conformance(task, decoded)
+        if retain_decision:
+            retain_controller_review(review.final_path, decoded, effective)
+        return effective, None
 
     def _retry_or_fail_review_output_unusable(
         self,
