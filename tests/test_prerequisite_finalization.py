@@ -164,7 +164,7 @@ def test_changed_review_ends_without_repair(tmp_path, monkeypatch):
     assert o.db.get_task(task.id).attempts == 3
 
 
-@pytest.mark.parametrize('boundary', ['partial_import', 'trusted_review', 'staging', 'commit', 'integration'])
+@pytest.mark.parametrize('boundary', ['partial_import', 'trusted_review', 'legacy_trusted_review', 'staging', 'commit', 'integration'])
 def test_restart_at_durable_boundaries_never_replays_review(tmp_path, monkeypatch, boundary):
     import codex_forge.finalization as module
     import codex_forge.orchestrator as controller
@@ -183,7 +183,7 @@ def test_restart_at_durable_boundaries_never_replays_review(tmp_path, monkeypatc
                 if count == 1:
                     raise KeyboardInterrupt('isolated partial replacement')
             fault.setattr(module, '_import_file', import_file)
-        elif boundary == 'trusted_review':
+        elif boundary in ('trusted_review', 'legacy_trusted_review'):
             original = module._save
 
             def save(db, current_task, state, checkpoint):
@@ -219,6 +219,21 @@ def test_restart_at_durable_boundaries_never_replays_review(tmp_path, monkeypatc
     assert o.db.get_task(task.id).attempts == 3
     assert o.db.claim_ready_tasks(8) == []  # Also models an old daemon after the singleton lock releases.
     assert o.db.blocker_continuation(task.id, 3) == parent
+    review_before = None
+    if boundary in ('trusted_review', 'legacy_trusted_review'):
+        # Only this isolated fixture synthesizes a pre-feature cache. Historical runtime
+        # evidence must never be modified or backfilled by the new reader.
+        root = Path(json.loads(o.db.prerequisite_finalization(task.id)['document_json'])['artifact_root'])
+        diagnostic = root / 'review/controller-review.json'
+        assert diagnostic.is_file()
+        if boundary == 'legacy_trusted_review':
+            diagnostic.unlink()
+            marker = json.loads((root / 'trusted-review.json').read_bytes())
+            del marker['evidence']['controller-review.json']
+            (root / 'trusted-review.json').write_bytes(module._raw(marker))
+        else:
+            diagnostic_mtime = diagnostic.stat().st_mtime_ns
+        review_before = module._history(root / 'review')
     fresh = Orchestrator(o.config, Path(__file__).parents[1])
     fresh.runner = o.runner
     monkeypatch.setattr(fresh, '_validate', lambda *_, **__: passing_validation(tmp_path, True))
@@ -226,6 +241,11 @@ def test_restart_at_durable_boundaries_never_replays_review(tmp_path, monkeypatc
     assert outcome['state'] == 'COMPLETED' and fresh.runner.phases == ['review']
     assert (task.worktree_path / 'candidate.txt').read_bytes() == worker_bytes
     assert fresh.workflows.get(project.id)['gates'][-1]['status'] == 'PASSED'
+    if review_before is not None:
+        assert module._history(root / 'review') == review_before
+        assert diagnostic.is_file() == (boundary == 'trusted_review')
+        if boundary == 'trusted_review':
+            assert diagnostic.stat().st_mtime_ns == diagnostic_mtime
     listed = evidence_list(o.config, task.id, schema_version='1.4')
     assert any(a['artifact_kind'] == 'final_result' and '-f-' in a['display_name'] for a in listed['artifacts'])
     assert not any(a['display_name'].endswith(('finalization.json', 'operator-receipt.raw', 'trusted-review.json')) for a in listed['artifacts'])

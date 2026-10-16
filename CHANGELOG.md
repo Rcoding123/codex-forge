@@ -4,6 +4,15 @@ All notable changes to Codex Forge are documented here. This project follows sem
 
 ## [Unreleased]
 
+### Controller review diagnostics
+
+- Retain prospective immutable `controller_review_result` evidence after a review passes schema
+  and command-closure checks. Bind the original review SHA256, model/effective verdicts,
+  itemized acceptance/binding reports and actual controller-enforced findings.
+- Expose bounded, redacted diagnostics through existing evidence commands without changing
+  schema defaults, old result projections, six availability keys, conformance or model budgets.
+  Preserve sealed historical caches without backfilling; conflicting evidence fails closed.
+
 ### Prospective prerequisite finalization
 
 - Add public prospective receipt/preflight and a distinct append-only successor to a terminal

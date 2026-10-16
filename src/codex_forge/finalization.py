@@ -815,7 +815,9 @@ def _execute_stages(o, task):
             raise CandidateStateUnavailable('Started review lacks an exact controller-certified cached outcome.')
         result = CodexRunResult(exit_code=0, final={}, final_path=root / 'review/review.final.json',
                                 jsonl_path=root / 'review/review.events.jsonl', stderr_path=root / 'review/review.stderr.log')
-        _cache_review(o, task, root, result, resolution)
+        # A pre-feature sealed cache is historical evidence, never an invitation to backfill.
+        _cache_review(o, task, root, result, resolution,
+                      retain_decision='controller-review.json' in sealed['evidence'])
         row, document, checkpoint = _row(db, task)
     if row['state'] == 'FAILED':
         return
@@ -845,13 +847,13 @@ def _execute_stages(o, task):
     o.workflows.advance_all()
 
 
-def _cache_review(o, task, root, result, resolution):
+def _cache_review(o, task, root, result, resolution, *, retain_decision=True):
     _, _, checkpoint = _row(o.db, task)
     checkpoint['review_started'] = True
     o._enforce_usage_budget(task)
     if detect_review_infrastructure_block(result, requested_sandbox=resolution.requested, sandbox=resolution.sandbox):
         return _fail(o, task, checkpoint, 'FINALIZATION_REVIEW_INFRASTRUCTURE_FAILED')
-    final, _ = o._trusted_review_final(task, root, resolution, result)
+    final, _ = o._trusted_review_final(task, root, resolution, result, retain_decision=retain_decision)
     if final is None or final.get('verdict') != 'pass':
         return _fail(o, task, checkpoint, 'FINALIZATION_REVIEW_NOT_PASSED')
     with o.db.connect() as connection:

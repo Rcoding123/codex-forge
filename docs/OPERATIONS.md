@@ -2,6 +2,16 @@
 
 ## Operating assumptions
 
+When a model review says `pass` but the task fails conformance, use the supported
+`task evidence list <task-id> --json` command and select the optional
+`controller_review_result` artifact with `task evidence show <task-id> --artifact-id <id> --json`.
+It reports both model/effective verdicts, itemized acceptance/binding reports and effective
+findings, bound to the raw review SHA256. Existing `review_result` continues to show the original
+model verdict. These diagnostics are prospective: absence on old attempts, sealed historical
+caches or unusable review outputs is expected; no evidence command backfills them. A conflicting
+or unwritable diagnostic fails closed through the existing provenance failure path and does not
+authorize another model call, counter reset or relaxed conformance.
+
 Run Forge only on a dedicated Windows development VPS. The default non-interactive, unrestricted Codex execution policy is inappropriate for a shared workstation or any host with production credentials, live brokerage access, or unrelated private data.
 
 Use one Windows account for bootstrap, Codex authentication, and the `CodexForge` scheduled task. Persistent state must remain outside the Git checkout.
