@@ -118,14 +118,16 @@ def parse_request(data: Any) -> dict:
         if not Path(_string(request[key], key)).is_absolute():
             raise RequestError("invalid_request", f"{key} must be absolute")
 
-    workspace = _object(request["workspace"], "workspace", {"path", "base_revision", "expected_state", "expected_files"},
+    workspace = _object(request["workspace"], "workspace", {"path", "base_revision", "expected_state", "expected_files", "in_place"},
                         {"path", "base_revision", "expected_state"})
     if not Path(_string(workspace["path"], "workspace.path")).is_absolute():
         raise RequestError("invalid_request", "workspace.path must be absolute")
     _string(workspace["base_revision"], "workspace.base_revision")
     if workspace["expected_state"] not in ("clean", "dirty"):
         raise RequestError("invalid_request", "workspace.expected_state must be clean or dirty")
-    pins = workspace.setdefault("expected_files", {})
+    if "in_place" in workspace and not isinstance(workspace["in_place"], bool):
+        raise RequestError("invalid_request", "workspace.in_place must be a boolean")
+    pins = workspace.get("expected_files", {})
     if not isinstance(pins, dict):
         raise RequestError("invalid_request", "workspace.expected_files must be an object")
     for path, digest in list(pins.items()):

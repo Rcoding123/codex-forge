@@ -59,7 +59,8 @@ def _snapshot(workspace: Path) -> dict[str, str]:
     """Hash tracked and nonignored untracked files plus the worktree binding file."""
     names = _git(workspace, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
     relative_paths = set(names.decode("utf-8").rstrip("\0").split("\0")) - {""}
-    relative_paths.add(".git")
+    if (workspace / ".git").is_file():
+        relative_paths.add(".git")
     if len(relative_paths) > 20_000:
         raise SourceError("source_limit", "Workspace exceeds the 20000-file audit limit")
     total = 0
@@ -107,15 +108,25 @@ def _git_metadata(workspace: Path) -> dict:
     return {
         "index": hashlib.sha256(_git(workspace, "ls-files", "--stage", "-v", "-z")).hexdigest(),
         "branch": _git(workspace, "rev-parse", "--symbolic-full-name", "HEAD").decode().strip(),
+        "git_dir": str(git_dir),
+        "common_dir": str(common),
         "configs": configs,
     }
 
 
-def _assert_binding(workspace: Path, before: dict, request: dict, git_before: dict) -> None:
+def _binding(workspace: Path) -> tuple[int, int]:
     _plain(workspace)
     binding = workspace / ".git"
     _plain(binding)
-    if hashlib.sha256(binding.read_bytes()).hexdigest() != before[".git"]:
+    info = binding.stat()
+    return info.st_dev, info.st_ino
+
+
+def _assert_binding(workspace: Path, before: dict, request: dict, git_before: dict,
+                    binding_before: tuple[int, int]) -> None:
+    if _binding(workspace) != binding_before:
+        raise SourceError("worktree_binding_changed", "The checkout's Git binding changed")
+    if ".git" in before and hashlib.sha256((workspace / ".git").read_bytes()).hexdigest() != before[".git"]:
         raise SourceError("worktree_binding_changed", "The linked worktree binding changed")
     if _git(workspace, "rev-parse", "HEAD").decode().strip().lower() != request["workspace"]["base_revision"].lower():
         raise SourceError("worktree_head_changed", "The candidate changed the caller-owned HEAD")
@@ -123,27 +134,53 @@ def _assert_binding(workspace: Path, before: dict, request: dict, git_before: di
         raise SourceError("worktree_metadata_changed", "The candidate changed caller-owned Git metadata")
 
 
-def _workspace(request: dict) -> tuple[Path, dict[str, str]]:
-    workspace = Path(request["workspace"]["path"]).resolve(strict=True)
-    if not workspace.is_dir() or not (workspace / ".git").is_file():
-        raise SourceError("worktree_required", "Supply an existing isolated linked Git worktree")
+def _source_state(workspace: Path, *, in_place: bool) -> tuple[str, str]:
+    binding = workspace / ".git"
+    linked = binding.is_file()
+    if not workspace.is_dir() or not (linked or (in_place and binding.is_dir())):
+        raise SourceError("worktree_required", "Supply a linked Git worktree or opt in to an ordinary checkout")
+    _binding(workspace)
     if Path(_git(workspace, "rev-parse", "--show-toplevel").decode().strip()).resolve() != workspace:
-        raise SourceError("worktree_root", "Workspace must be the exact worktree root")
+        raise SourceError("worktree_root", "Workspace must be the exact Git checkout root")
+    if not linked:
+        git_dir = Path(_git(workspace, "rev-parse", "--absolute-git-dir").decode().strip()).resolve()
+        common = Path(_git(workspace, "rev-parse", "--path-format=absolute", "--git-common-dir")
+                      .decode().strip()).resolve()
+        if git_dir != binding or common != binding:
+            raise SourceError("worktree_required", "An ordinary checkout must use its own .git directory")
     head = _git(workspace, "rev-parse", "HEAD").decode().strip()
-    base = request["workspace"]["base_revision"]
-    if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", base) or head.lower() != base.lower():
-        raise SourceError("stale_source", "Workspace HEAD differs from the exact base revision")
     flags = _git(workspace, "ls-files", "-v", "-z").split(b"\0")
     if any(record and not record.startswith(b"H ") for record in flags):
         raise SourceError("unsupported_index_flags", "Hidden, sparse or unmerged index states are unsupported")
     dirty = bool(_git(workspace, "status", "--porcelain=v1", "-z", "--untracked-files=all"))
-    if dirty != (request["workspace"]["expected_state"] == "dirty"):
+    return head, "dirty" if dirty else "clean"
+
+
+def capture_checkout(path: Path) -> dict:
+    """Capture the exact source pins for an explicitly in-place request."""
+    workspace = path.resolve(strict=True)
+    head, state = _source_state(workspace, in_place=True)
+    return {
+        "path": str(workspace), "base_revision": head, "expected_state": state,
+        "expected_files": _snapshot(workspace), "in_place": True,
+    }
+
+
+def _workspace(request: dict) -> tuple[Path, dict[str, str]]:
+    spec = request["workspace"]
+    workspace = Path(spec["path"]).resolve(strict=True)
+    in_place = spec.get("in_place", False)
+    head, state = _source_state(workspace, in_place=in_place)
+    base = spec["base_revision"]
+    if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", base) or head.lower() != base.lower():
+        raise SourceError("stale_source", "Workspace HEAD differs from the exact base revision")
+    if state != spec["expected_state"]:
         raise SourceError("stale_source", "Workspace clean/dirty state differs from the request")
+    expected = spec.get("expected_files")
+    if (in_place or state == "dirty") and expected is None:
+        raise SourceError("source_binding_required", "Supply exact expected_files pins for this checkout")
     snapshot = _snapshot(workspace)
-    expected = request["workspace"].get("expected_files")
-    if dirty and not expected:
-        raise SourceError("source_binding_required", "Dirty worktrees require exact expected_files pins")
-    if expected and expected != snapshot:
+    if (in_place or state == "dirty" or expected) and expected != snapshot:
         raise SourceError("stale_source", "Workspace files differ from caller-supplied pins")
     return workspace, snapshot
 
@@ -263,6 +300,7 @@ def run_job(data: object, *, executable: str | None = None,
         result["validation"].update(state="not_run" if commands else "not_requested", expected=len(commands))
         workspace, before = _workspace(request)
         git_before = _git_metadata(workspace)
+        binding_before = _binding(workspace)
         prompt, context = build_prompt(request, workspace)
         artifact = _artifacts(request, workspace)
         _write_json(artifact / "request.json", request)
@@ -283,6 +321,13 @@ def run_job(data: object, *, executable: str | None = None,
         remaining = request["deadline_s"] - (time.monotonic() - started)
         if remaining <= 0 or (cancel_event and cancel_event.is_set()):
             raise SourceError("deadline_or_cancel", "Job expired or was cancelled before inference")
+        if request["workspace"].get("in_place"):
+            _assert_binding(workspace, before, request, git_before, binding_before)
+            if _snapshot(workspace) != before:
+                raise SourceError("stale_source", "Workspace files changed before inference")
+            remaining = request["deadline_s"] - (time.monotonic() - started)
+            if remaining <= 0 or (cancel_event and cancel_event.is_set()):
+                raise SourceError("deadline_or_cancel", "Job expired or was cancelled before inference")
         inference_started = True
         outcome = run_owned(
             argv, cwd=workspace, env=report["environment"], stdin=prompt.encode("utf-8"),
@@ -301,7 +346,7 @@ def run_job(data: object, *, executable: str | None = None,
             result["protocol"] = {"events_parseable": False, "final_present": final_path.is_file(),
                                   "schema_valid": False}
         result["usage"] = normalize_usage(events)
-        _assert_binding(workspace, before, request, git_before)
+        _assert_binding(workspace, before, request, git_before, binding_before)
         after = _snapshot(workspace)
         _write_json(artifact / "source-after.json", after)
         result["edit_audit"] = _audit(before, after, request["policy"]["allowed_paths"])
@@ -353,7 +398,7 @@ def run_job(data: object, *, executable: str | None = None,
             if not passed:
                 break
         if commands:
-            _assert_binding(workspace, before, request, git_before)
+            _assert_binding(workspace, before, request, git_before, binding_before)
             current = _snapshot(workspace)
             _write_json(artifact / "source-after-validation.json", current)
             if current != after:

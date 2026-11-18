@@ -133,12 +133,13 @@ schema is checked against that packaged final schema by the contract tests.
 }
 ```
 
-Supply an **existing linked Git worktree**, not a primary clone or subdirectory.
-The adapter never creates it. HEAD must equal the full base hash, and the dirty
-state must match. A dirty workspace additionally requires `expected_files`, an
-exact map of Git-visible paths (plus `.git`) to full-file SHA256 hashes. A clean
-workspace may supply these pins too. Job/attempt IDs are safe Windows path
-components. Source symlinks, reparse points and submodules are rejected; current
+Supply the root of an **existing linked Git worktree**. To edit an ordinary Git
+checkout directly, set `workspace.in_place` to `true`. The adapter never creates
+the checkout. HEAD must equal the full base hash, and the dirty state must match.
+Dirty and in-place checkouts require `expected_files`, an exact map of Git-visible
+paths to full-file SHA256 hashes. Include the `.git` binding file when using a
+linked worktree. A clean linked worktree may supply these pins too.
+Job/attempt IDs are safe Windows path components. Source symlinks, reparse points and submodules are rejected; current
 inventory limits are 20,000 paths and 512 MiB of source.
 Assume-unchanged, skip-worktree, sparse and unmerged index states are refused
 because they can hide stale worktree contents from normal clean-state checks.
@@ -259,3 +260,25 @@ There is no hidden fallback to the legacy controller. No matched model benchmark
 or percentage token-savings claim accompanies this implementation. Factory
 architecture, routing, workflows, dashboard and model training remain outside
 this adapter change.
+
+
+## Linux terminal prompt
+
+The terminal launcher asks for a single assignment and sends an in-place
+request to Forge. Run it from a Git checkout with at least one commit.
+Staged, unstaged, and untracked source can be present. The launcher records
+the exact starting source and uses native full access, so run only tasks in
+trusted projects. Evidence goes under ~/.local/state/adapter-launchers.
+
+For a bare codex command, put an executable shell script called codex on your
+PATH. Point the script at your Forge virtual environment and at the configured
+Forge adapter launcher that pins the native Codex binary and sign-in home:
+
+```sh
+#!/bin/sh
+exec /path/to/forge-venv/bin/python -I -B -m codex_forge.adapter.prompt \
+  --adapter /path/to/configured/forge-adapter
+```
+
+Pass --model with an exact native model ID to override the prompt launcher's
+default. Review the resulting candidate and run project tests as usual.

@@ -2,6 +2,7 @@
 import ast
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -245,3 +246,67 @@ def test_model_cannot_mutate_index_without_detection(job, monkeypatch, action):
     assert result["adapter_status"] != "completed"
     assert result["error"]["code"] == "worktree_metadata_changed"
     assert len(calls) == 1
+
+
+def test_in_place_checkout_preserves_staged_and_untracked_files(job, monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    tracked = repo / "source.py"
+    tracked.write_text("answer = 43\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "source.py"], check=True)
+    tracked.write_text("answer = 43\nuser_note = 'preserve'\n", encoding="utf-8")
+    notes = repo / "notes.txt"
+    notes.write_text("existing untracked notes\n", encoding="utf-8")
+    job["workspace"] = engine.capture_checkout(repo)
+    assert job["workspace"]["expected_state"] == "dirty"
+
+    def edit(cwd):
+        assert cwd == repo
+        with tracked.open("a", encoding="utf-8") as stream:
+            stream.write("added = True\n")
+
+    wire(monkeypatch, model_edit=edit)
+    result = engine.run_job(job)
+    assert result["adapter_status"] == "completed", result
+    staged = subprocess.check_output(["git", "-C", str(repo), "show", ":source.py"], text=True)
+    assert staged == "answer = 43\n"
+    assert tracked.read_text() == "answer = 43\nuser_note = 'preserve'\nadded = True\n"
+    assert notes.read_text() == "existing untracked notes\n"
+
+
+def test_primary_checkout_requires_explicit_in_place_and_fresh_pins(job, monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    calls = wire(monkeypatch)
+    job["workspace"]["path"] = str(repo)
+    assert engine.run_job(job)["error"]["code"] == "worktree_required"
+
+    job["workspace"] = engine.capture_checkout(repo)
+    (repo / "source.py").write_text("answer = 73\n", encoding="utf-8")
+    assert engine.run_job(job)["error"]["code"] == "stale_source"
+    job["workspace"] = engine.capture_checkout(repo)
+    job["workspace"].pop("expected_files")
+    assert engine.run_job(job)["error"]["code"] == "source_binding_required"
+    assert not calls
+
+
+def test_in_place_refuses_replaced_git_directory(job, monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    job["workspace"] = engine.capture_checkout(repo)
+
+    def edit(cwd):
+        (cwd / ".git").rename(cwd / "renamed-git")
+        shutil.copytree(cwd / "renamed-git", cwd / ".git")
+
+    wire(monkeypatch, model_edit=edit)
+    assert engine.run_job(job)["error"]["code"] == "worktree_binding_changed"
+
+
+def test_in_place_refuses_hidden_index_entry(job, monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    job["workspace"] = engine.capture_checkout(repo)
+    other = repo / "z_hidden.py"
+    other.write_text("hidden = True\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", other.name], check=True)
+    subprocess.run(["git", "-C", str(repo), "update-index", "--assume-unchanged", other.name], check=True)
+    calls = wire(monkeypatch)
+    assert engine.run_job(job)["error"]["code"] == "unsupported_index_flags"
+    assert not calls
