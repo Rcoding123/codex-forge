@@ -338,8 +338,9 @@ def inspect_policy(request: dict, *, executable: str | None = None,
         raise PolicyError("config_source_unverified", "An environment-selected configuration source cannot be audited")
     workspace = Path(request["workspace"]["path"]).resolve()
     policy = request["policy"]
-    if policy["sandbox"] not in {"workspace-write", "read-only"}:
-        raise PolicyError("sandbox_unsupported", "The adapter accepts only restricted native sandboxes")
+    sandbox = policy["sandbox"]
+    if sandbox not in {"workspace-write", "read-only", "danger-full-access"}:
+        raise PolicyError("sandbox_unsupported", "The requested native sandbox is unsupported")
     if request.get("role", "implementation") != "implementation" or request.get("resume"):
         raise PolicyError("lane_unavailable", "Review, proposal and resume lanes are deferred")
     if policy.get("tool_network") == "deny":
@@ -354,6 +355,8 @@ def inspect_policy(request: dict, *, executable: str | None = None,
         raise PolicyError("version_unsupported", "Native CLI version is outside the tested allowlist")
     rc, help_text = _probe([str(native), "exec", "--help"], cwd=workspace, env=child_env)
     flags = ("--ignore-user-config", "--strict-config", "--ephemeral", "--json", "--output-schema")
+    if sandbox == "danger-full-access":
+        flags += ("danger-full-access",)
     if rc != 0 or any(flag not in help_text for flag in flags):
         raise PolicyError("capability_unverified", "The native CLI does not advertise required launch controls")
     global_args = [arg for value in _OVERRIDES for arg in ("-c", value)]
@@ -403,7 +406,7 @@ def inspect_policy(request: dict, *, executable: str | None = None,
         executable_hash = hashlib.file_digest(image, "sha256").hexdigest()
     return {
         "executable": str(native), "version": TESTED_VERSION, "auth": auth,
-        "environment": child_env, "capabilities": capabilities,
+        "environment": child_env, "capabilities": capabilities, "sandbox": sandbox,
         "config_digest": config_digest, "config_sources": config_sources,
         "executable_sha256": executable_hash,
         "argv_overrides": list(_OVERRIDES),
@@ -411,7 +414,7 @@ def inspect_policy(request: dict, *, executable: str | None = None,
 
 
 def build_argv(report: dict, request: dict, *, schema_path: Path, final_path: Path) -> list[str]:
-    """No free-form flags, profile, provider, fallback, resume, or full-access lane."""
+    """Build the fixed native command for the preflight-qualified assignment."""
     if report.get("auth") != "chatgpt_subscription" or report.get("version") != TESTED_VERSION:
         raise PolicyError("unqualified_launch", "A qualified native subscription preflight is required")
     try:
@@ -422,8 +425,10 @@ def build_argv(report: dict, request: dict, *, schema_path: Path, final_path: Pa
     if executable_hash != report.get("executable_sha256"):
         raise PolicyError("native_binary_changed", "The native executable changed after preflight")
     sandbox = request["policy"]["sandbox"]
-    if sandbox not in {"read-only", "workspace-write"}:
+    if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
         raise PolicyError("sandbox_unsupported", "The requested sandbox is unsupported")
+    if sandbox == "danger-full-access" and report.get("sandbox") != sandbox:
+        raise PolicyError("unqualified_launch", "Full access requires explicit matching preflight")
     if request["effort"] not in {"low", "medium", "high", "xhigh"}:
         raise PolicyError("effort_unsupported", "The requested effort is unsupported")
     # Never consume arbitrary argv_overrides supplied by an external report.

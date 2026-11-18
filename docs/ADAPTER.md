@@ -70,8 +70,12 @@ owned process-tree cleanup.
 
 This Linux support covers the adapter Python/console entrypoint. Windows
 bootstrap, scheduled services and the legacy autonomous controller are outside
-this port. Native model execution also depends on Codex's restricted sandbox
-being supported by the Linux host; failures never trigger full-access fallback.
+this port. Restricted native jobs depend on sandbox support on the Linux host.
+For a trusted job on an isolated development host, set the request's
+`policy.sandbox` to `"danger-full-access"`. Forge starts native Codex with
+approval policy `never` and records the selected mode in the launch arguments.
+The assignment's Git audit still checks visible edits after execution.
+The host account determines which files and commands the process can access.
 For offline adapter checks, use `.venv/bin/python -m pytest tests/test_adapter_*.py`;
 these fixtures execute harmless local subprocesses and use mocked model output,
 not inference. Windows controller/service tests do not certify a Linux daemon.

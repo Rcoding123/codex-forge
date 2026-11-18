@@ -140,7 +140,7 @@ def parse_request(data: Any) -> dict:
 
     policy_fields = {"sandbox", "allowed_paths", "tool_network", "search", "mcp", "plugins"}
     policy = _object(request["policy"], "policy", policy_fields, policy_fields)
-    if policy["sandbox"] not in ("workspace-write", "read-only"):
+    if policy["sandbox"] not in ("workspace-write", "read-only", "danger-full-access"):
         raise RequestError("invalid_request", "Unsupported sandbox")
     for path in _strings(policy["allowed_paths"], "policy.allowed_paths"):
         _relative(path, "policy.allowed_paths item")

@@ -129,7 +129,8 @@
           "type": "string",
           "enum": [
             "workspace-write",
-            "read-only"
+            "read-only",
+            "danger-full-access"
           ]
         },
         "allowed_paths": {

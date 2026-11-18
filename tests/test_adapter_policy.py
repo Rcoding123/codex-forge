@@ -31,7 +31,7 @@ def policy_case(tmp_path, monkeypatch):
         if argv[-1] == "--version":
             return 0, "codex-cli 0.151.0\n"
         if argv[-2:] == ["exec", "--help"]:
-            return 0, "--ignore-user-config --strict-config --ephemeral --json --output-schema"
+            return 0, "--ignore-user-config --strict-config --ephemeral --json --output-schema danger-full-access"
         if argv[-2:] == ["features", "list"]:
             return 0, "\n".join(f"{feature} stable false" for feature in policy._DISABLED_FEATURES)
         if argv[-2:] == ["login", "status"]:
@@ -123,7 +123,7 @@ def test_owned_process_is_deferred_to_mandatory_process_gate(policy_case):
 
 
 @pytest.mark.parametrize("policy_change", [
-    {"sandbox": "danger-full-access"}, {"tool_network": "deny"},
+    {"sandbox": "unknown-sandbox"}, {"tool_network": "deny"},
     {"mcp": True}, {"search": True}, {"plugins": True},
 ])
 def test_unsupported_policy_never_launches_any_probe(policy_case, policy_change):
@@ -269,6 +269,21 @@ def test_closed_argv_preserves_global_options_and_never_uses_extra_args(policy_c
     assert 'web_search="disabled"' in argv
     assert "model_provider=external" not in argv
     assert argv[-1] == "-"
+
+
+def test_full_access_requires_matching_subscription_preflight(policy_case):
+    request, native, env, _ = policy_case
+    root = Path(env["CODEX_HOME"])
+    args = {"schema_path": root / "schema", "final_path": root / "final"}
+    report = policy.inspect_policy(request, executable=native, env=env)
+    request["policy"]["sandbox"] = "danger-full-access"
+    with pytest.raises(policy.PolicyError, match="matching preflight"):
+        policy.build_argv(report, request, **args)
+    report = policy.inspect_policy(request, executable=native, env=env)
+    argv = policy.build_argv(report, request, **args)
+    assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
+    assert argv[argv.index("--ask-for-approval") + 1] == "never"
+    assert 'forced_login_method="chatgpt"' in argv
 
 
 @pytest.mark.parametrize("changed", ["version", "auth"])

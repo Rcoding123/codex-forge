@@ -9,7 +9,7 @@ adbcc45000856f860138e7e87c61691ff2c00dfd16684c9087c8f37523dd8d2b  ./CONTRIBUTING
 6484c1c614684b45e062b292d5e847e8834f4c4bf32b13cc4f3f107cd8f90217  ./README.md
 83307e90dad09ab8519d4d909188bfc75094fcdeb66fcd3bad3ecc6711e2741c  ./SECURITY.md
 299de7436fa4735cdde28feba9cf6f6944e83f6816e91b033bc9eb3ae2cdacab  ./bootstrap.ps1
-07f06ef9db9770cf82f76687e4b6ce99e73162eaab433df80b1a87092bd1acac  ./docs/ADAPTER.md
+2bfd03e86bcb0a8384582c81ed5b7dd0a58e1775b14195ccb13597058cbcca23  ./docs/ADAPTER.md
 f78beddd6560f2b947dd6d54a258c76c3dd733b540ff7a1c16e0b70e3369db66  ./docs/AGENT-TELEMETRY-CONTRACT.md
 bb44d73f3d7ee4c668ed4dd482b063b5ef5d1a32ce8e21d5a62a4323077b640a  ./docs/AGENT_CONTEXT.md
 07d3e83ec989aa64e912e7718117c907b01bb57a12563993b463949bcb6a0888  ./docs/ARCHITECTURE.md
@@ -43,9 +43,9 @@ a72d1c6c783d8ff7163e29b05cb641996a46bf4794044a7e930b5226d5f75fb0  ./src/codex_fo
 9f35eab7a61f768d6ee75b54ee079164d3a556dfc1bf5df3698d4c0625a1acfa  ./src/codex_forge/adapter/__init__.py
 935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d  ./src/codex_forge/adapter/__main__.py
 9061f7ce9f2e35c2b4d8520d2cb008f61daf69b1b2b647cc854d161b4720ee15  ./src/codex_forge/adapter/cli.py
-36364372004ed54c0274cda73385d3ebb98979775ef5ae520bce2a0834b71f64  ./src/codex_forge/adapter/contract.py
+72e597e44f1d528e99755a41720ed77111f6e409a168eef62b1d74835218dd39  ./src/codex_forge/adapter/contract.py
 6cc832618c6c8206d5bed07f06d8874492695c5085c4e484ba688e389613bd6c  ./src/codex_forge/adapter/engine.py
-14c5f66b02ba4901c2bd44ab10626898bc9ea2806febb0b94496329b09093289  ./src/codex_forge/adapter/policy.py
+a329fd580a39c34fcdbcb2b50758ef39ad9364112424567a09c15c732f3f295b  ./src/codex_forge/adapter/policy.py
 40f83434b1a5b56363ddec1753104387ea24cd26aabc35413fd47459d259d50a  ./src/codex_forge/adapter/process.py
 86519bdbd338970326e005830d62531804a1883703fd4b4aee1a1b2350f6ec1c  ./src/codex_forge/agent_telemetry.py
 0dd6a8d93ff6b72771e9ec354af35709ef5aa71799aca7fbb864ab342e2acdf6  ./src/codex_forge/blockers.py
@@ -66,7 +66,7 @@ d52b08026e6d9b52d08f7f9751d6d7335ef68e349199e5a2ba1dbb6b90a92de7  ./src/codex_fo
 6d1289f8446f6392aa323cd572a5860d659dc30f913e29aa3da4644612b06328  ./src/codex_forge/runner.py
 34b255a4973ca4d16a35e59c27129ef1e66c7f3c8af7cd8a6dc61dc6e202a87a  ./src/codex_forge/schema_resources.py
 98b8390ef7882ba1a9c178017b2740edbe94e5cc31f9a283a65df11741562784  ./src/codex_forge/schemas/adapter-final.schema.json
-9812d39aed1a001223039bd37d95f85dbd33cbe3ffce050a2c0f11ea5bc8b061  ./src/codex_forge/schemas/adapter-request.schema.json
+22b464233e280c6bad2a946d8fe95e8b63eef517d26330addbfd1fd92868c60e  ./src/codex_forge/schemas/adapter-request.schema.json
 896ff8a9e1f74a937faf504f314572c7392e0e58b5b0a25a00c3d8ce86760504  ./src/codex_forge/schemas/adapter-result.schema.json
 41de601360d2a3e739d4516cd113884e6b5ab6b4209fa7d255faf8235b1d5af2  ./src/codex_forge/schemas/review-result.schema.json
 9a5290614e81c8e731ec3ca5e970f21d5d889d56c4dfb10050f1aaf84418bf7f  ./src/codex_forge/schemas/task-result.schema.json
@@ -91,7 +91,7 @@ fad8e0e85803580647f5f5d7b601ac4552d45fc9d3b622a2a8af53713b58c4f3  ./tests/strict
 bdc61d62715ad6f214e28a260e7b841e74596fb8b5f8d8b1b1dcd052bf0d3442  ./tests/test_adapter_cli.py
 16feda094b59879b10b9c983bdc76e8929a914d68055a989df4f68fde359fec3  ./tests/test_adapter_contract.py
 fd0b78ab7c49f75b5305f453478e1ad169e61415bcea37ddd70aaacb8b360733  ./tests/test_adapter_engine.py
-31aced0d88518c0b0e132a512a2d63f8bb05165e10027bd799c02bf7bc2f139c  ./tests/test_adapter_policy.py
+5f7872d88a94e0dba44a745c56c09b7461d17b4fe8c5d06429cb9262ddd823e3  ./tests/test_adapter_policy.py
 856450a04c68340704c989ebc33cc32fffee2f1749e3d14ae56847697ec9e784  ./tests/test_adapter_process.py
 fedd40a481aec9e85477418e0ca94feb6465adabf1ec0eb47cf6588ae4783ea2  ./tests/test_admission_base_commit.py
 19a39b19c4ab06ee0429a673b47bec8887c64fc77bdaaddab7a8a38f2fa5795a  ./tests/test_agent_telemetry.py
