@@ -60,7 +60,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from codex_forge.cli import package_root
+from codex_forge.schema_resources import load_schema as load_packaged_schema, schema_file
 from codex_forge.control_plane import _safe_task_error
 from codex_forge.models import CodexRunResult, TaskState
 from codex_forge.orchestrator import (
@@ -99,19 +99,17 @@ from test_review_infrastructure import (
 # Part 1 - the transported output schemas satisfy strict structured-output rules
 # --------------------------------------------------------------------------------------------
 
-# Resolved exactly as the controller resolves them: `Orchestrator(config, package_root())` hands
-# `package_root() / "schemas"` to `CodexRunner`, and `runner.run` joins the phase's schema name
-# onto that root before passing it to `codex exec --output-schema`.
-SCHEMA_ROOT = package_root() / "schemas"
+# Resolve the exact packaged bytes used by both transport and controller decoding.
 TRANSPORTED_SCHEMAS = ("task-result.schema.json", "review-result.schema.json")
 
 REVIEW_REPORT_KEYS = {"verdict", "summary", "acceptance_criteria", "binding_requirements", "findings"}
 
 
 def load_schema(name: str) -> dict:
-    path = SCHEMA_ROOT / name
-    assert path.is_file(), f"transported schema missing: {path}"
-    return json.loads(path.read_text(encoding="utf-8"))
+    with schema_file(name) as path:
+        schema = json.loads(path.read_text(encoding="utf-8"))
+    assert schema == load_packaged_schema(name)
+    return schema
 
 
 def test_every_transported_output_schema_is_structurally_strict():

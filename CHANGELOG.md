@@ -4,6 +4,100 @@ All notable changes to Codex Forge are documented here. This project follows sem
 
 ## [Unreleased]
 
+### Controller review diagnostics
+
+- Retain prospective immutable `controller_review_result` evidence after a review passes schema
+  and command-closure checks. Bind the original review SHA256, model/effective verdicts,
+  itemized acceptance/binding reports and actual controller-enforced findings.
+- Expose bounded, redacted diagnostics through existing evidence commands without changing
+  schema defaults, old result projections, six availability keys, conformance or model budgets.
+  Preserve sealed historical caches without backfilling; conflicting evidence fails closed.
+
+### Prospective prerequisite finalization
+
+- Add public prospective receipt/preflight and a distinct append-only successor to a terminal
+  prerequisite handoff, preserving admission, exhausted attempts, repair history and old evidence.
+- Import only separately reviewed/gated same-base replacements, preserve current worker files except explicit typed selection,
+  run zero implementation/repair calls and at most one durable independent review, then reuse
+  normal validation, commit, integration and gate ownership.
+- Fail closed on candidate/source/history drift and ambiguous paid-review recovery; retain
+  per-call timeouts and cumulative original-task token accounting.
+
+- Optional typed finalization reconciliation binds separately reviewed/gated capability and metadata
+  sources, enforcing exact prospective input hashes, literal-list AST preservation and finite UTF8
+  document spans without another implementation/repair call or any application-specific controller policy.
+
+### Governed prerequisite handoff
+
+- Add public nonmutating `task handoff-prerequisite --dry-run` to expose an exact immutable receipt
+  for a controller-sealed model blocker and a separately completed, reviewed and gated prerequisite.
+- Import only the exact approved, disjoint regular-file delta under an append-only operational
+  journal, with atomic restart-safe replacements and one-use source/receipt authority. Keep the
+  original scope, frozen plan, execution base, attempt/repair limits and time/token accounting.
+- Lock imported bytes, index visibility and final committed blobs/modes through the existing
+  repair, independent review, validation and integration pipeline. Carry usable prior review
+  findings across attempts and retain full, prerequisite-only and worker-only terminal evidence.
+
+### Compact phase-gate checkouts
+
+- Create new detached phase-gate checkouts at `DataRoot/gate-worktrees/gate-<full-gate-UUID>`
+  to reduce Windows Git and .NET build path lengths. Atomically reserve each directory and
+  refuse collisions; keep exact-candidate validation and full workflow/gate evidence identities.
+- Preserve historical checkout directories and logs in place without migrating state or
+  bypassing ownership, validation, or phase acceptance.
+
+### Governed blocker continuation
+
+- Add explicit `task resolve-blocker` for a closed, schema-valid model blocker at the attempt
+  ceiling, consuming an unused existing validation-repair slot without changing admission,
+  counters, signatures, time/token limits or review/integration/phase acceptance requirements.
+- Bind an immutable operator receipt and full current candidate; retain controller seals for
+  future blocked attempts. Legacy evidence-only inputs require explicit prospective attestation,
+  matching retained application/validation provenance and the exact persisted base.
+- Execute under the singleton lock with BLOCKED/REPAIRING operational states, so an older launcher
+  cannot accidentally claim attempt four. Retain original failed evidence and write distinct
+  same-attempt continuation artifacts. Never replay a consumed paid slot after interruption;
+  reuse sealed completion for publication/integration recovery.
+
+### Context efficiency
+
+- Give initial and follow-up reviews the current bounded controller validation evidence, with raw
+  log references. Avoid unnecessary successful-command repetition while retaining independent
+  inspection, exact conformance, and mandatory final validation.
+- Place stable reviewer policy ahead of variable metadata and render each binding requirement once.
+  Clarify that the review candidate includes staged, unstaged, and untracked worktree content.
+- Include both project and task validation commands in worker prompts, matching controller order.
+  Compact advisory-pattern JSON without deleting its content. Keep models, budgets, and public
+  contracts unchanged; document the existing unlimited-token option separately from loop limits.
+
+### Project progression
+
+- Add opt-in `project plan`, `progress`, `resume`, and `extend` commands. Freeze declared phase
+  membership, integrate exact reviewed commits onto a dedicated branch, and run acceptance in
+  isolated detached worktrees before releasing later phases.
+- Serialize planned work within each project while preserving parallelism for unrelated projects.
+  Persist integration intent before compare-and-swap ref updates; recover without repeated model
+  work and verify configured publication before task completion.
+- Retain project-level gate/integration evidence and archive completed plans before extension.
+  Redact command credentials from public progress. Legacy payloads, models, and budgets stay unchanged.
+- Make task retries transactional and refuse active/completed tasks. Refuse repository relocation
+  during acceptance gates and re-prove phase task truth at the gate-result transaction.
+
+### Runtime hardening
+
+- Supervise Codex and validation process trees, including Windows command shims. Contain workers
+  before execution, close descendants on every exit path, and retain partial raw output.
+- Persist immutable execution bases separately from admission provenance and checkpoint verified
+  candidates before publication. Retry failed pushes without repeated model work, publish the exact
+  candidate without force, and require remote confirmation even for clean reused candidates.
+- Reject ambiguous legacy resumption and changed checkpoint identity; remove operational
+  checkpoints with task registry deletion while retaining evidence.
+- Deduplicate binding text across submitted sections while continuing to reject duplicate review
+  reports. Include fresh validation failures in review repairs and terminal diagnoses.
+- Package both output schemas as resources and test a clean wheel through the installed CLI.
+- Validate integer configuration types and bounds; zero-length utility truncation returns empty
+  output. Model defaults, token-budget accounting, and public JSON versions remain unchanged.
+
 ### Added
 
 - Repository-generation admission (contract `1.4`, PR #12). A task submission carries

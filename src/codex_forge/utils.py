@@ -130,6 +130,10 @@ def run_process(
 
 
 def tail_text(text: str, max_chars: int = 12_000) -> str:
+    if max_chars < 0:
+        raise ValueError("max_chars cannot be negative.")
+    if max_chars == 0:
+        return ""
     if len(text) <= max_chars:
         return text
     return "[...truncated...]\n" + text[-max_chars:]

@@ -1057,7 +1057,7 @@ def test_a_clean_reused_branch_already_ahead_of_the_base_keeps_its_candidate(
     assert terminal["changed_files"] == ["candidate.txt"]
 
 
-def test_a_clean_reused_candidate_does_not_create_a_new_auto_push_trigger(
+def test_a_clean_reused_candidate_is_published_and_confirmed_when_auto_push_is_enabled(
     tmp_path: Path, monkeypatch
 ):
     repo, _remote_head, base, _advanced = repository_with_moved_default_branch(tmp_path)
@@ -1086,14 +1086,14 @@ def test_a_clean_reused_candidate_does_not_create_a_new_auto_push_trigger(
     def push_tripwire(where: Path, *arguments: str, **kwargs):
         if arguments and arguments[0] == "push":
             pushes.append(arguments)
-            raise AssertionError("a reused candidate must not create a new push obligation")
         return real_git(where, *arguments, **kwargs)
 
     monkeypatch.setattr(gitops, "_git", push_tripwire)
 
     assert orchestrator._execute_task_body(task) == OUTCOME_COMPLETED
     assert _terminal_document(config, project, task)["commit"] == candidate
-    assert pushes == []
+    assert pushes == [("push", "origin", f"{candidate}:refs/heads/{branch}")]
+    assert git(worktree, "ls-remote", "origin", f"refs/heads/{branch}").split()[0] == candidate
 
 
 def test_a_dirty_reused_candidate_cannot_hide_uncommitted_repairs_from_terminal_evidence(

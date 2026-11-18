@@ -2,6 +2,16 @@
 
 ## Operating assumptions
 
+When a model review says `pass` but the task fails conformance, use the supported
+`task evidence list <task-id> --json` command and select the optional
+`controller_review_result` artifact with `task evidence show <task-id> --artifact-id <id> --json`.
+It reports both model/effective verdicts, itemized acceptance/binding reports and effective
+findings, bound to the raw review SHA256. Existing `review_result` continues to show the original
+model verdict. These diagnostics are prospective: absence on old attempts, sealed historical
+caches or unusable review outputs is expected; no evidence command backfills them. A conflicting
+or unwritable diagnostic fails closed through the existing provenance failure path and does not
+authorize another model call, counter reset or relaxed conformance.
+
 Run Forge only on a dedicated Windows development VPS. The default non-interactive, unrestricted Codex execution policy is inappropriate for a shared workstation or any host with production credentials, live brokerage access, or unrelated private data.
 
 Use one Windows account for bootstrap, Codex authentication, and the `CodexForge` scheduled task. Persistent state must remain outside the Git checkout.
@@ -60,6 +70,31 @@ The restart script targets only a command line verified as the Forge daemon, ter
 ```
 
 Investigate repeated failures before retrying. A manual retry cannot exceed the task's configured maximum attempts.
+
+## Runtime hardening and pending publication
+
+Update while the daemon is stopped, back up the data root, and restart after validation. SQLite
+creates the internal checkpoint table automatically; concurrent initialization is supported. The
+CLI JSON contracts and their default version remain unchanged. Checkpoints belong to the controller,
+so operators and clients must not edit them directly.
+
+A failed push retains its reviewed candidate and initial execution base. The next allowed attempt
+re-proves the candidate and retries publication without paying for another model phase. Keep the
+recorded worktree clean and the task specification unchanged. Publication is confirmed against the
+exact remote task-branch tip; no force push is used.
+
+`CANDIDATE_STATE_UNAVAILABLE` on an older interrupted implicit-base task means that its original
+execution base cannot be proven. Do not manufacture a checkpoint from current HEAD. Inspect the
+retained branch and evidence, determine the intended base, and submit a new task with that exact
+`--base-commit` under a new task id. Retain the original task evidence.
+
+`PROCESS_SUPERVISION_FAILED` means containment or process closure could not be proven. The task
+fails without an automatic retry. Inspect host process state and raw logs before resolving the host
+problem and retrying. Timeout evidence retains output produced before termination.
+
+Configuration loading rejects zero/negative worker counts, polling intervals, and summary lengths,
+as well as boolean, string, or fractional integer settings. `max_task_tokens = 0` still disables the
+token ceiling; `max_repair_cycles = 0` still disables repairs.
 
 ## Back up and restore
 
@@ -145,6 +180,97 @@ read-only, take no locks, and cannot block the controller from writing evidence.
 Do not grant an integration file-system access to the data root as a workaround for a missing
 artifact class; add the class to the contract instead.
 
+## Run a declared project in phases
+
+Register the project and submit its bounded tasks before installing a plan. Tasks must be unstarted,
+belong to this project, and omit `--base-commit`. List dependencies before their dependents.
+Use the exact initial commit returned by `git rev-parse HEAD`, not a branch name.
+
+```json
+{
+  "branch": "forge-project/pilot",
+  "base_commit": "FULL_CANONICAL_COMMIT_ID",
+  "phases": [
+    {
+      "name": "P1 vertical slice",
+      "tasks": ["TASK-engine", "TASK-client"],
+      "acceptance_commands": ["python -m pytest", "dotnet build"]
+    },
+    {
+      "name": "P2 next increment",
+      "tasks": ["TASK-next"],
+      "acceptance_commands": ["python -m pytest"]
+    }
+  ]
+}
+```
+
+Acceptance commands are project-specific, non-interactive checks. Configure real commands for the
+available toolchain. Missing tools fail the gate; Forge never substitutes a passing stub.
+
+```powershell
+forge project plan my-project --file plan.json --json
+forge project progress my-project --json
+forge run --daemon
+```
+
+The controller runs declared tasks sequentially within this project, integrates exact reviewed
+commits, and advances phases only after acceptance. It keeps the source checkout unchanged.
+Other projects retain parallel execution. Unlisted tasks remain queued, including after plan
+completion. Plan registration and resume require the controller singleton lock; stop the daemon
+before changing those operational settings.
+
+A failed task stops the project plan. Resolve its cause, use `forge task retry <id>` when attempts
+remain, and use `forge project resume my-project` to enable progression again. Retry accepts only
+FAILED, BLOCKED, and NEEDS_DECISION tasks; it never reopens completed or active work.
+A failed gate also needs explicit resume. Resume rechecks the existing declaration and branch;
+it does not bypass failed checks or change budgets. If a gate exposes a code defect after task
+completion, stop and revise the declared work through a separate reviewed development change;
+this version does not insert automatic gate-repair tasks or rewrite completed evidence.
+
+Raw project diagnostics remain under `DataRoot/project-evidence/<workflow-id>`. Gate checkouts
+are created under `DataRoot/gate-worktrees/gate-<gate-id>` using the full 32-hex gate UUID, without
+an extra workflow directory. The compact layout reduces Windows Git/.NET path-length failures;
+keep DataRoot itself short enough for the project's generated build paths. Existing checkout
+destinations are refused rather than reused, even when empty. Historical directories using
+`gate-worktrees/<workflow-id>/<gate-id>` and all prior logs are retained without migration.
+Full workflow/gate identities and project-evidence paths remain unchanged. Checkouts are retained for operator inspection;
+external consumers use `project progress`, which excludes logs and redacts credential values.
+Do not check out or move the integration branch manually. Relocation is refused during a gate.
+An idle relocation must preserve all recorded commits and the exact integration ref.
+
+After a pilot finishes, submit the next bounded tasks and create `next-plan.json` with the same
+branch, the completed `head_commit`, and only new phases/tasks. Run:
+
+```powershell
+forge project extend my-project --file next-plan.json --json
+```
+
+Extension archives the completed plan and starts a new immutable generation from its proven tip.
+Choose task budgets before running; neither extension nor phase advancement raises them.
+
+## Context efficiency and flexible task budgets
+
+Forge keeps stable reviewer policy before variable task data, reports each exact binding once, and
+passes fresh controller validation evidence to review. Reviewers still investigate stale or
+insufficient evidence and concrete risks. Complete task contracts, raw logs, semantic review,
+and final controller validation are retained. Models are not downgraded merely to fit a token count.
+
+`limits.max_output_chars` bounds captured review output, capped at 6,000 characters across all
+command summaries. Commands, result metadata, and specification text remain complete. Truncated
+summaries name their raw log files. This is a context bound, not an execution budget.
+
+For work whose token needs are not predictable, `limits.max_task_tokens = 0` disables the task
+token ceiling. Attempt, repair, identical-failure, and timeout limits still apply. A positive token
+ceiling is checked at phase boundaries and can be exceeded by one in-flight phase; it is not an
+instantaneous provider quota. Choose that policy explicitly in the run configuration. Defaults and
+public usage accounting remain unchanged.
+
+See [OpenAI prompt caching guidance](https://developers.openai.com/api/docs/guides/prompt-caching)
+for stable-prefix layout. Forge does not inject undocumented CLI cache controls. Cache availability
+and actual savings depend on the provider, model, timing, and request contents; measure new tokens,
+cached input, commands, and successful completion together.
+
 ## Optional local tracing
 
 Telemetry is off by default and emits nothing until `[telemetry] enabled = true` is set in
@@ -176,3 +302,74 @@ Forge's controller validation preserves raw stdout/stderr regardless, so the lim
 ## Release limitation
 
 Controlled service restarts and in-progress task recovery have been validated. A full Windows OS reboot recovery test remains outstanding. Perform it only in a maintenance window with state and evidence backed up, then verify scheduled-task start, singleton behavior, queue progress, task worktree consistency, and raw evidence retention.
+
+
+## Shared prerequisites for an exhausted model blocker
+
+Use `task handoff-prerequisite` when a schema-valid, controller-sealed blocker needs a separately
+scoped shared change. Keep the original task contract, frozen workflow and comparison base intact.
+Admit the prerequisite to a separate registered repository/project at that exact base and let Forge
+complete implementation, independent review and final validation. Gate that candidate with the
+same exact commands in a source-project workflow. If the source task ran standalone, a separately
+admitted evidence-only task can establish the gate workflow at its candidate; its additional files
+must remain under `docs/evidence/` and leave application inputs unchanged.
+
+Wait for both source completion and its PASSED gate, then run public `task handoff-prerequisite
+--dry-run` with exact source-task/registration/candidate/workflow/gate pins. See the full command and
+receipt contract in [CONTROL-PLANE-API.md](CONTROL-PLANE-API.md#hand-off-an-independently-gated-prerequisite).
+Inspect the complete approved path list. Save the returned `receipt_json` as exact UTF-8 bytes in a
+new immutable operator file and use the returned SHA-256 for execution. No private DB, candidate seal
+file or raw event access is needed. Preflight neither reserves a repair nor changes task state.
+
+The execution command holds the existing singleton lock through import, the unused same-attempt
+repair, review, validation, integration and actual original-project phase gate. It preserves all
+budgets and never exposes attempt four to another launcher. Retry the identical reason/receipt
+only to resume an unstarted import/slot or finish a sealed completion; a consumed interrupted slot
+cannot be replayed. Never copy source files into the failed checkout manually, change its base,
+reset counters, move refs or edit original evidence. Conflicts, source drift, changed receipts or
+locked-file changes need a new governed decision; the command refuses them. Inspect public task
+state, the handoff command response's `data.prerequisite_handoff` attribution (repeat the identical
+terminal command to inspect it without execution), and all three patch artifacts, then project progress for the
+actual postintegration gate. A successful source gate is a prerequisite, not a replacement for it.
+
+## Terminal prerequisite finalization
+
+Do not replay a terminal failed handoff, reset exhausted attempts, unlock imports manually or
+modify a private checkpoint. After the separately scoped replacement source is independently
+COMPLETED and its exact same-base phase gate PASSES, use public `task finalize-prerequisite`
+preflight. Supply an explicit attestation that the current worker files are prospective inputs,
+not a reconstructed historical seal. Inspect the finite replacement and unchanged worker-file
+hashes; save the exact receipt bytes and SHA in a new operator evidence directory.
+
+Execute explicitly with the pinned receipt through a verified runtime under the shared controller
+lock. Preserve healthy launchers/runtimes. No implementation/repair follows; original checks and
+one new independent review determine completion. On failure retain evidence and stop. A paid
+review with ambiguous outcome must not be relaunched. A resumed unstarted import or proven cached
+review/completion uses the identical receipt; no counter/budget/default/plan changes are allowed.
+Verify public finalization attribution, original admission/attempt/base and evidence identities,
+full committed patches, normal integration lineage and actual postintegration gate separately.
+
+
+If current prospective product metadata becomes stale after the capability transition, do not edit
+an exhausted task in place or pretend earlier bytes are sealed. Admit a separately budgeted typed
+reconciliation source at the same original base, retaining the capability tree and current worker
+inputs except explicit approved metadata spans. Require its own independent review and exact gate.
+Pass its committed selection manifest and the capability's six exact pins to finalization preflight;
+retain the canonical receipt bytes and verify both source identities before the sole original-task
+review. Historical tests/evidence remain unchanged. A refusal spends no review; a started uncertain
+review cannot be replayed. Inspect the new operation's public attribution and classified patches;
+legacy task-result projections intentionally do not expose new internal fields.
+
+
+Finalization ignore exemptions use committed versioned ignore policy only. Unknown generated
+ignore files are permitted solely below entire ancestors ignored by that policy, proved in an
+isolated case-sensitive Git context with ambient Git config/environment removed. Self-hiding root/nested/staged ignores and mutable local/global exclusions
+cannot hide candidate inputs. Effective external clean filters are refused before the sole review.
+Worker and imported files require raw working-byte identity with staged/committed blobs; unchanged
+baseline files retain both their exact prospective checkout bytes and original committed blob/mode.
+The existing builtin CRLF/LF checkout representation of an unchanged baseline is preserved, never
+used as authority to rewrite worker input. The final complete staged/committed tree is re-proved;
+Git conversion introduced during validation/review cannot produce a completed unreviewed candidate.
+
+The target, old parent source, capability source, reconciliation source and each retained gate
+are guarded before existing conversion-capable source proof commands.

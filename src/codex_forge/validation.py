@@ -8,7 +8,8 @@ import time
 from pathlib import Path
 
 from .models import ValidationResult
-from .utils import ensure_dir, run_process, tail_text
+from .processes import ProcessSupervisionError, run_supervised as run_process
+from .utils import ensure_dir, tail_text
 
 
 def _powershell_wrapper(command: str) -> str:
@@ -79,29 +80,28 @@ def run_validations(
     validation_env = _validation_environment()
     for index, command in enumerate(commands, start=1):
         started = time.monotonic()
-        try:
-            process = run_process(
-                _shell_command(command),
-                cwd=cwd,
-                timeout=timeout_seconds,
-                env=validation_env,
-            )
-            exit_code = process.returncode
-            stdout = process.stdout
-            stderr = process.stderr
-        except subprocess.TimeoutExpired as exc:
-            exit_code = 124
-            stdout = ""
-            stderr = str(exc)
-        except Exception as exc:  # Controller must preserve evidence, not crash silently.
-            exit_code = 125
-            stdout = ""
-            stderr = repr(exc)
-        duration = time.monotonic() - started
         stdout_path = artifact_dir / f"validation-{index:02d}.stdout.log"
         stderr_path = artifact_dir / f"validation-{index:02d}.stderr.log"
-        stdout_path.write_text(stdout, encoding="utf-8")
-        stderr_path.write_text(stderr, encoding="utf-8")
+        try:
+            with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
+                process = run_process(
+                    _shell_command(command), cwd=cwd, timeout=timeout_seconds,
+                    env=validation_env, stdout=out, stderr=err,
+                )
+            exit_code = process.returncode
+        except subprocess.TimeoutExpired as exc:
+            exit_code = 124
+            with stderr_path.open("a", encoding="utf-8") as err:
+                err.write("\n" + str(exc))
+        except ProcessSupervisionError:
+            raise
+        except Exception as exc:  # Controller must preserve evidence, not crash silently.
+            exit_code = 125
+            with stderr_path.open("a", encoding="utf-8") as err:
+                err.write("\n" + repr(exc))
+        duration = time.monotonic() - started
+        stdout = stdout_path.read_text(encoding="utf-8", errors="replace")
+        stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
         combined = "\n".join(part for part in (stdout, stderr) if part)
         results.append(
             ValidationResult(

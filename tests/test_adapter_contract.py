@@ -268,7 +268,9 @@ def test_adapter_contract_has_no_legacy_controller_dependencies():
 
 
 def _schema(name: str) -> dict:
-    return json.loads((Path(__file__).resolve().parents[1] / "schemas" / name).read_text(encoding="utf-8"))
+    from importlib.resources import files
+
+    return json.loads(files("codex_forge").joinpath("schemas", name).read_text(encoding="utf-8"))
 
 
 def test_published_final_schema_is_exact_native_output_contract():

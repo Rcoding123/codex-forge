@@ -876,3 +876,14 @@ def commit_task(worktree: Path, task: Task) -> str | None:
     if result.returncode != 0:
         raise GitError(result.stderr or result.stdout)
     return _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+
+def push_candidate(worktree: Path, branch: str, candidate: str) -> None:
+    """Publish without force and confirm the exact reviewed tip on the remote."""
+    # The checked object, never a mutable local ref, is the publication authority.
+    _git(worktree, "push", "origin", f"{candidate}:refs/heads/{branch}", timeout=1200)
+    ref = f"refs/heads/{branch}"
+    remote = _git(worktree, "ls-remote", "--exit-code", "origin", ref, timeout=300)
+    records = [line.split() for line in remote.stdout.splitlines() if line.strip()]
+    if records != [[candidate, ref]]:
+        raise GitError("Remote task branch did not confirm the reviewed candidate.")

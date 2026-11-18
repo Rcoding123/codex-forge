@@ -57,6 +57,9 @@ class Task:
     max_attempts: int = 3
     branch: str | None = None
     worktree_path: Path | None = None
+    # Model-facing execution authority, restored from the controller's internal checkpoint.
+    # Never serialized as admission provenance or persisted in the task row.
+    execution_base_commit: str | None = None
     # The exact commit this task's execution lineage was admitted from, or None for a task
     # admitted without one. Immutable once persisted: it is provenance, not a setting, and a
     # task that has it is branched from it on every attempt.
@@ -67,6 +70,11 @@ class Task:
     result: dict[str, Any] = field(default_factory=dict)
     created_at: str | None = None
     updated_at: str | None = None
+
+    @property
+    def binding_requirements(self) -> list[str]:
+        """Ordered exact-text union; the submitted sections remain unchanged."""
+        return list(dict.fromkeys((*self.architecture_decisions, *self.constraints)))
 
 
 @dataclass(slots=True)

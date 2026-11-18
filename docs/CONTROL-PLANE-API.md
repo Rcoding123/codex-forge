@@ -6,9 +6,147 @@ reading `forge.db`, depending on SQLite table details, or parsing Forge's human-
 output.
 
 This contract covers inspection, task submission, and deletion of non-running tasks and empty
-projects. It does not provide retry, cancellation,
+projects. The inspection/submission commands do not provide retry, cancellation,
 reconciliation, merge, push, daemon control, HTTP, or named-pipe operations, and it never starts
-task execution — a submitted task waits for the existing controller loop.
+task execution — a submitted task waits for the existing controller loop. The explicit operator
+`task resolve-blocker` command below is a separate, opt-in execution operation.
+
+## Resolve an exhausted model blocker
+
+```powershell
+forge --config forge.toml task resolve-blocker TASK-ID --reason "Verified execution prerequisite supplied" --receipt C:/operator/receipt.json --receipt-sha256 HEX --json
+```
+
+This command reserves and executes the unused first validation-repair slot of the latest exhausted
+failed attempt. It requires exactly one completed, exit-zero original implementation run and a
+schema-valid `blocked` final, owned worktree/branch/base/generation, no other current-attempt phase
+evidence, no active controller/tasks, and at least one existing configured repair slot. Generic
+failures, below-ceiling tasks, completed work, stale proofs and consumed slots are refused.
+Use ordinary `task retry` when attempts remain; this command never expands that ceiling.
+
+The operator supplies a plain, bounded JSON receipt and its SHA-256. Required receipt members are
+`task_id`, `attempt`, `candidate_base`, `candidate_snapshot_sha256`, and
+`implementation_sha256`. Snapshot identity covers HEAD, branch, index, tracked/nonignored-untracked
+file bytes and missing tracked files; a complete-scan file/stat/namespace recheck refuses changing
+inputs. `codex_forge.blockers.candidate_snapshot` is the read-only canonical digest helper.
+Future controller-sealed failed snapshots must match that candidate exactly.
+
+Legacy attempts without a controller seal require a nonempty `legacy_attestation` explicitly
+describing the current prospective repair input, not claiming reconstruction of all historical
+failed bytes. Their `legacy_proof` must contain:
+
+- `allowed_change_root`: an admitted `docs/evidence/` scope root; all changes must be confined there.
+- `application_inputs`: a nonempty relative-path/SHA-256 map matching retained inputs/current bytes.
+- `historical_input_manifest`: absolute `path` and `sha256` of the retained list of `{path,sha256}`.
+- `historical_validation_record`: absolute `path` and `sha256` of the retained candidate record.
+
+Both retained files must be inside that evidence scope. The record must bind `stage=candidate`,
+`comparison_base`, `head`, `branch`, `integration_ref_at_start`, `source_manifest_sha256`, and a
+`results` list of every exact admitted validation command in order, with integer `exit_code=0`,
+`status=passed` and a present plain `log` file. HEAD must still equal the persisted execution base;
+no prior committed/validated candidate is inferred. Subsequent repair, independent review and
+controller validation assess the prospective input; the attestation is not semantic approval.
+
+Resolution and execution hold the singleton lock together. The durable reservation uses BLOCKED
+and then REPAIRING, never an exhausted READY row that older controller code could claim. The
+reserved repair consumes validation slot one; at most the remaining configured validation slots
+and ordinary review slots may run. Reservation leaves task attempts, max attempts, admission, frozen signatures and identical-failure
+counters intact; subsequent failures use ordinary fingerprint accounting. Token basis/ceiling and
+per-phase timeouts are unchanged.
+Raw resolution/receipt metadata stays private; new standard artifacts use distinct
+`attempt-NN-c-<8hex>` roots and remain available through existing evidence commands.
+
+An identical invocation is idempotent. Restart before the reserved paid run starts permits explicit
+reclaim of the same reservation. A started slot cannot replay after interruption. Sealed terminal
+completion may resume publication/integration without another model call. The original failed
+evidence is retained, and the actual postintegration phase gate still runs before the next phase.
+
+The command uses the existing default schema version and normal JSON envelope. Successful operation
+returns exit 0 and `success=true`, even if its bounded execution ends FAILED; inspect `data.task_state`.
+Data contains `task_id`, `attempt`, `continuation_id`, `repair_slot`, `state`, and `task_state`.
+Refusal returns sanitized `INVALID_ARGUMENT` with exit 2. No new submission fields are introduced.
+
+## Hand off an independently gated prerequisite
+
+`task handoff-prerequisite` is a separate opt-in operator execution operation. It has the same
+attempt ceiling, unused validation-repair slot one, singleton lock, ordinary validation,
+independent review, final validation, integration and postintegration gate as `resolve-blocker`.
+It changes no admitted task fields, original execution base, frozen plan, repair allowance,
+timeout, token accounting or failure counters. It never moves the blocked task's HEAD/ref or
+integration branch to the prerequisite. It requires a controller-sealed original failed candidate;
+the legacy prospective-attestation exception is not available for imports.
+
+First request a nonmutating preflight while the controller is idle:
+
+```powershell
+forge --config forge.toml task handoff-prerequisite TASK-ID --reason "Reviewed shared prerequisite" --dry-run --source-task SOURCE-ID --source-registration repo-reg-HEX --source-candidate FULL-COMMIT --workflow-id workflow-HEX --gate-id HEX --gate-candidate FULL-COMMIT --json
+```
+
+Preflight acquires the singleton lock for consistent inspection, but does not initialize/migrate
+state, reserve a slot, import files, create a task/evidence artifact, or launch a model. The existing
+configuration/database must already exist. Successful `data` contains `dry_run=true`, `receipt`,
+`receipt_json` (the exact UTF-8 text without BOM or added newline), and `receipt_sha256`. The receipt
+exposes the original sealed snapshot/base/output hashes and the source registration, specification
+digest, task fingerprint, exact candidate, workflow/gate identities and exact approved path list.
+The operator can inspect these through the public command without reading private controller
+records. Save `receipt_json` unchanged to a new immutable plain file, then execute:
+
+```powershell
+forge --config forge.toml task handoff-prerequisite TASK-ID --reason "Reviewed shared prerequisite" --receipt C:/operator/prerequisite.json --receipt-sha256 HEX --json
+```
+
+The receipt has the ordinary blocker fields plus a `prerequisite` object with exactly:
+`source_project_id`, `source_registration`, `source_task_id`, `source_candidate`,
+`source_specification_digest`, `source_task_fingerprint`, `workflow_id`, `gate_id`, `gate_candidate`,
+and `allowed_paths` (sorted, unique and equal to the complete source base-to-candidate changed set).
+Execution repeats every proof; preflight is inspection, not a reservation or permission to accept
+later drift. The reason and exact receipt bytes are retained privately with the continuation.
+
+The source must be a separately registered project with a COMPLETED task based on the exact
+original execution base, a matching completion/specification checkpoint, independent passing
+review, exact passing final validation, and a clean owned retained task checkout. Its registered
+repository must also be clean. The same source registration must have a COMPLETED workflow with
+a PASSED gate at the pinned gate candidate, exact source validation commands, matching retained
+gate result, unchanged integration ref and a clean detached gate checkout. The gate may be on the
+source candidate itself, or on a descendant whose entire additional delta is regular files under
+`docs/evidence/`. This permits a later separately admitted evidence-only gate task. No application
+or configuration change between source candidate and gated candidate is accepted. Live gate tasks,
+checkpoints and frozen specifications must still agree with their integration records.
+
+Imports are limited to at most 256 changed paths, 4 MiB per new file and 16 MiB total new bytes.
+Supported roots are `engine/src/`, `engine/tests/`, `engine/scripts/`, `client/`, `contracts/`,
+`content/`, `docs/evidence/`, plus `docs/ARCHITECTURE.md`. All changed entries must be regular Git
+mode `100644` blobs or deletions. Authority filenames `AGENTS.md`, `CLAUDE.md`, `SPEC.md` and
+`SKILL.md`, Git control paths, unsafe Windows components, case aliases, links/reparse points,
+submodules, executable modes, parent/file collisions, and any overlap with the failed worker's
+changed paths are refused. The exact receipt path list is the operator-approved import authority;
+it does not enlarge the original worker's scope. Each source candidate authority and receipt may
+be reserved once; deletion does not erase that use history.
+
+An immutable reservation precedes import. A new intent records the full original candidate and
+old/new path hashes; per-file replacements use reserved temporary files, fsync and atomic rename.
+Restart reconciles only original/new bytes and bounded prefixes in those reserved temporary files.
+An append-only imported checkpoint seals the composite before the existing paid repair slot starts.
+Any unexplained file/index/HEAD/branch/provenance drift fails closed. No exhausted READY row is
+exposed. An identical invocation resumes an unstarted import/repair; a started paid slot cannot
+replay, and a sealed completion can finish publication/integration using the ordinary recovery path.
+
+Imported file bytes, index visibility, modes and final committed blob/deletion identities are
+controller-owned and checked around model calls, validation and completion. The original worker
+must report blocked if a locked prerequisite needs repair. Every implementation/review prompt
+retains the exact original contract and identifies the separate source delta and locked paths.
+The most recent usable, command-closed and conformance-enforced independent verdict is carried
+across earlier attempts; a later blocked implementation or unusable raw pass does not clear its
+unresolved findings. The handoff command response adds an explicit `data.prerequisite_handoff` projection on completed
+execution, also returned by an identical terminal invocation. It contains locked paths, source/gate
+identities, receipt/snapshot/delta hashes and worker-only changed paths; it is null when no terminal
+completion exists. Existing versioned final-result evidence sanitization remains unchanged. Public `prerequisite.patch` and
+`worker-changes.patch` supplement the unchanged full original-base-to-final `changes.patch`.
+Original failed evidence is never rewritten.
+
+Output uses the existing default schema/version and envelope. As for `resolve-blocker`, accepted
+execution returns exit 0 and `success=true`; inspect `data.task_state` for the bounded task outcome.
+Refusal is sanitized `INVALID_ARGUMENT`, exit 2. No submission or frozen-plan schema is extended.
 
 ## Supported commands
 
@@ -95,6 +233,69 @@ A response always declares the version it was asked for, and its payload always 
 a `1.0` response never carries `1.1` fields. An unsupported version is refused with
 `UNSUPPORTED_SCHEMA` and exit code `2` before the command runs; it is never silently downgraded to
 the default.
+
+## Project plans and progress
+
+New project commands use the existing envelope and support all declared versions. They do not add
+fields to existing project/task payloads or change the default `1.0` version.
+
+```text
+forge project plan <project> --file <definition.json> --json
+forge project progress <project> --json
+forge project resume <project> --json
+forge project extend <project> --file <definition.json> --json
+```
+
+The command names are `project.plan`, `project.progress`, `project.resume`, and `project.extend`.
+Each returns `data: {"project_id": "...", "plan": {...}}`. Progress returns `plan: null` for an
+existing project without a plan. Unknown projects return `PROJECT_NOT_FOUND` (exit 2). Invalid plan
+definitions, missing files, and invalid resume/extension requests return `INVALID_ARGUMENT` (exit 2)
+without exposing raw Git errors or filesystem paths. A busy controller prevents plan mutations;
+the existing `COMMAND_FAILED` envelope reports that operational failure.
+
+A definition contains exactly `branch` (a new `forge-project/<lowercase-name>` ref), `base_commit`
+(full canonical commit ID), and a nonempty `phases` list. Each phase contains exactly `name`, `tasks`,
+and `acceptance_commands`. Names are unique, nonempty, at most 100 characters. Task IDs and command
+lists must contain nonempty strings; every task occupies one position. All tasks must already exist
+in this project, remain unstarted READY/BACKLOG tasks, and have no explicit admission base. Declared
+dependencies must precede their dependent or refer to existing external work. Empty gates are refused.
+The project must commit automatically and have no active task during registration.
+
+The public plan has:
+
+| Field | Meaning |
+|---|---|
+| `id` | Opaque plan generation, owned by Forge. |
+| `previous_workflow_id` | Completed predecessor generation on extension; otherwise null. |
+| `branch` | Dedicated integration branch. |
+| `base_commit`, `head_commit` | Exact initial and most recently recorded integrated commit IDs. |
+| `state` | RUNNING, GATING, BLOCKED, or COMPLETED. |
+| `phase_index`, `task_index` | Zero-based execution cursor; phase index equals phase count at completion. |
+| `last_error` | Empty or controller-owned PROJECT_TASK_BLOCKED, PROJECT_ACCEPTANCE_FAILED, PROJECT_PLAN_CHECK_FAILED. |
+| `phases` | Frozen names, ordered task IDs, and acceptance commands with credential values redacted. |
+| `integrations` | Sealed task ID, base commit, and candidate commit records. |
+| `gates` | Gate ID, phase name, checked commit, and RUNNING/PASSED/FAILED/INTERRUPTED status. |
+
+Progress excludes raw output, paths, prompts, and private specification digests. Project-level raw
+evidence is retained for local operator inspection and has no `task.evidence` artifact class.
+
+Tasks remain isolated and use the durable integrated tip as execution authority. A task becomes
+COMPLETED only after its exact reviewed candidate is integrated and configured publication is
+confirmed. One planned task per project can be claimed; unlisted tasks remain queued. Phase
+acceptance runs against the exact integrated commit in another isolated checkout. Failed or
+interrupted acceptance cannot release later work. Resume enables a blocked plan to recheck its
+existing authority; it does not bypass acceptance or increase attempt/token limits.
+
+An extension requires a COMPLETED plan and the same dedicated branch at exactly its recorded
+head. It freezes new unstarted tasks/phases in a new generation and retains the previous plan,
+results, and logs. Existing phase membership cannot change. A failed plan cannot be replaced through
+extension. Task deletion remains supported; deleting required work before its completed integration
+is sealed blocks progression, while sealed integration history survives deletion.
+
+Relocation during GATING is refused with `PROJECT_ACTIVE` (exit 2). Idle relocation preserves the
+generation and must supply the recorded integration history/ref. Task retry is transactional and
+accepts only FAILED, BLOCKED, or NEEDS_DECISION tasks with attempts remaining; active, completed,
+or already queued tasks are refused.
 
 ## Output streams and exit codes
 
@@ -1001,8 +1202,27 @@ extensions. An artifact Forge does not positively recognize is excluded.
 | `patch` | `attempt-NN/changes.patch` | `text/x-diff` | no |
 | `implementation_result` | `attempt-NN/implementation/implementation.final.json` | `application/json` | yes |
 | `review_result` | `attempt-NN/review[-N]/review[-N].final.json` | `application/json` | yes |
+| `controller_review_result` | `attempt-NN/review[-N]/controller-review.json` (also governed operation review groups) | `application/json` | yes |
 | `repair_summary` | `attempt-NN/{validation,review}-repair-N/*.final.json` | `application/json` | yes |
 | `validation_log` | `attempt-NN/<group>/validation-NN.{stdout,stderr}.log` | `text/plain` | no |
+
+`controller_review_result` is an optional additive artifact kind within every supported contract
+version. It records the actual trusted effective controller decision prospectively; it is absent
+for historical reviews and invalid or command-unclosed outputs. Its own `format_version` is `"1"`
+and its structured allowlist is `format_version`, `source_review_sha256`, `model_verdict`,
+`effective_verdict`, `acceptance_criteria` (`criterion`, `met`, `evidence`), `binding_requirements`
+(`text`, `met`, `evidence`), and effective `findings` (`severity`, `file`, `line`, `issue`,
+`required_fix`). Report/finding arrays are capped at 500 items in the public projection; existing
+artifact byte limits and free-text/path/secret redaction also apply. `formatted_text` names both
+verdicts and itemized reports/findings. The source hash binds the original raw review file, whose
+bytes and original `review_result` projection are unchanged. Model `pass` can coexist with
+effective `changes_required` when conformance adds findings.
+
+The six existing `availability` keys and existing `review_result`/`final_result` projections are
+unchanged, as are the default schema version and acceptance rules. Find this optional diagnostic
+by `artifacts[].artifact_kind`; consumers must tolerate unknown additive kinds. Listing/showing
+evidence never creates or recomputes a diagnostic. Deleted task registry state retains these
+artifacts under the same evidence-retention rules as other public evidence.
 
 Excluded from the public contract:
 
@@ -1370,3 +1590,79 @@ members within schema `1.0`. Consumers must treat an unrecognized `artifact_kind
 `structured_status`, or `content.representation` as unknown rather than as an error, and must not
 depend on `display_name` remaining stable across controller versions — `artifact_id` is the stable
 handle within a task.
+
+## Finalize a superseding prerequisite
+
+`task finalize-prerequisite TASK --reason TEXT --attestation TEXT --parent-continuation ID
+--source-task SOURCE --source-registration REG --source-candidate COMMIT --workflow-id WORKFLOW
+--gate-id GATE --gate-candidate COMMIT --dry-run --json` is a nonmutating prospective preflight.
+It returns exact `receipt_json` and `receipt_sha256`; retain those UTF8 bytes without a BOM or
+added newline. Execute with `task finalize-prerequisite TASK --reason TEXT --receipt PATH
+--receipt-sha256 SHA --json`. Source pins and the prospective attestation are in the receipt.
+
+Eligibility is an exhausted FAILED task whose exact parent handoff is TERMINAL, latest closed
+review repair is schema-valid blocked, unresolved independent review is trusted, original owned
+base/candidate/admission remain provable, and the new separately registered source is independently
+COMPLETED/reviewed/exactly gated at that base. The receipt binds current prospective HEAD/index/
+working bytes, worker paths/hashes, old/new source, finite approved replacement, original evidence
+and limits. This is expressly not a reconstructed historical candidate seal. Original worker paths remain unchanged and disjoint from imports unless the optional typed
+selection authority below explicitly binds a separately budgeted, reviewed/gated reconciliation. Historical evidence/authority, aliases, links,
+unsafe modes, hidden index/global/local exclude tricks and unrelated paths fail closed.
+
+One successor per parent/task is permitted. Execution performs original validation, at most one
+fresh independent review, final validation and normal completion/integration, with zero model
+implementation/repair calls. Any failure ends without repair. Started review is consumed before
+launch; an ambiguous outcome never replays. Only exact controller-certified cached review or
+completion can resume. Idempotent terminal invocation returns the recorded outcome.
+
+The new command reports finalization/parent identity, original attempt/base, prospective
+attestation/hashes, previous/new source and gate pins, prospective worker paths/hashes and explicitly selected metadata, outcome,
+review consumption and final attribution when completed. Full base/prerequisite/worker patches
+use existing disclosure classes. Default schema versions and legacy final-result projection are
+unchanged. Accepted execution is exit0/success=true; inspect task_state/state. Refusal is sanitized
+INVALID_ARGUMENT/exit2. Token usage remains cumulative on the original task; timeouts remain per
+model call/per validation command and no aggregate remaining-time allowance is invented.
+
+
+An optional `--selection-manifest REPOSITORY_PATH` selects narrowly reconciled metadata from the
+pinned source C. Supply all six independently completed/gated capability W pins as
+`--capability-source-task`, `--capability-source-registration`, `--capability-source-candidate`,
+`--capability-workflow-id`, `--capability-gate-id`, and `--capability-gate-candidate`. C and W must
+both have the original base. C preserves every W blob and every current prospective worker input,
+except one or two explicitly selected metadata files, and may add only its own new manifest evidence
+directory. Existing historical evidence/tests are never selected. The C admission, review and gate
+consume its own separately attributed budget; they do not create an original-task repair allowance.
+
+The committed UTF8 manifest has exactly `version: "1"`, `capability_candidate`,
+`prospective_worker_inputs` (all current worker paths to SHA256), and `selections`.
+Each selection has `kind`, `path`, `before_sha256`, and `after_sha256`. A
+`python_literal_list_removal` additionally has `call` (plain dotted name), `keyword`,
+`removed_literal`, `old_span`, `new_span` (empty). It removes one exact literal element from one
+uniquely selected all-string list, with full AST equality outside that removal and raw byte equality
+outside the declared span. `utf8_text_replacements` has one to eight `replacements`, each exactly
+`old`/`new`; original spans are unique, nonoverlapping, bounded and limited to plain Markdown/text
+product documents. Arbitrary patches, executable changes, authority/test/history selection, extra
+keys, mismatched before/after hashes or undeclared source changes are refused. Selectors and paths
+are repository data, never product-specific controller code.
+
+The public new-command output binds `selection` (manifest hash/policy/W proof) and `capability`
+(W proof), alongside `prerequisite` (C proof). Prospective before hashes explicitly describe current
+input, never a reconstructed historical seal. `reconciliation.patch` attributes the typed before/after
+metadata changes through the existing patch disclosure class. `prerequisite.patch` attributes W;
+`worker-changes.patch` includes final original-task files, including selected metadata. Full
+`changes.patch` still describes the complete original-base candidate. No legacy final-result fields
+or default schema versions change.
+
+
+Finalization ignore exemptions use committed versioned ignore policy only. Unknown generated
+ignore files are permitted solely below entire ancestors ignored by that policy, proved in an
+isolated case-sensitive Git context with ambient Git config/environment removed. Self-hiding root/nested/staged ignores and mutable local/global exclusions
+cannot hide candidate inputs. Effective external clean filters are refused before the sole review.
+Worker and imported files require raw working-byte identity with staged/committed blobs; unchanged
+baseline files retain both their exact prospective checkout bytes and original committed blob/mode.
+The existing builtin CRLF/LF checkout representation of an unchanged baseline is preserved, never
+used as authority to rewrite worker input. The final complete staged/committed tree is re-proved;
+Git conversion introduced during validation/review cannot produce a completed unreviewed candidate.
+
+The target, old parent source, capability source, reconciliation source and each retained gate
+are guarded before existing conversion-capable source proof commands.

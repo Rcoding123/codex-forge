@@ -76,7 +76,10 @@ from .utils import (
     run_process,
     stable_id,
     windows_alias_key,
+    controller_lock,
+    ControllerAlreadyRunning,
 )
+from .workflows import ProjectWorkflows
 
 
 class CLIArgumentError(ValueError):
@@ -170,6 +173,18 @@ def build_parser() -> argparse.ArgumentParser:
     project_list = project_sub.add_parser("list", help="List projects")
     _add_schema_version_argument(project_list)
     project_list.add_argument("--json", action="store_true")
+    for action in ("plan", "extend", "progress", "resume"):
+        command = project_sub.add_parser(action, help={
+            "plan": "Install an immutable project integration and phase plan",
+            "extend": "Continue from a completed plan with another immutable phase plan",
+            "progress": "Show project integration and phase progress",
+            "resume": "Resume a blocked project plan after resolving its cause",
+        }[action])
+        command.add_argument("project", help="Project id or exact name")
+        if action in ("plan", "extend"):
+            command.add_argument("--file", required=True, help="JSON plan definition")
+        _add_schema_version_argument(command)
+        command.add_argument("--json", action="store_true")
 
     task = sub.add_parser("task", help="Manage tasks")
     task_sub = task.add_subparsers(dest="task_command", required=True)
@@ -222,6 +237,37 @@ def build_parser() -> argparse.ArgumentParser:
     task_show.add_argument("--json", action="store_true")
     task_retry = task_sub.add_parser("retry", help="Retry a failed or blocked task")
     task_retry.add_argument("task_id")
+    blocker = task_sub.add_parser("resolve-blocker", help="Continue a closed model blocker using an unused existing repair slot")
+    blocker.add_argument("task_id")
+    blocker.add_argument("--reason", required=True)
+    blocker.add_argument("--receipt", type=Path, required=True)
+    blocker.add_argument("--receipt-sha256", required=True)
+    _add_schema_version_argument(blocker)
+    blocker.add_argument("--json", action="store_true")
+    handoff = task_sub.add_parser("handoff-prerequisite", help="Import a gated prerequisite and continue one sealed model blocker")
+    handoff.add_argument("task_id")
+    handoff.add_argument("--reason", required=True)
+    handoff.add_argument("--receipt", type=Path)
+    handoff.add_argument("--receipt-sha256")
+    handoff.add_argument("--dry-run", action="store_true")
+    for pin in ("source-task", "source-registration", "source-candidate", "workflow-id", "gate-id", "gate-candidate"):
+        handoff.add_argument("--" + pin)
+    _add_schema_version_argument(handoff)
+    handoff.add_argument("--json", action="store_true")
+    finalization = task_sub.add_parser("finalize-prerequisite", help="Replace a terminal prerequisite and finalize with one review, no repairs")
+    finalization.add_argument("task_id")
+    finalization.add_argument("--reason", required=True)
+    finalization.add_argument("--attestation")
+    finalization.add_argument("--parent-continuation")
+    finalization.add_argument("--receipt", type=Path)
+    finalization.add_argument("--receipt-sha256")
+    finalization.add_argument("--dry-run", action="store_true")
+    for pin in ("source-task", "source-registration", "source-candidate", "workflow-id", "gate-id", "gate-candidate"):
+        finalization.add_argument("--" + pin)
+        finalization.add_argument("--capability-" + pin)
+    finalization.add_argument("--selection-manifest")
+    _add_schema_version_argument(finalization)
+    finalization.add_argument("--json", action="store_true")
     active_states = ", ".join(state.value for state in ACTIVE_TASK_STATES)
     task_delete = task_sub.add_parser(
         "delete",
@@ -528,6 +574,12 @@ def cmd_project_relocate(
             as_json,
             schema_version,
         )
+    if relocation.outcome == "active_workflow":
+        return _structured_failure(
+            "project.relocate", StructuredError(
+                "PROJECT_ACTIVE", "Project acceptance is running; the repository cannot be relocated.", {},
+            ), as_json, schema_version,
+        )
     if relocation.outcome == "active_tasks":
         return _structured_failure(
             "project.relocate",
@@ -581,6 +633,41 @@ def cmd_project_list(
         return 0
     for project in projects:
         print(f"{project.name}\t{project.repo_path}\tbase={project.default_branch}")
+    return 0
+
+
+def cmd_project_workflow(config: ForgeConfig, args: argparse.Namespace, schema_version: str) -> int:
+    db = ForgeDB(config.database_path)
+    db.initialize()
+    project = db.get_project(args.project)
+    command = f"project.{args.project_command}"
+    if not project:
+        return _structured_failure(
+            command, StructuredError("PROJECT_NOT_FOUND", "Project was not found.", {}), args.json, schema_version,
+        )
+    workflows = ProjectWorkflows(config, db)
+    try:
+        if args.project_command == "progress":
+            document = workflows.get(project.id)
+        else:
+            with controller_lock(config.data_root / "controller.lock"):
+                if args.project_command in ("plan", "extend"):
+                    definition = json.loads(Path(args.file).read_text(encoding="utf-8"))
+                    document = workflows.install(project, definition, extend=args.project_command == "extend")
+                else:
+                    document = workflows.resume(project.id)
+    except (ValueError, GitError, OSError) as exc:
+        if not args.json:
+            print(str(exc), file=sys.stderr)
+        return _structured_failure(
+            command, StructuredError("INVALID_ARGUMENT", "Project plan request was refused.", {}),
+            args.json, schema_version,
+        )
+    data = {"project_id": project.id, "plan": workflows.public(document)}
+    if args.json:
+        write_response(command, data=data, schema_version=schema_version)
+    else:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
     return 0
 
 
@@ -771,18 +858,70 @@ def cmd_task_show(
 
 def cmd_task_retry(config: ForgeConfig, task_id: str) -> int:
     db = ForgeDB(config.database_path)
-    task = db.get_task(task_id)
-    if not task:
+    outcome, task = db.retry_task(task_id)
+    if outcome == "not_found":
         print(f"Unknown task: {task_id}", file=sys.stderr)
         return 2
-    if task.attempts >= task.max_attempts:
+    if outcome == "exhausted":
         print(
             f"Task {task_id} exhausted its attempt limit ({task.attempts}/{task.max_attempts}).",
             file=sys.stderr,
         )
         return 1
-    db.update_task(task_id, state=TaskState.READY)
+    if outcome == "invalid_state":
+        print(f"Task {task_id} cannot retry from {task.state.value}.", file=sys.stderr)
+        return 2
     print(f"Task {task_id} returned to READY.")
+    return 0
+
+
+def cmd_task_resolve_blocker(config: ForgeConfig, args: argparse.Namespace, schema_version: str) -> int:
+    orchestrator = None
+    command = getattr(args, "task_command", "resolve-blocker")
+    try:
+        handoff = command == "handoff-prerequisite"
+        if command == "finalize-prerequisite":
+            from .finalization import execute, preflight, terminal_outcome
+
+            if args.dry_run:
+                ForgeDB(config.database_path, read_only=True)
+                if not config.data_root.is_dir():
+                    raise ValueError("An existing controller data root is required for preflight.")
+                with controller_lock(config.data_root / "controller.lock"):
+                    data = preflight(config, args.task_id, args.reason, args.attestation or '', args)
+            else:
+                if not args.receipt or not args.receipt_sha256:
+                    raise ValueError("Pinned prospective receipt is required.")
+                data = terminal_outcome(config, args.task_id, args.reason, args.receipt, args.receipt_sha256)
+                if data is None:
+                    orchestrator = Orchestrator(config, package_root())
+                    data = execute(orchestrator, args.task_id, args.reason, args.receipt, args.receipt_sha256)
+        elif handoff and args.dry_run:
+            from .prerequisites import preflight_handoff
+
+            ForgeDB(config.database_path, read_only=True)  # Refuse before lock setup can create a missing parent.
+            if not config.data_root.is_dir():
+                raise ValueError("An existing controller data root is required for preflight.")
+            with controller_lock(config.data_root / "controller.lock"):
+                data = preflight_handoff(config, args.task_id, args.reason, args)
+        else:
+            if not args.receipt or not args.receipt_sha256:
+                raise ValueError("Pinned receipt is required.")
+            orchestrator = Orchestrator(config, package_root())
+            data = orchestrator.resolve_blocker(args.task_id, args.reason, args.receipt, args.receipt_sha256, prerequisite=handoff)
+    except (ValueError, GitError, OSError, ControllerAlreadyRunning):
+        return _structured_failure(
+            f"task.{command}", StructuredError("INVALID_ARGUMENT", "Blocker continuation was refused.", {}),
+            args.json, schema_version,
+        )
+    finally:
+        if orchestrator is not None:
+            orchestrator.telemetry.shutdown()
+    if args.json:
+        write_response(f"task.{command}", data=data, schema_version=schema_version)
+    else:
+        print(json.dumps(data, indent=2))
+    # Successful invocation is distinct from its task outcome, as with `run --once`.
     return 0
 
 
@@ -1403,6 +1542,8 @@ def main(argv: list[str] | None = None) -> int:
                 return cmd_project_relocate(config, args, schema_version)
             if args.project_command == "delete":
                 return cmd_project_delete(config, args, schema_version)
+            if args.project_command in ("plan", "extend", "progress", "resume"):
+                return cmd_project_workflow(config, args, schema_version)
             return cmd_project_list(config, args.json, schema_version)
         if args.command == "task":
             if args.task_command == "add":
@@ -1411,6 +1552,8 @@ def main(argv: list[str] | None = None) -> int:
                 return cmd_task_list(config, args, schema_version)
             if args.task_command == "show":
                 return cmd_task_show(config, args.task_id, args.json, schema_version)
+            if args.task_command in ("resolve-blocker", "handoff-prerequisite", "finalize-prerequisite"):
+                return cmd_task_resolve_blocker(config, args, schema_version)
             if args.task_command == "delete":
                 return cmd_task_delete(config, args, schema_version)
             if args.task_command == "evidence":

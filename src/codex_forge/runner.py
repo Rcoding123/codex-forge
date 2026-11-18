@@ -12,6 +12,8 @@ from typing import Any
 
 from .config import ForgeConfig
 from .models import CodexRunResult
+from .processes import run_supervised
+from .schema_resources import schema_file
 from .utils import ensure_dir, tail_text
 
 
@@ -500,7 +502,7 @@ def _worker_environment() -> dict[str, str]:
 
 
 class CodexRunner:
-    def __init__(self, config: ForgeConfig, schema_root: Path):
+    def __init__(self, config: ForgeConfig, schema_root: Path | None = None):
         self.config = config
         self.schema_root = schema_root
         self._sandbox_probe: SandboxProbe | None = None
@@ -573,7 +575,11 @@ class CodexRunner:
         usable = None if fallback in RESTRICTED_TOKEN_SANDBOXES else fallback
         return SandboxResolution(requested=requested, sandbox=usable, probe=probe)
 
-    def run(
+    def run(self, *, schema_name: str, **kwargs) -> CodexRunResult:
+        with schema_file(schema_name, self.schema_root) as schema_path:
+            return self._run(schema_path=schema_path, **kwargs)
+
+    def _run(
         self,
         *,
         prompt: str,
@@ -582,7 +588,7 @@ class CodexRunner:
         phase: str,
         model: str,
         effort: str,
-        schema_name: str,
+        schema_path: Path,
         sandbox: str | None = None,
     ) -> CodexRunResult:
         ensure_dir(artifact_dir)
@@ -590,7 +596,6 @@ class CodexRunner:
         final_path = artifact_dir / f"{phase}.final.json"
         stderr_path = artifact_dir / f"{phase}.stderr.log"
         prompt_path = artifact_dir / f"{phase}.prompt.txt"
-        schema_path = self.schema_root / schema_name
         prompt_path.write_text(prompt, encoding="utf-8")
 
         disabled_feature_args = [
@@ -626,7 +631,7 @@ class CodexRunner:
             "w", encoding="utf-8"
         ) as stderr_handle:
             try:
-                process = subprocess.run(
+                process = run_supervised(
                     command,
                     cwd=str(cwd),
                     input=prompt,

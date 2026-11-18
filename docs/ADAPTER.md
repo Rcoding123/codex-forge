@@ -85,7 +85,10 @@ and authentication response. A refused policy yields a typed error.
 
 The request is a closed JSON object; unknown fields and versions are rejected.
 The executable validation is in `adapter/contract.py`; published JSON Schemas
-are in `schemas/adapter-*.schema.json`.
+are packaged in `src/codex_forge/schemas/adapter-*.schema.json` and available
+through `importlib.resources.files("codex_forge").joinpath("schemas", name)`
+after wheel or editable installation. The adapter's generated native-output
+schema is checked against that packaged final schema by the contract tests.
 
 ```json
 {

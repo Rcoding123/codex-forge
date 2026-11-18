@@ -86,6 +86,59 @@ CREATE TABLE IF NOT EXISTS runs (
     started_at TEXT NOT NULL,
     completed_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS execution_checkpoints (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    repository_registration_id TEXT,
+    base_commit TEXT NOT NULL,
+    candidate_commit TEXT,
+    completion_json TEXT,
+    specification_digest TEXT,
+    publication_required INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS project_workflows (
+    project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    document_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS prerequisite_receipts (
+    receipt_sha256 TEXT PRIMARY KEY,
+    source_registration TEXT NOT NULL,
+    source_task TEXT NOT NULL,
+    source_candidate TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    UNIQUE(source_registration,source_task,source_candidate)
+);
+
+CREATE TABLE IF NOT EXISTS prerequisite_events (
+    task_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    event TEXT NOT NULL,
+    document_json TEXT NOT NULL,
+    PRIMARY KEY(task_id,attempt,event)
+);
+
+CREATE TABLE IF NOT EXISTS blocker_continuations (
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    attempt INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    document_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(task_id,attempt)
+);
+
+CREATE TABLE IF NOT EXISTS prerequisite_finalizations (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    parent_id TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL,
+    document_json TEXT NOT NULL,
+    checkpoint_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -143,13 +196,26 @@ class ProjectRelocation:
 
 
 class ForgeDB:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, read_only: bool = False):
         self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.read_only = read_only
+        if read_only:
+            if not path.is_file():
+                raise ValueError("An existing Forge database is required for read-only inspection.")
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=30)
+        try:
+            connection = sqlite3.connect(
+                self.path.absolute().as_uri() + "?mode=ro" if self.read_only else self.path,
+                timeout=30, uri=self.read_only,
+            )
+        except sqlite3.OperationalError as exc:
+            if self.read_only:
+                raise ValueError("The existing Forge database is unavailable for read-only inspection.") from exc
+            raise
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         try:
@@ -446,6 +512,12 @@ class ForgeDB:
             if active:
                 connection.rollback()
                 return ProjectRelocation("active_tasks", project, active_tasks=active)
+            workflow = connection.execute(
+                "SELECT document_json FROM project_workflows WHERE project_id=?", (project.id,),
+            ).fetchone()
+            if workflow and json_loads(workflow[0], {}).get("state") == "GATING":
+                connection.rollback()
+                return ProjectRelocation("active_workflow", project)
             connection.execute(
                 "UPDATE projects SET repo_path=?, updated_at=? WHERE id=?",
                 (target, utc_now(), project.id),
@@ -540,6 +612,47 @@ class ForgeDB:
             row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         return self._task_from_row(row) if row else None
 
+    def execution_checkpoint(self, task_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM execution_checkpoints WHERE task_id=?", (task_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def establish_execution_base(self, task_id: str, registration: str | None, base: str) -> None:
+        """Set once under a write lock, proving the task still names this generation."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            owner = connection.execute(
+                "SELECT p.repository_registration_id FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.id=?",
+                (task_id,),
+            ).fetchone()
+            if not owner or owner[0] != registration:
+                raise ValueError("Execution checkpoint repository generation changed.")
+            connection.execute(
+                "INSERT INTO execution_checkpoints(task_id,repository_registration_id,base_commit,updated_at) "
+                "VALUES(?,?,?,?) ON CONFLICT(task_id) DO NOTHING", (task_id, registration, base, utc_now()),
+            )
+            saved = connection.execute(
+                "SELECT repository_registration_id,base_commit FROM execution_checkpoints WHERE task_id=?", (task_id,),
+            ).fetchone()
+            if tuple(saved) != (registration, base):
+                raise ValueError("Execution checkpoint identity is immutable.")
+
+    def save_completion_checkpoint(
+        self, task_id: str, candidate: str, final: dict, digest: str, publication_required: bool,
+    ) -> None:
+        """Store verified local completion before attempting fallible publication."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "UPDATE execution_checkpoints SET candidate_commit=?,completion_json=?,specification_digest=?,"
+                "publication_required=?,updated_at=? WHERE task_id=? AND candidate_commit IS NULL",
+                (candidate, json_dumps(final), digest, int(publication_required), utc_now(), task_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Execution completion checkpoint already exists or has no base.")
+
     def list_tasks(self, state: TaskState | None = None) -> list[Task]:
         query = "SELECT * FROM tasks"
         params: tuple[str, ...] = ()
@@ -576,11 +689,29 @@ class ForgeDB:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
-                "SELECT * FROM tasks WHERE state=? ORDER BY priority DESC, created_at ASC LIMIT ?",
-                (TaskState.READY.value, limit),
+                "SELECT * FROM tasks WHERE state=? ORDER BY priority DESC, created_at ASC",
+                (TaskState.READY.value,),
             ).fetchall()
+            from .workflows import eligible_task
+
+            workflows = {
+                row["project_id"]: json_loads(row["document_json"], {})
+                for row in connection.execute("SELECT * FROM project_workflows")
+            }
+            active_projects = {
+                row[0] for row in connection.execute(
+                    "SELECT DISTINCT project_id FROM tasks WHERE state IN (?,?,?,?)",
+                    tuple(state.value for state in ACTIVE_TASK_STATES),
+                )
+            }
             now = utc_now()
             for row in rows:
+                if len(claimed) >= limit:
+                    break
+                if row["project_id"] in workflows:
+                    if row["project_id"] in active_projects or not eligible_task(workflows[row["project_id"]], row["id"]):
+                        continue
+                    active_projects.add(row["project_id"])
                 connection.execute(
                     "UPDATE tasks SET state=?,attempts=attempts+1,updated_at=? WHERE id=? AND state=?",
                     (TaskState.IMPLEMENTING.value, now, row["id"], TaskState.READY.value),
@@ -663,6 +794,55 @@ class ForgeDB:
                 raise sqlite3.OperationalError(f"task {task_id} changed state during deletion")
         return ("deleted", task)
 
+    def blocker_continuation(self, task_id: str, attempt: int) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM blocker_continuations WHERE task_id=? AND attempt=?", (task_id, attempt),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def claim_blocker_continuation(self, task_id: str, attempt: int) -> Task:
+        """Claim the reserved repair without ever exposing an exhausted READY task."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            continuation = connection.execute(
+                "SELECT * FROM blocker_continuations WHERE task_id=? AND attempt=?", (task_id, attempt),
+            ).fetchone()
+            completion = connection.execute(
+                "SELECT completion_json FROM execution_checkpoints WHERE task_id=?", (task_id,),
+            ).fetchone()
+            resumable_completion = bool(completion and completion[0] is not None and continuation and continuation["state"] == "CONSUMED")
+            if (not row or row["attempts"] != attempt or row["state"] not in (TaskState.BLOCKED.value, TaskState.FAILED.value)
+                    or not continuation or (continuation["state"] not in ("QUEUED", "CLAIMED") and not resumable_completion)):
+                raise ValueError("Blocker continuation cannot be claimed.")
+            if not resumable_completion:
+                connection.execute(
+                    "UPDATE blocker_continuations SET state='CLAIMED',updated_at=? WHERE task_id=? AND attempt=?",
+                    (utc_now(), task_id, attempt),
+                )
+            connection.execute("UPDATE tasks SET state=?,updated_at=? WHERE id=?", (TaskState.REPAIRING.value, utc_now(), task_id))
+            updated = dict(row)
+            updated["state"] = TaskState.REPAIRING.value
+            return self._task_from_mapping(updated)
+
+    def retry_task(self, task_id: str) -> tuple[str, Task | None]:
+        """Serialize retries with claims and gates; completed/active work cannot reopen."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None:
+                return "not_found", None
+            task = self._task_from_row(row)
+            if task.attempts >= task.max_attempts:
+                return "exhausted", task
+            if task.state not in (TaskState.FAILED, TaskState.BLOCKED, TaskState.NEEDS_DECISION):
+                return "invalid_state", task
+            connection.execute(
+                "UPDATE tasks SET state=?,updated_at=? WHERE id=?", (TaskState.READY.value, utc_now(), task_id),
+            )
+            return "retried", task
+
     def add_decision(
         self,
         task_id: str,
@@ -683,10 +863,42 @@ class ForgeDB:
                 "SELECT * FROM decisions WHERE status='OPEN' ORDER BY created_at"
             ).fetchall()
 
+    def prerequisite_finalization(self, task_id: str) -> dict | None:
+        with self.connect() as connection:
+            if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='prerequisite_finalizations'").fetchone():
+                return None  # Read-only preflight must also work before this additive table is initialized.
+            row = connection.execute("SELECT * FROM prerequisite_finalizations WHERE task_id=?", (task_id,)).fetchone()
+        return dict(row) if row else None
+
     def record_run_start(
         self, task_id: str, phase: str, model: str, effort: str, artifact_dir: Path
     ) -> int:
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            finalization = connection.execute(
+                "SELECT state,checkpoint_json FROM prerequisite_finalizations WHERE task_id=?", (task_id,),
+            ).fetchone()
+            if finalization:
+                if finalization['state'] != 'REVIEW_READY' or phase != 'review':
+                    raise ValueError("Prerequisite finalization permits exactly one independent review and no repairs.")
+                checkpoint = json_loads(finalization['checkpoint_json'], {})
+                checkpoint['review_started'] = True
+                connection.execute(
+                    "UPDATE prerequisite_finalizations SET state='REVIEW_STARTED',checkpoint_json=?,updated_at=? WHERE task_id=?",
+                    (json_dumps(checkpoint), utc_now(), task_id),
+                )
+            task = connection.execute("SELECT attempts FROM tasks WHERE id=?", (task_id,)).fetchone()
+            continuation = connection.execute(
+                "SELECT * FROM blocker_continuations WHERE task_id=? AND attempt=?", (task_id, task[0]),
+            ).fetchone() if task else None
+            if continuation and continuation["state"] == "CLAIMED":
+                document = json_loads(continuation["document_json"], {})
+                if phase != f"validation-repair-{document['repair_slot']}":
+                    raise ValueError("A blocker continuation must consume its reserved repair first.")
+                connection.execute(
+                    "UPDATE blocker_continuations SET state='CONSUMED',updated_at=? WHERE task_id=? AND attempt=?",
+                    (utc_now(), task_id, task[0]),
+                )
             cursor = connection.execute(
                 "INSERT INTO runs(task_id,phase,model,effort,artifact_dir,started_at) VALUES(?,?,?,?,?,?)",
                 (task_id, phase, model, effort, str(artifact_dir), utc_now()),

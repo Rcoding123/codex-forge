@@ -138,7 +138,7 @@ def test_runner_timeout_is_bounded_and_preserved(tmp_path: Path, monkeypatch):
     def timeout(*args, **kwargs):
         raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
 
-    monkeypatch.setattr("codex_forge.runner.subprocess.run", timeout)
+    monkeypatch.setattr("codex_forge.runner.run_supervised", timeout)
     result = CodexRunner(config, schema_root).run(
         prompt="Do work",
         cwd=tmp_path,
