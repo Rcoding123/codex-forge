@@ -6,6 +6,11 @@ Codex Forge turns bounded engineering tasks into durable, independently verified
 
 ## Components
 
+The optional [one-assignment adapter](ADAPTER.md) is a separate native CLI
+entrypoint. It does not enter the controller state flow below or import its
+database/queue. Its caller owns scheduling, routing, retries and task acceptance;
+the adapter owns one invocation, explicit validation and a bounded result.
+
 | Component | Responsibility |
 |---|---|
 | CLI and inbox | Register projects, create tasks, expose status/decisions, and import YAML work items. |

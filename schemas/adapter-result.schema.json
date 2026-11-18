@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Single-assignment Codex adapter result",
+  "description": "A transport/protocol/validation report, never factory acceptance. Metadata is extensible. Schema conformance does not prove completion or validation; the engine derives those from host evidence.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "contract_version",
+    "caller_id",
+    "job_id",
+    "attempt_id",
+    "adapter_status",
+    "factory_acceptance",
+    "transport",
+    "protocol",
+    "semantic",
+    "handoff",
+    "validation",
+    "edit_audit",
+    "usage",
+    "error",
+    "evidence",
+    "unknowns",
+    "duration_s"
+  ],
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "enum": [
+        "adapter/1"
+      ]
+    },
+    "caller_id": {},
+    "job_id": {},
+    "attempt_id": {},
+    "adapter_status": {
+      "type": "string",
+      "enum": [
+        "rejected_preflight",
+        "failed_transport",
+        "failed_protocol",
+        "partial",
+        "validation_failed",
+        "completed"
+      ]
+    },
+    "factory_acceptance": {
+      "type": "string",
+      "enum": [
+        "not_determined"
+      ]
+    },
+    "transport": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "launched"
+      ],
+      "properties": {
+        "launched": {
+          "type": "boolean"
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timed_out": {
+          "type": "boolean"
+        },
+        "cancelled": {
+          "type": "boolean"
+        },
+        "output_limit": {
+          "type": "boolean"
+        },
+        "cleanup_verified": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "duration_s": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "protocol": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "events_parseable": {
+          "type": "boolean"
+        },
+        "final_present": {
+          "type": "boolean"
+        },
+        "schema_valid": {
+          "type": "boolean"
+        }
+      }
+    },
+    "semantic": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "done",
+            "partial",
+            "blocked",
+            "needs_decision"
+          ]
+        },
+        "is_model_claim": {
+          "type": "boolean",
+          "enum": [
+            true
+          ]
+        }
+      }
+    },
+    "handoff": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": true
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "state",
+        "expected",
+        "run",
+        "commands"
+      ],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "not_requested",
+            "not_run",
+            "passed",
+            "failed",
+            "incomplete",
+            "stale"
+          ]
+        },
+        "expected": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "run": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    "edit_audit": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": true
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "error": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": true
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "unknowns": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "duration_s": {
+      "type": "number",
+      "minimum": 0
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

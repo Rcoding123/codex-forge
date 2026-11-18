@@ -24,6 +24,7 @@ dev = ["pytest>=8.3,<9", "ruff>=0.12,<1", "codex-forge[telemetry]"]
 
 [project.scripts]
 forge = "codex_forge.cli:main"
+forge-adapter = "codex_forge.adapter.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

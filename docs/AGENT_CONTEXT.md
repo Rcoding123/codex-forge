@@ -38,6 +38,7 @@ Source in `src/codex_forge/`.
 
 | Subsystem | Start here |
 | --- | --- |
+| One-assignment adapter | `adapter/cli.py`, `adapter/engine.py`, `adapter/contract.py`, `adapter/policy.py`, `adapter/process.py`; `docs/ADAPTER.md`; independent of controller/DB/queue |
 | Task submission / persistence | `task_submission.py` (validation/normalization/serialization), `db.py` (SQLite store), `models.py`; inbox template `templates/task.yaml` |
 | Review / trusted output | `runner.py` (`decode_review_result`, `ReviewTransportError`, conformance), `schemas/review-result.schema.json` |
 | Orchestrator / execution | `orchestrator.py` (claims READY work, phases, limits, recovery), `runner.py` (`CodexRunner`), `usage.py` (token-usage normalization) |
