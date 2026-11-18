@@ -1,0 +1,40 @@
+#!/usr/bin/python3
+"""Configure, build and run named CMake/CTest targets with a compact transcript."""
+import fcntl
+import hashlib
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import os
+
+os.umask(0o077)
+root=Path.cwd().resolve()
+targets=sys.argv[1:]
+if not (root/'CMakeLists.txt').is_file() or not targets or any(not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.+-]*', t) for t in targets):
+    sys.exit('Run in a CMake project root with named test targets.')
+key=hashlib.sha256(os.fsencode(root)).hexdigest()
+build=Path.home()/'.local/state/adapter-launchers/cmake-builds'/key
+build.mkdir(parents=True,exist_ok=True)
+import tempfile
+with (build / ".lock").open("a") as lock, tempfile.NamedTemporaryFile(
+    prefix="check-", suffix=".log", dir=build, delete=False
+) as log:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    def run(args):
+        result=subprocess.run(args,stdout=log,stderr=subprocess.STDOUT)
+        if result.returncode:
+            with open(log.name,'rb') as f:
+                f.seek(max(0,f.seek(0,2)-4000))
+                print(f.read().decode(errors='replace'),file=sys.stderr)
+            sys.exit(f'Command failed ({result.returncode}). Full output: {log.name}')
+    run(['cmake','-S',str(root),'-B',str(build),'-DCMAKE_BUILD_TYPE=Debug'])
+    run(['cmake','--build',str(build),'-j2','--target',*targets])
+    pattern='^('+'|'.join(re.escape(t) for t in targets)+')$'
+    ctest=['ctest','--test-dir',str(build),'-R',pattern]
+    names={e['name'] for e in json.loads(subprocess.check_output(ctest+['--show-only=json-v1']))['tests']}
+    if names!=set(targets):
+        sys.exit(f'Expected registered CTest names {targets}, found {sorted(names)}. Inspect {log.name}')
+    run(ctest+['--output-on-failure','--no-tests=error'])
+    print('Passed:',', '.join(targets),f'(full build/test output: {log.name})')
