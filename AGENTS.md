@@ -49,6 +49,23 @@ disagree, they win.
 - Shared Chat and other clients never open or mutate `forge.db` directly.
 - External clients use supported Forge contracts only.
 
+### One-assignment adapter boundary
+
+`forge-adapter` / `python -m codex_forge.adapter` is a separate, queue-free
+entrypoint. It accepts one caller-bound isolated worktree assignment, launches
+one native subscription-authenticated Codex invocation, runs the caller's
+explicit validation commands, returns layered evidence, and exits. It imports
+no controller, database, queue, knowledge retrieval, or task admission code.
+It owns no task scheduling, model routing, whole-job retries, automatic review,
+repair loops, commits, merges, or worktree lifecycle. The caller owns these and
+task acceptance. Legacy `forge` controller contracts above remain unchanged.
+
+Adapter authentication must fail closed on API keys, custom providers, unknown
+status or unverified mandatory capabilities. Child-only environment sanitation
+must preserve global credentials. Never treat selected context, allowed paths,
+post-generation handoff caps or Git-visible diff audits as OS security or
+generation-token limits. See `docs/ADAPTER.md` for the versioned adapter contract.
+
 ## Controller laws
 
 - Keep runtime dependencies minimal and Windows-first behavior intact.

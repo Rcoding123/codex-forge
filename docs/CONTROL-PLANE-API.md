@@ -150,6 +150,10 @@ Refusal is sanitized `INVALID_ARGUMENT`, exit 2. No submission or frozen-plan sc
 
 ## Supported commands
 
+The queue-free `forge-adapter` entrypoint has a separate `adapter/1` request and
+result contract documented in [ADAPTER.md](ADAPTER.md). It does not register or
+execute durable controller tasks, and does not change this control-plane API.
+
 ```powershell
 .\forge.ps1 status --json
 .\forge.ps1 project list --json

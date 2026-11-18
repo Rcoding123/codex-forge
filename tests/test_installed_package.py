@@ -35,6 +35,23 @@ def test_wheel_resources_and_complete_task_outside_checkout(tmp_path):
     with ZipFile(wheel) as archive:
         assert "codex_forge/schemas/review-result.schema.json" in archive.namelist()
         assert "codex_forge/schemas/task-result.schema.json" in archive.namelist()
+        for schema_name in ("adapter-request", "adapter-final", "adapter-result"):
+            assert f"codex_forge/schemas/{schema_name}.schema.json" in archive.namelist()
+        from codex_forge.adapter.contract import FINAL_SCHEMA
+
+        assert json.loads(archive.read("codex_forge/schemas/adapter-final.schema.json")) == FINAL_SCHEMA
+        entry_points = archive.read("codex_forge-0.2.0.dist-info/entry_points.txt").decode("utf-8")
+        assert "forge-adapter = codex_forge.adapter.cli:main" in entry_points
+
+    # The installed single-assignment entrypoint must import independently of
+    # the source checkout. --help performs no authentication or inference.
+    adapter_entry = (
+        f"import sys; sys.path.insert(0,{str(installed)!r}); "
+        "import codex_forge; "
+        f"assert str(codex_forge.__file__).startswith({str(installed)!r}); "
+        "from codex_forge.adapter.cli import main; raise SystemExit(main())"
+    )
+    checked([sys.executable, "-I", "-c", adapter_entry, "--help"], cwd=tmp_path)
 
     worker = tmp_path / "fake-codex.py"
     worker.write_text(

@@ -1,0 +1,338 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Single-assignment Codex adapter request",
+  "description": "Host validation additionally checks native absolute paths, source hashes/ranges, capabilities, subscription, and worktree identity. JSON Schema defaults document host defaults; schema validation does not insert them.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "enum": [
+        "adapter/1"
+      ]
+    },
+    "caller_id": {
+      "type": "string",
+      "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000]*$",
+      "minLength": 1
+    },
+    "job_id": {
+      "type": "string",
+      "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000]*$",
+      "minLength": 1
+    },
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000]*$",
+      "minLength": 1
+    },
+    "role": {
+      "type": "string",
+      "enum": [
+        "implementation"
+      ]
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000]*$",
+          "minLength": 1,
+          "description": "Absolute native path to an existing isolated linked Git worktree."
+        },
+        "base_revision": {
+          "type": "string",
+          "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000]*$",
+          "minLength": 1
+        },
+        "expected_state": {
+          "type": "string",
+          "enum": [
+            "clean",
+            "dirty"
+          ]
+        },
+        "expected_files": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000]*$",
+            "minLength": 1,
+            "description": "Contained relative path; native paths, drive/root prefixes, colon, empty/dot/dot-dot components are rejected by the host."
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$"
+          },
+          "default": {}
+        }
+      },
+      "required": [
+        "path",
+        "base_revision",
+        "expected_state"
+      ]
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "objective": {
+          "type": "string",
+          "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000]*$",
+          "minLength": 1
+        },
+        "acceptance": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[^\\u0000]*$"
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[^\\u0000]*$"
+          }
+        },
+        "scope": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[^\\u0000]*$"
+          }
+        },
+        "out_of_scope": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[^\\u0000]*$"
+          }
+        }
+      },
+      "required": [
+        "objective",
+        "acceptance",
+        "constraints",
+        "scope",
+        "out_of_scope"
+      ]
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sandbox": {
+          "type": "string",
+          "enum": [
+            "workspace-write",
+            "read-only",
+            "danger-full-access"
+          ]
+        },
+        "allowed_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000]*$",
+            "minLength": 1,
+            "description": "Contained relative path; native paths, drive/root prefixes, colon, empty/dot/dot-dot components are rejected by the host."
+          }
+        },
+        "tool_network": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "deny",
+            "unspecified"
+          ]
+        },
+        "search": {
+          "type": "boolean",
+          "enum": [
+            false
+          ]
+        },
+        "mcp": {
+          "type": "boolean",
+          "enum": [
+            false
+          ]
+        },
+        "plugins": {
+          "type": "boolean",
+          "enum": [
+            false
+          ]
+        }
+      },
+      "required": [
+        "sandbox",
+        "allowed_paths",
+        "tool_network",
+        "search",
+        "mcp",
+        "plugins"
+      ]
+    },
+    "context": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000]*$",
+            "minLength": 1,
+            "description": "Contained relative path; native paths, drive/root prefixes, colon, empty/dot/dot-dot components are rejected by the host."
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$"
+          },
+          "max_bytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "start_line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "end_line": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "path",
+          "sha256",
+          "max_bytes"
+        ],
+        "dependentRequired": {
+          "start_line": [
+            "end_line"
+          ],
+          "end_line": [
+            "start_line"
+          ]
+        },
+        "description": "The full source file is hashed; line range is inclusive and end_line must be >= start_line (host checked)."
+      }
+    },
+    "model": {
+      "type": "string",
+      "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000]*$",
+      "minLength": 1
+    },
+    "effort": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ]
+    },
+    "deadline_s": {
+      "type": "number",
+      "minimum": 0.001,
+      "maximum": 1800
+    },
+    "artifact_root": {
+      "type": "string",
+      "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000]*$",
+      "minLength": 1,
+      "description": "Absolute native artifact root outside the source and adapter repositories."
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "authoritative": {
+          "type": "boolean"
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "argv": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$"
+                },
+                "minItems": 1
+              },
+              "timeout_s": {
+                "type": "number",
+                "minimum": 0.001
+              }
+            },
+            "required": [
+              "argv",
+              "timeout_s"
+            ]
+          }
+        }
+      },
+      "required": [
+        "authoritative",
+        "commands"
+      ],
+      "default": {
+        "authoritative": false,
+        "commands": []
+      }
+    },
+    "required_capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[^\\u0000]*$"
+      },
+      "default": []
+    },
+    "handoff_chars": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 8000
+    },
+    "context_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 24000
+    },
+    "request_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 64000
+    },
+    "output_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 8388608
+    }
+  },
+  "required": [
+    "contract_version",
+    "caller_id",
+    "job_id",
+    "attempt_id",
+    "role",
+    "workspace",
+    "task",
+    "policy",
+    "context",
+    "model",
+    "effort",
+    "deadline_s",
+    "artifact_root"
+  ]
+}

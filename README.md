@@ -1,5 +1,13 @@
 # Codex Forge
 
+For a single-assignment, queue-free native Codex interface, use
+[`forge-adapter`](docs/ADAPTER.md). It supplies focused context, compact handoffs,
+owned process cleanup and caller-specified validation while preserving the
+existing Forge controller described below. Its Python/console entrypoint also
+supports Linux x86-64 and ARM64 with native Codex; see the adapter's Linux setup.
+The controller, bootstrap and scheduled-service instructions below remain
+Windows-specific.
+
 Codex Forge is a Windows-first controller for long-running, non-interactive Codex engineering work on an isolated development VPS. It stores a durable task queue in SQLite, gives each task its own Git branch and worktree, runs implementation and independent review as separate Codex phases, validates results outside the model, bounds retries and usage, commits successful work locally, and retains raw evidence outside the source repository.
 
 Release: **v0.2.0**. License: [MIT](LICENSE).
