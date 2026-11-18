@@ -282,3 +282,11 @@ exec /path/to/forge-venv/bin/python -I -B -m codex_forge.adapter.prompt \
 
 Pass --model with an exact native model ID to override the prompt launcher's
 default. Review the resulting candidate and run project tests as usual.
+
+## Native interactive terminal
+
+For a trusted project, route a bare terminal invocation through the following command in your user launcher. Supply the native binary path independently of the launcher on PATH. The interactive process uses full native editing permissions and subscription preflight. Headless assignments keep their existing entry point.
+
+```sh
+exec "/path/to/forge-venv/bin/python" -I -B /path/to/codex-forge/scripts/interactive-codex.py --native /absolute/path/to/native/codex --codex-home /path/to/signed-in/codex-home
+```
